@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": ".",
+    "outDir": ".tools/handoff",
+    "noEmitOnError": true,
+    "declaration": true,
+    "declarationMap": false,
+    "sourceMap": false
+  },
+  "include": ["scripts/hosted-server.ts", "src/server/**/*.ts", "src/contracts/**/*.ts"]
+}

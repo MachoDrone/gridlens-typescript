@@ -1,0 +1,201 @@
+import { createFleetSnapshotValidator, isFleetRoster } from "../contracts/fleet.ts";
+import type { FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
+
+type Timer = unknown;
+export interface FleetTransportOptions {
+  fetch?: typeof globalThis.fetch;
+  now?: () => number;
+  setTimer?: (callback: () => void, delayMs: number) => Timer;
+  clearTimer?: (timer: Timer) => void;
+  /** Includes response headers, body and finite stream completion. */
+  finiteTimeoutMs?: number;
+  /** Metadata normally emits only once per five-minute refresh. */
+  watchIdleTimeoutMs?: number;
+  responseByteLimit?: number;
+  frameByteLimit?: number;
+}
+export class FleetTransportError extends Error {
+  readonly status: number | undefined;
+  constructor(message: string, status?: number) { super(message); this.name = "FleetTransportError"; this.status = status; }
+}
+export function fleetReadError(error: unknown, fallback: string): string {
+  return error instanceof FleetTransportError && (error.status === 401 || error.status === 403)
+    ? "Fleet access is unavailable. Your current session is not authorized to read this fleet." : fallback;
+}
+
+interface ReadOptions<R extends FleetResource> {
+  addresses: readonly string[];
+  signal?: AbortSignal;
+  current?: () => boolean;
+  onSnapshot?: (snapshot: FleetSnapshots[R], complete: boolean, envelope: Record<string, unknown>) => void;
+  progressive?: boolean;
+}
+export interface FleetRosterSnapshot { addresses: string[]; error: string | null }
+
+/** One bounded browser transport; provider adapters and domain projections stay separate. */
+export function createFleetTransport(options: FleetTransportOptions = {}) {
+  const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
+  const now = options.now ?? Date.now;
+  const setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
+  const clearTimer = options.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>));
+  const finiteTimeout = options.finiteTimeoutMs ?? 120_000;
+  const idleTimeout = options.watchIdleTimeoutMs ?? 360_000;
+  const responseLimit = options.responseByteLimit ?? 16 * 1024 * 1024;
+  const frameLimit = options.frameByteLimit ?? 2 * 1024 * 1024;
+  for (const limit of [finiteTimeout, idleTimeout, responseLimit, frameLimit]) {
+    if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Fleet transport limits must be positive integers.");
+  }
+
+  async function request<T>(url: string, external: AbortSignal | undefined, current: (() => boolean) | undefined,
+    progressive: boolean, consume: (response: Response, control: {
+      wait: <V>(pending: Promise<V>) => Promise<V>; check: () => void; watch: () => void; progress: () => void;
+    }) => Promise<T>, rosterFailure = false): Promise<T> {
+    if (!/^\/(?!\/)/.test(url) || /[\\#\u0000-\u0020]/.test(url)) {
+      throw new FleetTransportError("Fleet requests require a same-origin path.");
+    }
+    const abort = new AbortController();
+    let rejectCanceled!: (reason: unknown) => void;
+    const canceled = new Promise<never>((_resolve, reject) => { rejectCanceled = reject; });
+    void canceled.catch(() => {});
+    let timer: Timer;
+    let watching = false;
+    const stop = (reason: unknown): void => { abort.abort(reason); rejectCanceled(reason); };
+    const cancel = (): void => stop(external?.reason ?? new DOMException("Fleet read canceled.", "AbortError"));
+    const timeout = (): void => stop(new FleetTransportError("Fleet response timed out."));
+    const schedule = (ms: number): void => { if (timer !== undefined) clearTimer(timer); timer = setTimer(timeout, ms); };
+    const check = (): void => {
+      abort.signal.throwIfAborted();
+      if (current && !current()) throw new DOMException("Fleet read is no longer active.", "AbortError");
+    };
+    const wait = <V>(pending: Promise<V>): Promise<V> => Promise.race([pending, canceled]);
+    if (external?.aborted) cancel();
+    else external?.addEventListener("abort", cancel, { once: true });
+    schedule(finiteTimeout);
+    let response: Response | undefined;
+    let completed = false;
+    try {
+      check();
+      response = await wait(fetcher(url, { method: "GET", cache: "no-store", redirect: "error",
+        credentials: "same-origin", signal: abort.signal,
+        headers: { Accept: progressive ? "application/x-ndjson, application/json" : "application/json" } }));
+      check();
+      if (response.redirected || !response.ok && (!rosterFailure || response.status === 401 || response.status === 403)) {
+        throw new FleetTransportError(`Fleet request failed (HTTP ${response.status}).`, response.status);
+      }
+      const value = await consume(response, { wait, check,
+        watch: () => { watching = true; schedule(idleTimeout); },
+        progress: () => { if (watching) schedule(idleTimeout); },
+      });
+      completed = true;
+      return value;
+    } finally {
+      clearTimer(timer);
+      external?.removeEventListener("abort", cancel);
+      // Successful EOF already releases the transport. Only unfinished or
+      // rejected work is canceled; a completed feed must not appear aborted.
+      if (!completed) {
+        abort.abort();
+        if (!response?.body?.locked) void response?.body?.cancel().catch(() => {});
+      }
+    }
+  }
+
+  async function parse(response: Response, control: {
+    wait: <V>(pending: Promise<V>) => Promise<V>; check: () => void; watch: () => void; progress: () => void;
+  }, allowStream: boolean, accept: (value: unknown, streaming: boolean) => boolean,
+  hostCount: number): Promise<void> {
+    const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
+    const streaming = type === "application/x-ndjson";
+    if (streaming && !allowStream || !streaming && type !== "application/json") throw new FleetTransportError("Fleet response has an unsupported content type.");
+    const declared = response.headers.get("content-length");
+    if (declared !== null && (!/^\d+$/.test(declared) || Number(declared) > responseLimit)) {
+      throw new FleetTransportError("Fleet response exceeded its size limit.");
+    }
+    if (!response.body) throw new FleetTransportError("Fleet response body is missing.");
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder("utf-8", { fatal: true });
+    const encoder = new TextEncoder();
+    let buffer = "";
+    let bytes = 0;
+    let frames = 0;
+    let watching = false;
+    let reachedEOF = false;
+    let accountingAt = now();
+    const line = (value: string): void => {
+      if (!value.trim()) return;
+      const maximumFrames = watching ? hostCount * 20 + 20 : hostCount * 10 + 10;
+      if (++frames > maximumFrames || encoder.encode(value).byteLength > frameLimit) {
+        throw new FleetTransportError("Fleet stream exceeded its frame limit.");
+      }
+      const payload: unknown = JSON.parse(value);
+      const becameWatch = accept(payload, true);
+      if (becameWatch && !watching) { watching = true; control.watch(); }
+      control.progress();
+    };
+    try {
+      for (;;) {
+        control.check();
+        const chunk = await control.wait(reader.read());
+        control.check();
+        if (chunk.done) { reachedEOF = true; break; }
+        if (watching && now() - accountingAt >= 60_000) { accountingAt = now(); bytes = 0; frames = 0; }
+        bytes += chunk.value.byteLength;
+        if (bytes > responseLimit) throw new FleetTransportError("Fleet response exceeded its size limit.");
+        buffer += decoder.decode(chunk.value, { stream: true });
+        if (streaming) {
+          let newline: number;
+          while ((newline = buffer.indexOf("\n")) >= 0) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); }
+          if (encoder.encode(buffer).byteLength > frameLimit) throw new FleetTransportError("Fleet stream exceeded its frame limit.");
+        }
+      }
+      buffer += decoder.decode();
+      if (streaming) line(buffer);
+      else accept(JSON.parse(buffer), false);
+    } finally {
+      // Never await an uncooperative producer's cancellation promise.
+      if (!reachedEOF) void reader.cancel().catch(() => {});
+      reader.releaseLock();
+    }
+  }
+
+  return {
+    async read<R extends FleetResource>(resource: R, url: string, readOptions: ReadOptions<R>): Promise<FleetSnapshots[R]> {
+      if (!isFleetRoster(readOptions.addresses)) throw new FleetTransportError("Fleet roster identities are invalid.");
+      const validSnapshot = createFleetSnapshotValidator(readOptions.addresses);
+      return request(url, readOptions.signal, readOptions.current, readOptions.progressive ?? true, async (response, control) => {
+        let final: FleetSnapshots[R] | undefined;
+        let completed = false;
+        await parse(response, control, readOptions.progressive ?? true, (value, streaming) => {
+          control.check();
+          const payload = value as Record<string, unknown>;
+          const complete = streaming ? payload?.complete : true;
+          if (completed || typeof complete !== "boolean" || !validSnapshot(resource, value, complete)) {
+            throw new FleetTransportError("Fleet response contained invalid observations or identities.");
+          }
+          if (payload.failed === true) throw new FleetTransportError("Fleet source could not complete its response.");
+          readOptions.onSnapshot?.(value, complete, payload);
+          completed = complete;
+          if (complete) final = value;
+          return payload.watching === true;
+        }, readOptions.addresses.length);
+        if (!completed || !final) throw new FleetTransportError("Fleet stream ended before its final snapshot.");
+        return final;
+      });
+    },
+    async roster(url: string, signal?: AbortSignal): Promise<FleetRosterSnapshot> {
+      return request(url, signal, undefined, false, async (response, control) => {
+        let roster: FleetRosterSnapshot | undefined;
+        await parse(response, control, false, value => {
+          if (!value || typeof value !== "object" || !("addresses" in value) || !isFleetRoster(value.addresses) ||
+              !("error" in value) || value.error !== null && (typeof value.error !== "string" || value.error.length > 1024)) {
+            throw new FleetTransportError("Fleet host roster is invalid.");
+          }
+          roster = { addresses: value.addresses, error: value.error };
+          if (!response.ok && roster.error === null) throw new FleetTransportError(`Fleet request failed (HTTP ${response.status}).`, response.status);
+          return false;
+        }, 0);
+        return roster!;
+      }, true);
+    },
+  };
+}

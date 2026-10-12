@@ -1,0 +1,32 @@
+import type { SortColumn } from "../fleet/sort.ts";
+
+/** Brief column meanings; header help remains available on both sides of the divider. */
+export const COLUMN_HELP = {
+  stakedNos: "NOS in the staking vault, including tokens being released, compared with the market target; this alone does not prove eligibility.",
+  status: "Nosana’s reported host classification, such as Community, Premium or Rejected, separate from job activity.",
+  pc: "The local PC name or group for this host; the required machine mapping is not connected yet.",
+  ip: "This host’s global and private PC addresses; the private address needs local mapping that is not connected yet.",
+  hostAddress: "Public Nosana host identity, shown as five characters or the full address; the link opens Nosana Explorer.",
+  sol: "SOL held by the host address, rounded down to three decimals; details retain the exact balance.",
+  api: "Whether the host’s Node API could be reached; this does not establish host or job activity.",
+  state: "Reported host activity; a dim amber spinner means activity is unknown, not a confirmed restart.",
+  queued: "The host’s position out of all hosts in its market queue, not an estimated waiting time.",
+  duration: "Elapsed job time against its reported limit; red begins more than five minutes over the unchanged limit.",
+  nodeRuntime: "Time since the node process started; this reading is not connected yet.",
+  dailyUptime: "Host uptime for the last completed provider day; no verified uptime source is connected yet.",
+  latestJob: "Latest verified job; job history is not connected yet, while current assignment details appear in Duration.",
+  ram: "Reported memory capacity in GB, rounded to whole GB here; current memory usage is not measured.",
+  disk: "Reported disk size in GB; this reading does not show current free space.",
+  dl: "Saved download speed in Mbps; this page does not run a new speed test.",
+  ul: "Saved upload speed in Mbps; this page does not run a new speed test.",
+  ping: "Saved network latency in milliseconds, with the original measurement time unavailable.",
+  rewards: "Exact NOS available to claim for host uptime; this source is not connected yet.",
+  nos: "NOS in the host’s standard token account, excluding other token accounts, staked NOS and rewards.",
+  market: "The reported Nosana market for this host, shown as a full label or its first two characters.",
+  gpuID: "Physical GPU index on the PC, requiring local hardware mapping that is not connected yet.",
+  currentNode: "Reported Nosana package version; pink marks a prerelease, and no comparison with the latest release is available.",
+  cuda: "CUDA driver version reported by the host.",
+  nvidia: "Reported NVIDIA driver version, shown as its major version or full version.",
+  cpu: "Reported processor model, shown as a short label or full description.",
+  system: "Reported system release, shown in short or full form; a kernel release does not identify the full OS distribution.",
+} as const satisfies Record<SortColumn, string>;

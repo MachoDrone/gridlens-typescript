@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1">
+    <meta name="color-scheme" content="dark">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+    <title>GridLens Fleet · Local preview</title>
+    <link rel="icon" href="data:,">
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/preview/main.js"></script>
+  </head>
+  <body>
+    <aside id="sidebar" class="sidebar" aria-label="Main menu">
+      <!-- Nosana mark supplied by the operator: https://nosana.com/_astro/logo.CMtc99Nt_1gJMog.svg -->
+      <div class="sidebar-logo">
+        <svg width="26" height="22" role="img" aria-label="Nosana" focusable="false" viewBox="0 0 72 59" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M19.9638 5.45803C18.9009 3.4673 17.1522 1.8714 15.0007 0.928991C12.8493 -0.0134164 10.4215 -0.247084 8.11066 0.265864C5.79985 0.778812 3.74158 2.00831 2.26944 3.75506C0.79732 5.50182 -0.0023687 7.66345 5.27035e-06 9.88956V58.7543H6.96216V9.88956C6.97457 9.13983 7.25335 8.41539 7.75439 7.8309C8.25542 7.2464 8.9501 6.83525 9.72846 6.6625C10.5068 6.48975 11.3244 6.56529 12.0518 6.87714C12.7792 7.18899 13.3749 7.71936 13.7446 8.38429L37.2015 52.2278H29.4124L17.1837 29.3793H9.39473L25.1226 58.7543H48.4895L19.9638 5.45803Z" fill="#10E80C"/>
+        <path d="M64.0582 0.0078125V48.8727C64.0434 49.6204 63.7635 50.3423 63.2628 50.9246C62.7623 51.5071 62.0691 51.9167 61.2927 52.0891C60.5165 52.2616 59.701 52.1871 58.9748 51.8772C58.2486 51.5674 57.6529 51.04 57.2818 50.3779L33.825 6.53435H41.614L53.8426 29.3828H61.6316L45.9099 0.0078125H22.543L51.0565 53.3041C52.1214 55.2931 53.8709 56.8869 56.0221 57.8279C58.1733 58.769 60.6004 59.002 62.9104 58.4894C65.2205 57.9767 67.2783 56.7485 68.7512 55.0032C70.224 53.258 71.0257 51.0979 71.0263 48.8727V0.0078125H64.0582Z" fill="#10E80C"/>
+        </svg>
+      </div>
+      <div class="sidebar-header">
+        <button id="sidebar-toggle" class="sidebar-toggle" type="button" aria-label="Collapse menu" aria-expanded="true" aria-controls="sidebar-content" title="Collapse menu">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true">
+            <rect x="3" y="4" width="18" height="16" rx="3"></rect>
+            <path d="M9 4v16"></path>
+            <path class="sidebar-chevron" d="m15 9-3 3 3 3"></path>
+          </svg>
+        </button>
+      </div>
+      <div id="sidebar-content" class="sidebar-content">
+        <button id="sidebar-clear-sort" type="button" aria-label="Clear sort" title="Return to PC order, ascending">
+          <svg width="20" height="20" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m3 3 6 6m0-6-6 6"></path></svg>
+          <span class="sidebar-label">Clear sort</span>
+        </button>
+        <nav class="sidebar-navigation" aria-label="Main navigation">
+          <button class="sidebar-item" type="button" disabled aria-label="Alerts (unavailable)" title="Alerts is not available yet">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"></path>
+            </svg>
+            <span class="sidebar-label">Alerts</span>
+          </button>
+        </nav>
+        <div class="sidebar-footer sidebar-label">
+          <nav class="sidebar-links" aria-label="Nosana links">
+            <span class="sidebar-link"><a href="https://deploy.nosana.com/" target="_blank" rel="noopener noreferrer">Deploy<span class="sidebar-external" aria-hidden="true">↗</span></a></span>
+            <span class="sidebar-link"><a href="https://explore.nosana.com/" target="_blank" rel="noopener noreferrer">Explore<span class="sidebar-external" aria-hidden="true">↗</span></a></span>
+            <span class="sidebar-link"><a href="https://host.nosana.com/" target="_blank" rel="noopener noreferrer">Host<span class="sidebar-external" aria-hidden="true">↗</span></a></span>
+            <span class="sidebar-link"><a href="https://stake.nosana.com/" target="_blank" rel="noopener noreferrer">Stake<span class="sidebar-external" aria-hidden="true">↗</span></a></span>
+          </nav>
+          <p>© 2026 Nosana</p>
+        </div>
+      </div>
+    </aside>
+    <main>
+      <header class="fleet-title-row">
+        <div class="fleet-title-content">
+          <div class="fleet-heading">
+            <h1>Nosana Fleet</h1>
+            <span id="host-count" class="fleet-count"><span id="host-count-number"></span><span id="host-count-unit" class="host-count-unit"></span></span>
+          </div>
+          <button id="clear-sort" type="button" title="Return to PC order, ascending" aria-label="Clear sort"><span class="clear-sort-label">Clear sort</span><svg class="clear-sort-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m3 3 6 6m0-6-6 6"></path></svg></button>
+          <div id="fleet-connection" class="fleet-connection" data-connection-state="checking" role="status" aria-live="polite" aria-atomic="true" title="Connection to Fleet; individual readings have their own freshness.">
+            <span data-connection-label>Checking…</span>
+            <span class="connection-ball" aria-hidden="true"></span>
+          </div>
+        </div>
+      </header>
+      <p id="input-error" class="input-error" role="alert" hidden></p>
+      <p id="sample-clock" class="sample-clock"></p>
+      <span id="queued-duration-help" class="sr-only">Combine or separate the columns; Q and D label overlapping readings, and selecting the reading opens both sources.</span>
+      <span id="ip-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="hostAddress-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="duration-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="market-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="stakedNos-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="nvidia-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="cpu-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <span id="system-mode-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
+      <div class="fleet-table-wrap" role="region" aria-label="Fleet table" aria-describedby="table-help">
+        <table class="fleet-table">
+          <caption id="fleet-caption" class="sr-only">Supplied Nosana Host Addresses. All other fields are unknown.</caption>
+          <thead><tr id="column-headings"></tr></thead>
+          <tbody id="fleet-rows"></tbody>
+        </table>
+      </div>
+      <section class="scenario-controls" aria-label="Scenario selection">
+        <label for="scenario">Scenario</label>
+        <select id="scenario"></select>
+      </section>
+      <details id="preview-tools" class="preview-tools">
+        <summary>Tools &amp; diagnostics</summary>
+        <div class="preview-tools-content">
+          <p class="wordmark">GridLens <span class="preview-tag">Preview</span></p>
+          <p class="sample-notice"><strong id="data-label">Supplied addresses</strong> · <span id="connection-note">Public Nosana metadata</span> · <span id="local-source-note">Red headings: local data / mapping · connection pending</span></p>
+          <div class="fleet-status" role="status" aria-live="polite" aria-atomic="true">
+            <span id="inventory-summary">Loading supplied Host Addresses…</span>
+          </div>
+          <div class="table-help" id="table-help">
+            <span>Click a column to sort; click again to reverse.</span>
+            <button id="column-info" type="button" title="Explain the selected column">Column info</button>
+            <span id="sort-status" role="status" aria-live="polite" aria-atomic="true"></span>
+          </div>
+          <section class="sample-controls" aria-label="Sample controls">
+            <button id="advance-time" type="button">Advance 30s</button>
+            <button id="refresh-view" type="button" title="Refresh data; use the browser’s Reload button to load a new preview version.">Refresh view</button>
+            <button id="reset-sample" type="button">Reset sample</button>
+            <label for="state-motion">State animation</label>
+            <select id="state-motion" aria-describedby="state-motion-help" title="On animates State icons; System follows your browser’s motion preference; Off keeps them still.">
+              <option value="on" selected>On</option>
+              <option value="system">System</option>
+              <option value="off">Off</option>
+            </select>
+            <span id="state-motion-help" class="sr-only">On includes dimmed and unknown icons; System follows your browser’s motion preference; Off keeps State icons still.</span>
+            <label for="duration-motion">Duration animation</label>
+            <select id="duration-motion" aria-describedby="duration-motion-help" title="On shows the Duration glare; System follows your browser’s motion preference; Off hides the glare.">
+              <option value="on" selected>On</option>
+              <option value="system">System</option>
+              <option value="off">Off</option>
+            </select>
+            <span id="duration-motion-help" class="sr-only">On includes retained live estimates; System follows your browser’s motion preference; Off hides the glare.</span>
+          </section>
+          <p id="scenario-description" class="scenario-description"></p>
+          <p id="sol-status" class="scenario-description" role="status" hidden></p>
+          <p id="nos-status" class="scenario-description" role="status" hidden></p>
+          <p id="staking-status" class="scenario-description" role="status" hidden></p>
+          <p id="metadata-status" class="scenario-description" role="status" hidden></p>
+          <p id="node-info-status" class="scenario-description" role="status" hidden></p>
+          <p id="jobs-status" class="scenario-description" role="status" hidden></p>
+          <p id="queue-status" class="scenario-description" role="status" hidden></p>
+          <p id="clock-help" class="clock-help" hidden>The sample clock is paused. Advance time to age the observations; refreshing the view keeps their original times.</p>
+          <details id="inventory-details" class="inventory-details" open hidden>
+            <summary>Inventory by PC <span id="pc-count"></span></summary>
+            <ul id="runtime-scopes" class="runtime-scopes"></ul>
+          </details>
+          <footer>
+            <p id="preview-description">Selected reported Nosana metadata. A dash means unknown, not zero.</p>
+            <p>Additional backend fields remain deferred.</p>
+          </footer>
+        </div>
+      </details>
+    </main>
+    <dialog id="info-dialog" aria-labelledby="info-title">
+      <header class="dialog-heading"><h2 id="info-title"></h2><button id="close-info" type="button" aria-label="Close"><span class="close-info-label">Close</span><svg class="close-info-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m3 3 6 6m0-6-6 6"></path></svg></button></header>
+      <div id="info-body"></div>
+    </dialog>
+    <noscript><p>This local preview needs JavaScript to display Host Addresses or sample inventory.</p></noscript>
+  </body>
+</html>

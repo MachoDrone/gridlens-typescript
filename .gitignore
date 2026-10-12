@@ -1,0 +1,52 @@
+# Dependencies and generated output
+node_modules/
+dist/
+build/
+out/
+coverage/
+.cache/
+.turbo/
+*.tsbuildinfo
+playwright-report/
+test-results/
+*.log
+
+# Local configuration, credentials and private runtime material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.conf
+id_rsa*
+id_ed25519*
+credentials/
+identities/
+secrets/
+keys/
+wallets/
+backups/
+runtime/
+data/
+# Operator-supplied host lists belong outside the public source tree.
+*.csv
+hosts.json
+real200.json
+rosters/
+*.sqlite*
+*.db
+*.tar
+*.tar.gz
+*.tgz
+*.zip
+
+# Local evidence and developer artifacts
+.tools/
+evidence/
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~

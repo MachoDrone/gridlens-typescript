@@ -1,0 +1,33 @@
+{
+  "name": "gridlens-typescript",
+  "version": "0.0.0",
+  "private": true,
+  "description": "GridLens: TypeScript fleet dashboard for Nosana hosts",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": "24.14.1",
+    "npm": "11.11.0"
+  },
+  "packageManager": "npm@11.11.0",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --test test/*.test.ts",
+    "build": "node scripts/build.ts",
+    "build:handoff": "node scripts/build-handoff.ts",
+    "dev": "npm run build && node scripts/preview-server.ts",
+    "dev:handoff": "npm run build && node scripts/hosting-lab.ts",
+    "preview": "node scripts/preview-server.ts",
+    "test:browser": "npm run build && playwright test",
+    "check": "npm run typecheck && npm test && npm run test:browser"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "24.13.6",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "@solana-program/token": "0.17.0",
+    "@solana/kit": "8.4.0"
+  }
+}

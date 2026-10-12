@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": [],
+    "noEmit": false,
+    "rewriteRelativeImportExtensions": true,
+    "rootDir": "src",
+    "outDir": "dist",
+    "noEmitOnError": true
+  },
+  "include": ["src/preview/**/*.ts", "src/fleet/**/*.ts", "src/contracts/**/*.ts"]
+}
