@@ -272,6 +272,38 @@ make every row of a large fleet fit simultaneously. Dialogs must retain reachabl
 close controls and non-overlapping targets. See [UX_CONSISTENCY](UX_CONSISTENCY.md)
 for complete-component journeys and physical-device acceptance limits.
 
+## Maintenance backlog
+
+These follow-ups reduce the effort and risk of changing browser orchestration.
+Use small, behavior-preserving changes within the current TypeScript/DOM
+architecture; keep server-side provider caches and budgets separate.
+
+- [ ] **Give each browser data source clear state ownership.** Extract controllers
+  from `src/preview/main.ts` that own their records, loading/error state, active
+  requests and timers. Start with SOL/NOS's similar lifecycle code while retaining
+  their different progressive and finite response handling.
+- [ ] **Share lifecycle and timer mechanics.** Reuse the existing transport,
+  clock and deadline helpers for visibility, cancellation, cleanup and timer
+  management. Preserve each source's cadence and retry rules, the distinction
+  between elapsed time and freshness uncertainty, and expiry deadlines captured
+  when cells render current. Do not collapse the sources into one polling cadence.
+- [ ] **Give rendering and details their own modules.** Extract row/cell rendering,
+  popup ownership and combined Queued / Duration layout from `main.ts`. Preserve
+  connected controls and SVGs, animation timelines, keyboard focus and dialog
+  return targets through refreshes, sorting and layout changes.
+- [ ] **Review stylesheet boundaries after the orchestration work.** Group styles
+  by feature and shared tokens where that improves ownership and navigation.
+  Preserve cascade order, role colors, responsive zoom and motion preferences;
+  file length alone is not a reason to split the stylesheet.
+
+For each extraction, compare existing isolated scenarios before and after: source
+request counts, cache reuse, population latency, original timestamps, expiry,
+hide/resume, focus and animation behavior. Include the large-roster and
+render-crossing-expiry cases; prevent extra reads or repeated short timer loops.
+When modules or styles move, update browser asset allowlists and build/handoff
+copying, and verify the copied artifact. These are backlog items, not completed
+refactors or promised performance improvements.
+
 ## Hosting and feature backlog
 
 Optional request reuse and bandwidth integration ideas are tracked separately in

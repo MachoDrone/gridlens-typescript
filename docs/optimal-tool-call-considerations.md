@@ -6,6 +6,9 @@ Track possible request reductions and a consistent bandwidth data source for
 GridLens. This TODO does not authorize changes to collection or display behavior;
 select and verify each implementation separately.
 
+UI maintainability tasks are in the
+[maintenance backlog](DEVELOPMENT.md#maintenance-backlog).
+
 ## Current baseline
 
 The October 13, 2026 audit found no accidental per-host multiplication of market
