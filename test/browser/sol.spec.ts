@@ -41,7 +41,7 @@ async function start(solProvider: NonNullable<Options["solProvider"]>, overrides
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, hostsFile, port: 0, solProvider,
+  const server = await startPreviewServer({ now: () => NOW, stakingProvider: emptyStaking, nosProvider: emptyNos, hostsFile, port: 0, solProvider,
     metadataProvider: noMetadata, nodeInfoProvider: noState, jobProvider: emptyJobs, queueProvider: emptyQueue,
     ...overrides,
   });
@@ -175,6 +175,7 @@ test("failed reads retain gray values and unfinished refreshes expire locally wi
 
 test("visible unfocused pages poll; hidden work aborts all consumers and immediate resume ignores unfinished responses", async ({ page }) => {
   const reads = { metadata: 0, state: 0, jobs: 0, queue: 0, sol: 0, nos: 0, staking: 0 };
+  let serverNow = NOW;
   const aborted = new Set<string>();
   let release!: () => void;
   const delayed = new Promise<void>(resolve => { release = resolve; });
@@ -189,8 +190,11 @@ test("visible unfocused pages poll; hidden work aborts all consumers and immedia
   await page.goto(await start(async (_input, signal) => {
     const slow = delayAll;
     await reading("sol", signal);
-    return snapshot(await page.evaluate(() => Date.now()), [slow ? "99000000000" : "1000000000"]);
+    const at = await page.evaluate(() => Date.now());
+    serverNow = at;
+    return snapshot(at, [slow ? "99000000000" : "1000000000"]);
   }, {
+    now: () => serverNow,
     metadataProvider: async (input, signal) => { await reading("metadata", signal); return noMetadata(input); },
     nodeInfoProvider: async (input, signal) => { await reading("state", signal); return noState(input); },
     jobProvider: async (input, signal) => { await reading("jobs", signal); return emptyJobs(input); },
@@ -278,12 +282,16 @@ test("two viewers share pending work and hiding one preserves the other viewer's
 test("resume fetches overdue metadata once without replaying hidden refresh intervals", async ({ page }) => {
   let metadataCalls = 0;
   let solCalls = 0;
+  let serverNow = NOW;
   await page.goto(await start(async () => {
     solCalls++;
-    return snapshot(await page.evaluate(() => Date.now()));
-  }, { metadataProvider: async input => {
+    const at = await page.evaluate(() => Date.now());
+    serverNow = at;
+    return snapshot(at);
+  }, { now: () => serverNow, metadataProvider: async input => {
     metadataCalls++;
     const at = await page.evaluate(() => Date.now());
+    serverNow = at;
     return { hosts: input.map(address => ({ address, values: null, fetchedAtMs: at,
       retained: false, error: null, marketError: null })) };
   } }));

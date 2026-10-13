@@ -8,6 +8,7 @@ import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
 const origin = "https://blockchain-indexer.k8s.prd.nos.ci";
 const failureBackoffMs = 60_000;
 const maximumBackoffMs = 15 * 60_000;
+const workWindowMs = 60_000;
 const responseByteLimit = 2 * 1024 * 1024;
 const states = ["QUEUED", "RUNNING", "COMPLETED", "STOPPED"] as const;
 const budgets = [{ count: 16, window: 30_000 }, { count: 400, window: 3_600_000 },
@@ -17,6 +18,8 @@ const budgets = [{ count: 16, window: 30_000 }, { count: 400, window: 3_600_000 
 const discoveryBudgets = [{ count: 14, window: 30_000 }, { count: 336, window: 3_600_000 },
   { count: 900, window: 86_400_000 }] as const;
 type RequestKind = "discovery" | "rediscovery" | "maintenance";
+
+interface WorkWindow { readonly deadline: number }
 
 export type JobProvider = ((addresses: readonly string[], signal?: AbortSignal,
   onUpdate?: (snapshot: JobSnapshot) => void) => Promise<JobSnapshot>) & {
@@ -89,10 +92,12 @@ function blank(address: string): JobRecord {
 
 /** Anonymous on-demand reads. All caches, dispatch budgets and pauses are shared in memory. */
 export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Date.now, timeoutMs = 8_000,
-  activityPriority = () => 2 }: {
+  elapsedNow = () => performance.now(), activityPriority = () => 2 }: {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   timeoutMs?: number;
+  /** Monotonic elapsed time bounds finite reads independently of evidence time. */
+  elapsedNow?: () => number;
   /** Priority from validated backend activity; never from rendered State. */
   activityPriority?: (address: string, time: number) => number;
 } = {}): JobProvider {
@@ -216,7 +221,7 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
   }
 
   function dispatchPriority(kind: RequestKind, entries: readonly HostCache[]): readonly number[] {
-    if (kind === "discovery") return [0, 0, 0, entries[0]!.order];
+    if (kind === "discovery") return [0, activityPriority(entries[0]!.record.address, now()), 0, entries[0]!.order];
     if (kind === "maintenance") {
       // Expiring evidence always leads, ordered by its original check time.
       // Otherwise backend transition hints order already due batches. Fresh
@@ -240,8 +245,14 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
   }
 
   async function json(path: string, signal: AbortSignal, kind: RequestKind, entries: readonly HostCache[],
-    body?: { addresses: string[] }): Promise<unknown> {
+    window: WorkWindow, body?: { addresses: string[] }): Promise<unknown> {
     return limited(async () => {
+      // Finish this finite read with a complete pending/cache snapshot instead
+      // of holding its browser stream open behind a whole slow roster. Existing
+      // requests drain normally; unstarted work spends no quota or failure count.
+      if (elapsedNow() >= window.deadline) {
+        throw new DeferredRequest("Nosana job lookup is pending for the next bounded read.", now());
+      }
       reserve(kind);
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -287,7 +298,10 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
         throw new RequestError(controller.signal.aborted ? "Nosana jobs request timed out."
           : "Nosana jobs request could not be completed.");
       } finally { clearTimeout(timer); }
-    }, signal, () => dispatchPriority(kind, entries));
+    }, signal, () => elapsedNow() >= window.deadline
+      // Expired work must leave the queue before another viewer's eligible work
+      // can keep this response open. Older windows drain first without fetching.
+      ? [-1, window.deadline, entries[0]!.order] : dispatchPriority(kind, entries));
   }
 
   function adaptiveBackoff(attempts: number): number {
@@ -350,13 +364,13 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
     }
   }
 
-  async function discover(entry: HostCache, signal: AbortSignal): Promise<void> {
+  async function discover(entry: HostCache, signal: AbortSignal, window: WorkWindow): Promise<void> {
     throwIfAborted(signal);
     const revision = entry.revision;
     try {
       const job = assignment(entry.record.address, await json(`/jobs/?${new URLSearchParams({
         node: entry.record.address, state: "RUNNING", limit: "2",
-      })}`, signal, discoveryKind(entry), [entry]));
+      })}`, signal, discoveryKind(entry), [entry], window));
       throwIfAborted(signal);
       entry.lastLookupAt = now();
       if (job) rejectConflictingOwner(entry, job);
@@ -372,12 +386,12 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
     }
   }
 
-  async function refreshBatch(entries: HostCache[], signal: AbortSignal): Promise<void> {
+  async function refreshBatch(entries: HostCache[], signal: AbortSignal, window: WorkWindow): Promise<void> {
     throwIfAborted(signal);
     const expected = new Map(entries.map(entry => [entry.record.job!.address, entry]));
     const revisions = new Map(entries.map(entry => [entry, entry.revision]));
     try {
-      const payload = await json("/jobs/batch", signal, "maintenance", entries, { addresses: [...expected.keys()] });
+      const payload = await json("/jobs/batch", signal, "maintenance", entries, window, { addresses: [...expected.keys()] });
       throwIfAborted(signal);
       if (!Array.isArray(payload) || payload.length > expected.size) {
         throw new RequestError("Nosana jobs batch response contained an invalid list.");
@@ -410,7 +424,10 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
           failure(entry, new RequestError("The known job is missing, moved or has unverified end timing; rechecking assignment."), "maintenance");
         }
         entry.forceDiscovery = true;
-        await discover(entry, signal);
+        // Replacement discovery is already due. If this response's work window
+        // ends first, do not turn its unattempted lookup into empty/failure backoff.
+        entry.nextAttemptAt = now();
+        await discover(entry, signal, window);
       }));
     } catch (error) { throwIfAborted(signal); entries.forEach(entry => failure(entry, error, "maintenance")); }
   }
@@ -427,6 +444,7 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
 
   const provider: JobProvider = async (addresses, signal, onUpdate) => {
     throwIfAborted(signal);
+    const window: WorkWindow = { deadline: elapsedNow() + workWindowMs };
     if (addresses.some(address => !isMetadataAddress(address)) || new Set(addresses).size !== addresses.length) {
       throw new Error("Job input must contain unique validated Host Addresses.");
     }
@@ -483,14 +501,16 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
       if (batch.length) batch.push(...coalescible);
       // Submit the same initial lane ordering used at each shared dispatch. The
       // limiter reconsiders it whenever either of the two request slots opens.
-      discoveries.sort((one, two) => one.lastLookupAt - two.lastLookupAt || one.order - two.order);
+      discoveries.sort((one, two) => one.lastLookupAt === -Infinity && two.lastLookupAt === -Infinity
+        ? comparePriority(dispatchPriority("discovery", [one]), dispatchPriority("discovery", [two]))
+        : one.lastLookupAt - two.lastLookupAt || one.order - two.order);
       const enqueueDiscovery = (entry: HostCache): void => {
-        work.push(start([entry], operationSignal => discover(entry, operationSignal), signal));
+        work.push(start([entry], operationSignal => discover(entry, operationSignal, window), signal));
       };
       discoveries.filter(entry => entry.lastLookupAt === -Infinity).forEach(enqueueDiscovery);
       for (let offset = 0; offset < batch.length; offset += 100) {
         const entries = batch.slice(offset, offset + 100);
-        work.push(start(entries, operationSignal => refreshBatch(entries, operationSignal), signal));
+        work.push(start(entries, operationSignal => refreshBatch(entries, operationSignal, window), signal));
       }
       discoveries.filter(entry => entry.lastLookupAt !== -Infinity).forEach(enqueueDiscovery);
       await Promise.all(work);

@@ -53,7 +53,7 @@ export function previewPort(arguments_: readonly string[]): number {
 
 /** Developer-only preview. Port zero is allowed for isolated tests. */
 export async function startPreviewServer(
-  { directory = defaultDirectory, port = 4173, hostsFile, real200HostsFile, onHostsInputError, metadataProvider, nodeInfoProvider, jobProvider, queueProvider, solProvider, nosProvider, stakingProvider }: {
+  { directory = defaultDirectory, port = 4173, hostsFile, real200HostsFile, onHostsInputError, metadataProvider, nodeInfoProvider, jobProvider, queueProvider, solProvider, nosProvider, stakingProvider, now = Date.now }: {
     directory?: string;
     port?: number;
     hostsFile?: string;
@@ -66,6 +66,8 @@ export async function startPreviewServer(
     solProvider?: SolProvider;
     nosProvider?: NosProvider;
     stakingProvider?: StakingProvider;
+    /** Wire-envelope time only; never renews provider evidence or scheduling. */
+    now?: () => number;
   } = {},
 ): Promise<Server> {
   if (!Number.isInteger(port) || port < 0 || port > 65535) {
@@ -140,7 +142,7 @@ export async function startPreviewServer(
   const routes: Record<string, {
     read: Read;
     watch?: () => Read | undefined;
-    empty?: unknown;
+    empty?: Snapshot;
     failure: (addresses: readonly string[]) => Snapshot;
   }> = {
     "/preview/metadata.json": {
@@ -281,7 +283,7 @@ export async function startPreviewServer(
     const scenario = scenarios[0] === "real200" ? "real200" : "supplied";
     const input = inputs[scenario];
     if (path === "/preview/hosts.json") {
-      const inputBody = Buffer.from(JSON.stringify(input));
+      const inputBody = Buffer.from(JSON.stringify({ ...input, ...(!input.error ? { serverTimeMs: now() } : {}) }));
       response.writeHead(input.error ? 503 : 200, {
         "Content-Type": "application/json; charset=utf-8",
         "Content-Length": inputBody.byteLength,
@@ -298,9 +300,9 @@ export async function startPreviewServer(
         response.end();
         return;
       }
-      const send = (status: number, snapshot: unknown): void => {
+      const send = (status: number, snapshot: Snapshot): void => {
         if (response.destroyed || response.writableEnded) return;
-        const body = Buffer.from(JSON.stringify(snapshot));
+        const body = Buffer.from(JSON.stringify({ ...snapshot, serverTimeMs: now() }));
         response.writeHead(status, {
           "Content-Type": "application/json; charset=utf-8", "Content-Length": body.byteLength,
         });
@@ -327,7 +329,7 @@ export async function startPreviewServer(
         if (response.writableLength > 2 * 1024 * 1024) {
           consumer.abort(); response.destroy(); return;
         }
-        response.write(JSON.stringify({ ...snapshot, complete, ...(watch ? { watching: true } : {}), ...(failed ? { failed: true } : {}) }) + "\n");
+        response.write(JSON.stringify({ ...snapshot, complete, ...(watch ? { watching: true } : {}), ...(failed ? { failed: true } : {}), serverTimeMs: now() }) + "\n");
         if (complete) response.end();
       };
       void sharedRoutes(`${scenario}:${path}${watch ? ":watch" : ""}`,

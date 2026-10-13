@@ -158,8 +158,8 @@ test("newer queue evidence retires timing and job-backed State permanently until
   assert.equal(queued.state.short, "?");
   assert.equal(queued.eligibleJob, undefined);
   const expired = project(history, { job: running, nowMs: now + 60_000 });
-  assert.equal(expired.duration.text, "—");
-  assert.match(expired.duration.description, /No running assignment/);
+  assert.equal(expired.duration.text, "Populating..");
+  assert.match(expired.duration.description, /current assignment timing is unconfirmed/);
   assert.equal(expired.state.current, null);
   const equal = project(history, { job: job(now + 10_000), nowMs: now + 60_000 });
   assert.equal(equal.duration.kind, "unknown");
@@ -199,7 +199,7 @@ test("explicit queued State retires the counter with an arrow for its original d
   const view = project(history, { job: job(), state: queued, nowMs: now + 10_000 });
   assert.equal(view.duration.kind, "queue");
   assert.match(view.duration.description, /No ordered queue rank/);
-  assert.equal(project(history, { job: job(), state: queued, nowMs: now + 40_000 }).duration.text, "—");
+  assert.equal(project(history, { job: job(), state: queued, nowMs: now + 40_000 }).duration.text, "Populating..");
   assert.equal(project(history, { job: job(), nowMs: now + 50_000 }).duration.kind, "unknown");
 });
 
@@ -214,7 +214,7 @@ test("queue failure, absence or market change removes the arrow without reviving
     project(history, { job: job() });
     assert.equal(project(history, { queue: queue(now + 10_000), job: job(), nowMs: now + 10_000 }).duration.kind, "queue");
     const view = project(history, { ...change, job: job(), nowMs: now + 15_000 });
-    assert.equal(view.duration.text, "—");
+    assert.equal(view.duration.text, "Populating..");
     assert.equal(view.eligibleJob, undefined);
   }
 });
@@ -236,7 +236,7 @@ test("completion and successful absence cannot be undone by expired or cached ol
     const history = new LiveActivityDisplay();
     project(history, { job: job() });
     const done = project(history, { job: ended, nowMs: now + 10_000 });
-    assert.equal(done.duration.text, "—");
+    assert.equal(done.duration.text, ended.error === null ? "—" : "Populating..");
     assert.equal(done.state.current, null);
     assert.equal(done.state.reported, null);
     assert.equal(project(history, { job: job(), nowMs: now + 86_400_000 }).duration.kind, "unknown");
@@ -249,9 +249,90 @@ test("fresh contrary Node proof removes a queue arrow while preserving counter s
   const membership = queue(now + 10_000);
   project(history, { queue: membership, job: job(), nowMs: now + 10_000 });
   const view = project(history, { queue: membership, job: job(), state: node("RUNNING_JOB", now + 10_000), nowMs: now + 15_000 });
-  assert.equal(view.duration.text, "—");
+  assert.equal(view.duration.text, "Populating..");
   assert.equal(view.state.current, "RUNNING_JOB");
   assert.equal(view.eligibleJob, undefined);
+  const replay = project(history, { queue: membership, job: job(), nowMs: now + 20_000 });
+  assert.equal(replay.duration.text, "Populating..");
+  assert.equal(replay.eligibleJob, undefined);
+});
+
+test("absence expiry preserves retirement and does not resurrect a cached old counter", () => {
+  const history = new LiveActivityDisplay();
+  project(history, { job: job() });
+  const absent = job(now + 10_000, { job: null });
+  assert.equal(project(history, { job: absent, nowMs: now + 10_000 }).duration.text, "—");
+  assert.equal(project(history, { job: absent, nowMs: absent.validUntilMs! - 1 }).duration.freshness, "current");
+  const expired = project(history, { job: absent, nowMs: absent.validUntilMs! });
+  assert.equal(expired.duration.text, "Populating..");
+  assert.equal(expired.duration.freshness, "unknown");
+  assert.equal(expired.duration.validUntilMs, absent.validUntilMs);
+  assert.equal(project(history, { job: job(), nowMs: now + 200_000 }).duration.text, "Populating..");
+  const replacement = job(now + 200_001, { job: { ...job().job!, address: replacementAddress } });
+  assert.equal(project(history, { job: replacement, nowMs: now + 200_001 }).durationJob?.job?.address, replacementAddress);
+});
+
+test("retirement projections expose only their selected original queue or absence deadline", () => {
+  for (const retirement of [
+    { queue: queue(now + 10_000), deadline: now + 40_000 },
+    { state: node("QUEUED", now + 10_000), deadline: now + 40_000 },
+    { job: job(now + 10_000, { job: null }), deadline: now + 190_000 },
+  ]) {
+    const history = new LiveActivityDisplay();
+    project(history, { job: job() });
+    const { deadline, ...input } = retirement;
+    assert.equal(project(history, { ...input, nowMs: now + 10_000 }).duration.validUntilMs, deadline);
+    assert.equal(project(history, { job: job(), nowMs: now + 200_000 }).duration.validUntilMs, deadline);
+  }
+  const missing = project(new LiveActivityDisplay());
+  assert.equal(missing.duration.validUntilMs, undefined);
+  const malformed = project(new LiveActivityDisplay(), { job: job(now, { job: null, validUntilMs: now + 180_001 }) });
+  assert.equal(malformed.duration.validUntilMs, null);
+});
+
+test("newer explicit or reconciled running proof invalidates old absence through expiry and cache replay", () => {
+  for (const running of [node("RUNNING_JOB", now + 20_000), node("OTHER", now + 20_000, {
+    activity: { state: "RUNNING_JOB", source: "nosana-indexer", checkedAtMs: now + 20_000,
+      validUntilMs: now + 50_000, error: null },
+  })]) {
+    const history = new LiveActivityDisplay();
+    project(history, { job: job() });
+    const absent = job(now + 10_000, { job: null });
+    assert.equal(project(history, { job: absent, nowMs: now + 10_000 }).duration.text, "—");
+    const view = project(history, { job: absent, state: running, nowMs: now + 20_000 });
+    assert.equal(view.duration.text, "Populating..");
+    assert.equal(view.durationJob, undefined);
+    assert.equal(view.state.current, "RUNNING_JOB");
+    for (const state of [undefined, node("OTHER", now + 60_000), node("RUNNING_JOB", now)]) {
+      assert.equal(project(history, { job: absent, state, nowMs: now + 60_000 }).duration.text, "Populating..");
+    }
+    assert.equal(project(history, { job: job(), nowMs: now + 61_000 }).duration.text, "Populating..");
+    assert.equal(project(history, { job: job(now + 62_000, { job: null }), nowMs: now + 62_000 }).duration.text, "—");
+  }
+});
+
+test("invalid running evidence cannot discard a current absence", () => {
+  for (const state of [node("RUNNING_JOB", now - 1), node("RUNNING_JOB", now + 10_000, { address: other }),
+    node("RUNNING_JOB", now + 10_000, { error: "HTTP 503" }), node("RUNNING_JOB", now + 10_000, { retained: true }),
+    node("RUNNING_JOB", now + 10_000, { validUntilMs: null }), node("RUNNING_JOB", now + 30_000)]) {
+    const view = project(new LiveActivityDisplay(), { job: job(now, { job: null }), state, nowMs: now + 20_000 });
+    assert.equal(view.duration.text, "—");
+  }
+});
+
+test("failed absence stays unknown through old success replay and recovers only on a newer check", () => {
+  const history = new LiveActivityDisplay();
+  const absent = job(now, { job: null });
+  assert.equal(project(history, { job: absent }).duration.text, "—");
+  const failed = { ...absent, error: "HTTP 429", failedAtMs: now + 10_000 };
+  assert.equal(project(history, { job: failed, nowMs: now + 10_000 }).duration.text, "Populating..");
+  assert.equal(project(history, { job: absent, nowMs: now + 20_000 }).duration.text, "Populating..");
+  assert.equal(project(history, { job: job(now + 21_000, { job: null }), nowMs: now + 21_000 }).duration.text, "—");
+  assert.equal(project(history, { jobsError: "Preview disconnected", nowMs: now + 22_000 }).duration.text, "Populating..");
+  assert.equal(project(history, { job: job(now + 21_000, { job: null }), nowMs: now + 23_000 }).duration.text, "Populating..");
+  for (const validUntilMs of [null, now, now + 180_001]) {
+    assert.equal(project(new LiveActivityDisplay(), { job: job(now, { job: null, validUntilMs }) }).duration.text, "Populating..");
+  }
 });
 
 test("malformed contrary Node deadlines cannot retire valid running timing", () => {

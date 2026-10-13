@@ -38,14 +38,14 @@ const noState = async (input: readonly string[]) => ({ hosts: input.map(address 
   address, values: null, fetchedAtMs: null, validUntilMs: null, retained: false, error: null,
 })) });
 
-async function start(nosProvider: NonNullable<Options["nosProvider"]>, extraRoster?: readonly string[]): Promise<string> {
+async function start(nosProvider: NonNullable<Options["nosProvider"]>, extraRoster?: readonly string[], now = () => NOW): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "gridlens-nos-browser-"));
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
   const real200HostsFile = join(directory, "real200.json");
   await writeFile(real200HostsFile, JSON.stringify(extraRoster ?? []));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, hostsFile, real200HostsFile, port: 0, nosProvider,
+  const server = await startPreviewServer({ now, stakingProvider: emptyStaking, hostsFile, real200HostsFile, port: 0, nosProvider,
     metadataProvider: noMetadata, nodeInfoProvider: noState, jobProvider: emptyJobs, queueProvider: emptyQueue,
     solProvider: emptySol,
   });
@@ -197,6 +197,7 @@ test("pending reads expire after three minutes without loading churn and failure
 
 test("NOS polls unfocused visible pages, cancels hidden work and resumes overdue without accepting old results", async ({ page }) => {
   let calls = 0;
+  let serverNow = NOW;
   let canceled = false;
   let release!: () => void;
   const delayed = new Promise<void>(resolve => { release = resolve; });
@@ -206,8 +207,12 @@ test("NOS polls unfocused visible pages, cancels hidden work and resumes overdue
       signal?.addEventListener("abort", () => { canceled = true; }, { once: true });
       await delayed;
     }
-    return snapshot(await page.evaluate(() => Date.now()), [call === 3 ? "99000000" : call === 2 ? "2000000" : "1000000"]);
-  }));
+    const at = await page.evaluate(() => Date.now());
+    // The resumed reply is emitted now even though earlier observations and
+    // canceled work retain their original source times.
+    serverNow = at;
+    return snapshot(at, [call === 3 ? "99000000" : call === 2 ? "2000000" : "1000000"]);
+  }, undefined, () => serverNow));
   await openPreviewTools(page);
   await expect(cell(page)).toHaveText("1");
   await page.evaluate(() => {

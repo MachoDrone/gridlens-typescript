@@ -19,13 +19,23 @@ import { blankStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../src/fleet/st
 
 const fixtureFiles = [
   "contracts/fleet.js", "preview/fleet-config.js", "preview/fleet-transport.js",
-  "preview/sidebar.js", "preview/viewport.js", "preview/table-scroll.js", "preview/connection.js",
+  "preview/evidence-clock.js", "preview/refresh-deadline.js", "preview/sidebar.js", "preview/viewport.js", "preview/table-scroll.js", "preview/connection.js",
   "index.html", "styles.css", "preview/main.js", "preview/fixtures.js", "fleet/freshness.js", "fleet/sort.js", "fleet/ip-display.js", "fleet/duration.js", "fleet/market-display.js", "fleet/hardware-display.js", "fleet/host-metadata.js",
   "fleet/node-info.js", "fleet/node-state.js", "fleet/node-api.js", "fleet/status-display.js", "preview/state-refresh.js", "preview/info-content.js", "preview/column-help.js",
   "fleet/jobs.js", "fleet/live-duration.js", "fleet/live-activity.js", "fleet/queue.js", "fleet/queued-duration.js", "fleet/sol.js", "fleet/nos.js", "fleet/staking.js", "fleet/staking-view.js",
 ];
 
 const addresses = Array.from({ length: 8 }, (_, index) => `${"1".repeat(31)}${index + 2}`);
+
+/** Source-contract assertions exclude the server-owned transmission clock. */
+function parseSnapshot(body: string) {
+  const value = JSON.parse(body);
+  if (value.serverTimeMs !== undefined) {
+    assert(Number.isSafeInteger(value.serverTimeMs) && value.serverTimeMs >= 0);
+    delete value.serverTimeMs;
+  }
+  return value;
+}
 
 function fixtureDirectory(t: TestContext): string {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-preview-test-"));
@@ -218,7 +228,7 @@ test("supplied addresses are served in file order with no cache and no file sele
   assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
   assert.equal(result.headers["cache-control"], "no-store");
   assert.equal(result.headers["x-content-type-options"], "nosniff");
-  assert.deepEqual(JSON.parse(result.body), { addresses, error: null });
+  assert.deepEqual(parseSnapshot(result.body), { addresses, error: null });
   const head = await read(server, "/preview/hosts.json", "HEAD");
   assert.equal(head.status, 200);
   assert.equal(head.body, "");
@@ -229,10 +239,10 @@ test("input stays a startup snapshot until an explicit server restart", async (t
   const directory = fixtureDirectory(t);
   const server = await runningServer(t, directory);
   writeFileSync(join(directory, "hosts.json"), JSON.stringify([addresses[2], addresses[0]]));
-  assert.deepEqual(JSON.parse((await read(server, "/preview/hosts.json")).body), { addresses, error: null });
+  assert.deepEqual(parseSnapshot((await read(server, "/preview/hosts.json")).body), { addresses, error: null });
   await close(server);
   const restarted = await runningServer(t, directory);
-  assert.deepEqual(JSON.parse((await read(restarted, "/preview/hosts.json")).body), {
+  assert.deepEqual(parseSnapshot((await read(restarted, "/preview/hosts.json")).body), {
     addresses: [addresses[2], addresses[0]], error: null,
   });
 });
@@ -246,7 +256,7 @@ test("missing or invalid input reports failure without changing files or losing 
   t.after(() => close(missing));
   const response = await read(missing, "/preview/hosts.json");
   assert.equal(response.status, 503);
-  const payload = JSON.parse(response.body) as { addresses: unknown[]; error: string };
+  const payload = parseSnapshot(response.body) as { addresses: unknown[]; error: string };
   assert.deepEqual(payload.addresses, []);
   assert.match(payload.error, /Host Address file .*Input is missing \(ENOENT\).*restart/);
   assert.deepEqual(errors, [payload.error]);
@@ -261,8 +271,8 @@ test("missing or invalid input reports failure without changing files or losing 
   const invalid = await runningServer(t, directory);
   const invalidResponse = await read(invalid, "/preview/hosts.json");
   assert.equal(invalidResponse.status, 503);
-  assert.deepEqual(JSON.parse(invalidResponse.body).addresses, []);
-  assert.match(JSON.parse(invalidResponse.body).error, /Entry 2/);
+  assert.deepEqual(parseSnapshot(invalidResponse.body).addresses, []);
+  assert.match(parseSnapshot(invalidResponse.body).error, /Entry 2/);
   assert.equal(readFileSync(invalidFile, "utf8"), invalidContents);
   assert.deepEqual(readdirSync(directory), before);
 });
@@ -276,7 +286,7 @@ test("restarting and reading preserve supplied input and separate backup hashes"
   const before = [digest(hostsFile), digest(backupFile)];
   for (let restart = 0; restart < 2; restart++) {
     const server = await runningServer(t, directory);
-    assert.deepEqual(JSON.parse((await read(server, "/preview/hosts.json")).body), { addresses, error: null });
+    assert.deepEqual(parseSnapshot((await read(server, "/preview/hosts.json")).body), { addresses, error: null });
     assert.equal((await read(server, "/hosts.json.backup")).status, 404);
     await close(server);
     assert.deepEqual([digest(hostsFile), digest(backupFile)], before);
@@ -289,7 +299,7 @@ test("an intentionally empty supplied array is successful with zero addresses", 
   const server = await runningServer(t, directory);
   const result = await read(server, "/preview/hosts.json");
   assert.equal(result.status, 200);
-  assert.deepEqual(JSON.parse(result.body), { addresses: [], error: null });
+  assert.deepEqual(parseSnapshot(result.body), { addresses: [], error: null });
 });
 
 test("Real200 uses a separate immutable startup list without replacing supplied hosts or accepting arbitrary scenario inputs", async t => {
@@ -300,10 +310,10 @@ test("Real200 uses a separate immutable startup list without replacing supplied 
   const server = await startPreviewServer({ directory, hostsFile: join(directory, "hosts.json"), real200HostsFile, port: 0 });
   t.after(() => close(server));
   writeFileSync(real200HostsFile, JSON.stringify([addresses[0]]));
-  assert.deepEqual(JSON.parse((await read(server, "/preview/hosts.json")).body), { addresses, error: null });
+  assert.deepEqual(parseSnapshot((await read(server, "/preview/hosts.json")).body), { addresses, error: null });
   const selected = await read(server, "/preview/hosts.json?scenario=real200&file=hosts.json&address=untrusted");
   assert.equal(selected.status, 200);
-  assert.deepEqual(JSON.parse(selected.body), { addresses: realAddresses, error: null });
+  assert.deepEqual(parseSnapshot(selected.body), { addresses: realAddresses, error: null });
   assert.equal((await read(server, "/real200.json")).status, 404);
   for (const query of ["scenario=unknown", "scenario=real200&scenario=supplied", "scenario=../../hosts.json"]) {
     assert.equal((await read(server, `/preview/hosts.json?${query}`)).status, 400);
@@ -326,21 +336,21 @@ test("missing or invalid Real200 stays unavailable without substituting the supp
     assert.equal((await read(server, "/preview/hosts.json")).status, 200);
     const selected = await read(server, "/preview/hosts.json?scenario=real200");
     assert.equal(selected.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(selected.body).addresses, []);
-    if (contents !== "[]") assert.match(JSON.parse(selected.body).error, /Host Address file/);
+    assert.deepEqual(parseSnapshot(selected.body).addresses, []);
+    if (contents !== "[]") assert.match(parseSnapshot(selected.body).error, /Host Address file/);
     const data = await read(server, "/preview/sol.json?scenario=real200");
     assert.equal(data.status, selected.status);
-    assert.deepEqual(JSON.parse(data.body), { hosts: [], nextRefreshAtMs: null });
+    assert.deepEqual(parseSnapshot(data.body), { hosts: [], nextRefreshAtMs: null });
     const nos = await read(server, "/preview/nos.json?scenario=real200");
     assert.equal(nos.status, selected.status);
-    assert.deepEqual(JSON.parse(nos.body), { hosts: [], nextRefreshAtMs: null });
+    assert.deepEqual(parseSnapshot(nos.body), { hosts: [], nextRefreshAtMs: null });
     assert.equal((await read(server, "/preview/hosts.json?scenario=real200", "HEAD")).status, selected.status);
     await close(server);
   }
   const isolated = await runningServer(t, directory);
   const unconfigured = await read(isolated, "/preview/hosts.json?scenario=real200");
   assert.equal(unconfigured.status, 503);
-  assert.match(JSON.parse(unconfigured.body).error, /Real200.*not configured/);
+  assert.match(parseSnapshot(unconfigured.body).error, /Real200.*not configured/);
   assert.equal(calls, 0);
 });
 
@@ -402,7 +412,7 @@ test("Real200 queue dependencies use the Real200 metadata roster and keep it ali
   assert.deepEqual(calls[0]!.addresses, realAddresses);
   assert.equal(calls[0]!.signal.aborted, false);
   calls[0]!.release();
-  const snapshot = JSON.parse(await queue.result);
+  const snapshot = parseSnapshot(await queue.result);
   assert.deepEqual(snapshot.hosts.map((row: { address: string }) => row.address), realAddresses);
 });
 
@@ -436,7 +446,7 @@ test("metadata requests use only the startup addresses, deduplicate overlaps, an
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(Number(result.headers["content-length"]), Buffer.byteLength(result.body));
@@ -458,7 +468,7 @@ test("empty, invalid and missing input never call the metadata provider", async 
     t.after(() => close(server));
     const result = await read(server, "/preview/metadata.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [] });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [] });
     assert.equal((await read(server, "/preview/metadata.json", "HEAD")).status, result.status);
     await close(server);
   }
@@ -475,7 +485,7 @@ test("unexpected metadata provider failures return bounded per-host diagnostics 
   const result = await read(server, "/preview/metadata.json");
   assert.equal(result.status, 502);
   assert(!result.body.includes("untrusted provider detail"));
-  assert.deepEqual(JSON.parse(result.body), { hosts: addresses.map(address => ({
+  assert.deepEqual(parseSnapshot(result.body), { hosts: addresses.map(address => ({
     address, values: null, fetchedAtMs: null, retained: false,
     error: "The preview could not load Nosana metadata.", marketError: null,
   })) });
@@ -512,7 +522,7 @@ test("Node Info reads only startup addresses, deduplicates overlaps and ignores 
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(result.headers["x-content-type-options"], "nosniff");
@@ -536,7 +546,7 @@ test("empty, invalid and missing input never call the Node Info provider", async
     t.after(() => close(server));
     const result = await read(server, "/preview/node-info.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [] });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [] });
     assert.equal((await read(server, "/preview/node-info.json", "HEAD")).status, result.status);
     await close(server);
   }
@@ -557,7 +567,7 @@ test("unexpected Node Info failures produce bounded errors independent of metada
   const after = Date.now();
   assert.equal(result.status, 502);
   assert(!result.body.includes("untrusted node diagnostic"));
-  const snapshot = JSON.parse(result.body) as NodeInfoSnapshot;
+  const snapshot = parseSnapshot(result.body) as NodeInfoSnapshot;
   const checkedAtMs = snapshot.hosts[0]!.apiCheck!.checkedAtMs;
   assert(Number.isSafeInteger(checkedAtMs) && checkedAtMs >= before && checkedAtMs <= after);
   assert.deepEqual(snapshot, { hosts: addresses.map(address => ({
@@ -595,7 +605,7 @@ test("jobs route uses only startup addresses, shares overlapping reads and never
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(result.headers["x-content-type-options"], "nosniff");
@@ -615,7 +625,7 @@ test("empty, invalid and missing input never call the jobs provider", async (t) 
     t.after(() => close(server));
     const result = await read(server, "/preview/jobs.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [] });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [] });
     assert.equal((await read(server, "/preview/jobs.json", "HEAD")).status, result.status);
     await close(server);
   }
@@ -639,7 +649,7 @@ test("unexpected job provider failures are bounded and State hints never trigger
   const response = await read(server, "/preview/jobs.json");
   assert.equal(response.status, 502);
   assert(!response.body.includes("untrusted diagnostic"));
-  assert.deepEqual(JSON.parse(response.body), { hosts: addresses.map(address => ({ address, job: null,
+  assert.deepEqual(parseSnapshot(response.body), { hosts: addresses.map(address => ({ address, job: null,
     checkedAtMs: null, validUntilMs: null, failedAtMs: null, retained: false, pending: false,
     retryAtMs: null, error: "The preview could not load Nosana job timing." })) });
 });
@@ -669,7 +679,7 @@ test("queue route uses only startup hosts, shares inflight reads and keeps HEAD 
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(result.headers["x-content-type-options"], "nosniff");
@@ -689,7 +699,7 @@ test("empty, invalid and missing startup input never dispatch queue reads", asyn
     t.after(() => close(server));
     const result = await read(server, "/preview/queue.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [] });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [] });
     assert.equal((await read(server, "/preview/queue.json", "HEAD")).status, result.status);
     await close(server);
   }
@@ -704,7 +714,7 @@ test("queue route returns bounded errors when an injected provider throws", asyn
   const result = await read(server, "/preview/queue.json");
   assert.equal(result.status, 502);
   assert(!result.body.includes("private"));
-  assert.deepEqual(JSON.parse(result.body), { hosts: addresses.map(address => ({ address, marketAddress: null,
+  assert.deepEqual(parseSnapshot(result.body), { hosts: addresses.map(address => ({ address, marketAddress: null,
     position: null, total: null, checkedAtMs: null, validUntilMs: null, sourceUpdatedAtMs: null, retained: false,
     error: "The preview could not load Nosana queue positions." })) });
 });
@@ -730,7 +740,7 @@ test("SOL route shares work, uses startup hosts only and keeps HEAD read-free", 
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
     assert.equal(result.headers["cache-control"], "no-store");
   }
@@ -749,7 +759,7 @@ test("empty, invalid and missing startup input never dispatch SOL reads", async 
     t.after(() => close(server));
     const result = await read(server, "/preview/sol.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [], nextRefreshAtMs: null });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [], nextRefreshAtMs: null });
     assert.equal((await read(server, "/preview/sol.json", "HEAD")).status, result.status);
     await close(server);
   }
@@ -765,7 +775,7 @@ test("SOL provider exceptions produce a dated retry and bounded unknowns", async
   const result = await read(server, "/preview/sol.json");
   assert.equal(result.status, 502);
   assert(!result.body.includes("private injected"));
-  const snapshot = JSON.parse(result.body);
+  const snapshot = parseSnapshot(result.body);
   assert(snapshot.nextRefreshAtMs >= before + 30_000);
   assert.deepEqual(snapshot.hosts.map((host: { address: string }) => host.address), addresses);
   assert(snapshot.hosts.every((host: { lamports: unknown }) => host.lamports === null));
@@ -792,7 +802,7 @@ test("NOS route shares startup-roster work, ignores query overrides and stays fi
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(Number(result.headers["content-length"]), Buffer.byteLength(result.body));
@@ -812,7 +822,7 @@ test("empty, invalid and missing startup input never dispatch NOS reads", async 
     t.after(() => close(server));
     const result = await read(server, "/preview/nos.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [], nextRefreshAtMs: null });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [], nextRefreshAtMs: null });
     const head = await read(server, "/preview/nos.json", "HEAD");
     assert.equal(head.status, result.status);
     assert.equal(head.body, "");
@@ -831,7 +841,7 @@ test("NOS provider exceptions produce bounded unknowns and one consistent retry 
   const after = Date.now();
   assert.equal(result.status, 502);
   assert(!result.body.includes("private injected"));
-  const snapshot = JSON.parse(result.body);
+  const snapshot = parseSnapshot(result.body);
   assert(snapshot.nextRefreshAtMs >= before + NOS_REFRESH_INTERVAL_MS);
   assert(snapshot.nextRefreshAtMs <= after + NOS_REFRESH_INTERVAL_MS);
   assert.deepEqual(snapshot.hosts, addresses.map(address => ({
@@ -868,7 +878,7 @@ test("staking route binds startup hosts, coalesces viewers and accepts only read
   release();
   for (const result of await Promise.all([first, second])) {
     assert.equal(result.status, 200);
-    assert.deepEqual(JSON.parse(result.body), snapshot);
+    assert.deepEqual(parseSnapshot(result.body), snapshot);
     assert.equal(result.headers["content-type"], "application/json; charset=utf-8");
   }
   assert.equal(calls.length, 1);
@@ -886,7 +896,7 @@ test("staking empty/invalid inputs never read upstream; exceptions retain bounde
     t.after(() => close(server));
     const result = await read(server, "/preview/staking.json");
     assert.equal(result.status, contents === "[]" ? 200 : 503);
-    assert.deepEqual(JSON.parse(result.body), { hosts: [], nextRefreshAtMs: null });
+    assert.deepEqual(parseSnapshot(result.body), { hosts: [], nextRefreshAtMs: null });
     await close(server);
   }
   assert.equal(calls, 0);
@@ -898,7 +908,7 @@ test("staking empty/invalid inputs never read upstream; exceptions retain bounde
   const result = await read(server, "/preview/staking.json");
   assert.equal(result.status, 502);
   assert(!result.body.includes("private injected"));
-  const snapshot = JSON.parse(result.body);
+  const snapshot = parseSnapshot(result.body);
   assert(snapshot.nextRefreshAtMs >= before + STAKING_REFRESH_INTERVAL_MS);
   assert.deepEqual(snapshot.hosts, addresses.map(address => {
     const record = blankStakingRecord(address);
@@ -969,7 +979,7 @@ for (const [route, providerName] of [
     assert.equal(calls.length, 2, "obsolete cleanup must not remove replacement work");
     calls[1]!.release();
     const bodies = await Promise.all([resumed.result, another.result]);
-    for (const body of bodies) assert.deepEqual(JSON.parse(body).hosts, []);
+    for (const body of bodies) assert.deepEqual(parseSnapshot(body).hosts, []);
     assert.equal(calls[1]!.signal.aborted, false);
   });
 }
@@ -998,7 +1008,7 @@ test("closing the direct metadata viewer preserves a pending queue dependency", 
   assert.equal(signal?.aborted, false);
   assert.equal(calls, 1);
   release();
-  const snapshot = JSON.parse(await queue.result);
+  const snapshot = parseSnapshot(await queue.result);
   assert.equal(snapshot.hosts.length, addresses.length);
   assert(snapshot.hosts.every((host: { position: unknown }) => host.position === null));
 });
@@ -1025,22 +1035,71 @@ test("progressive metadata streams ready hosts, replays late joins and shares a 
   const response = await fetch(url, { headers: { Accept: "application/x-ndjson, application/json" }, signal: first.signal });
   assert.match(response.headers.get("content-type")!, /application\/x-ndjson/);
   const reader = response.body!.getReader();
-  const update = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  const update = parseSnapshot(new TextDecoder().decode((await reader.read()).value));
   assert.deepEqual(update, { hosts: snapshot.hosts.slice(0, 1), complete: false });
   const json = read(server, "/preview/metadata.json");
   const joined = await fetch(url, { headers: { Accept: "application/x-ndjson" } });
   const joinedReader = joined.body!.getReader();
-  const replay = JSON.parse(new TextDecoder().decode((await joinedReader.read()).value));
+  const replay = parseSnapshot(new TextDecoder().decode((await joinedReader.read()).value));
   assert.deepEqual(replay, update);
   first.abort();
   await read(server, "/preview/hosts.json");
   assert.equal(signal.aborted, false);
   release();
-  const final = JSON.parse(new TextDecoder().decode((await joinedReader.read()).value));
+  const final = parseSnapshot(new TextDecoder().decode((await joinedReader.read()).value));
   assert.deepEqual(final, { ...snapshot, complete: true });
   assert.equal((await joinedReader.read()).done, true);
-  assert.deepEqual(JSON.parse((await json).body), snapshot);
+  assert.deepEqual(parseSnapshot((await json).body), snapshot);
   assert.equal(calls, 1);
+  reader.releaseLock(); joinedReader.releaseLock();
+});
+
+test("preview stamps roster, finite and replayed stream envelopes without changing source time", async t => {
+  const directory = fixtureDirectory(t);
+  const observedAt = 100;
+  const snapshot = { serverTimeMs: -1, hosts: addresses.map(address => ({ address, values: null,
+    fetchedAtMs: observedAt, retained: false, error: null, marketError: null })) };
+  let now = 1_000;
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const server = await startPreviewServer({ directory, hostsFile: join(directory, "hosts.json"), port: 0,
+    now: () => now, metadataProvider: async (_addresses, _signal, onUpdate) => {
+      onUpdate?.(snapshot);
+      await held;
+      return snapshot;
+    },
+  });
+  t.after(() => close(server));
+  const roster = JSON.parse((await read(server, "/preview/hosts.json")).body);
+  assert.equal(roster.serverTimeMs, now);
+  const bound = server.address(); assert(bound && typeof bound !== "string");
+  const url = `http://127.0.0.1:${bound.port}/preview/metadata.json`;
+  const controller = new AbortController();
+  now = 1_100;
+  const response = await fetch(url, { signal: controller.signal, headers: { Accept: "application/x-ndjson" } });
+  const reader = response.body!.getReader();
+  const initial = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  assert.equal(initial.serverTimeMs, 1_100);
+  assert.deepEqual(initial.hosts, snapshot.hosts);
+  now = 1_200;
+  const joined = await fetch(url, { headers: { Accept: "application/x-ndjson" } });
+  const joinedReader = joined.body!.getReader();
+  const replay = JSON.parse(new TextDecoder().decode((await joinedReader.read()).value));
+  assert.equal(replay.serverTimeMs, 1_200, "replaying old evidence gets a new transmission time");
+  assert.deepEqual(replay.hosts, initial.hosts);
+  controller.abort();
+  now = 1_300;
+  release();
+  const final = JSON.parse(new TextDecoder().decode((await joinedReader.read()).value));
+  assert.equal(final.complete, true);
+  assert.equal(final.serverTimeMs, 1_300);
+  assert.deepEqual(final.hosts, snapshot.hosts);
+  assert.equal((await joinedReader.read()).done, true);
+  now = 1_400;
+  const finite = JSON.parse((await read(server, "/preview/metadata.json")).body);
+  assert.equal(finite.serverTimeMs, 1_400);
+  assert.deepEqual(finite.hosts, snapshot.hosts);
+  assert.equal(snapshot.serverTimeMs, -1, "wire stamps must not mutate cached/provider snapshots");
   reader.releaseLock(); joinedReader.releaseLock();
 });
 
@@ -1065,19 +1124,19 @@ test("SOL streams completed balances, replays a late viewer and keeps a shared J
   const response = await fetch(url, { headers: { Accept: "application/x-ndjson, application/json" }, signal: first.signal });
   assert.match(response.headers.get("content-type")!, /application\/x-ndjson/);
   const reader = response.body!.getReader();
-  const update = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  const update = parseSnapshot(new TextDecoder().decode((await reader.read()).value));
   assert.deepEqual(update, { hosts: snapshot.hosts.slice(0, 1), nextRefreshAtMs: 30_000, complete: false });
   const json = read(server, "/preview/sol.json");
   const joined = await fetch(url, { headers: { Accept: "application/x-ndjson" } });
   const joinedReader = joined.body!.getReader();
-  assert.deepEqual(JSON.parse(new TextDecoder().decode((await joinedReader.read()).value)), update);
+  assert.deepEqual(parseSnapshot(new TextDecoder().decode((await joinedReader.read()).value)), update);
   first.abort();
   await read(server, "/preview/hosts.json");
   assert.equal(signal.aborted, false);
   release();
-  assert.deepEqual(JSON.parse(new TextDecoder().decode((await joinedReader.read()).value)), { ...snapshot, complete: true });
+  assert.deepEqual(parseSnapshot(new TextDecoder().decode((await joinedReader.read()).value)), { ...snapshot, complete: true });
   assert.equal((await joinedReader.read()).done, true);
-  assert.deepEqual(JSON.parse((await json).body), snapshot);
+  assert.deepEqual(parseSnapshot((await json).body), snapshot);
   assert.equal(calls, 1);
   reader.releaseLock(); joinedReader.releaseLock();
 });
@@ -1098,7 +1157,7 @@ test("progressive failures end with an explicit failed frame instead of silently
   });
   const text = await response.text();
   assert(!text.includes("private provider"));
-  const frames = text.trim().split("\n").map(line => JSON.parse(line));
+  const frames = text.trim().split("\n").map(line => parseSnapshot(line));
   assert.equal(frames[0].complete, false);
   assert.equal(frames.at(-1).complete, true);
   assert.equal(frames.at(-1).failed, true);
@@ -1126,20 +1185,20 @@ test("visible State watches share updates, keep JSON finite and stop only after 
   const first = new AbortController(); const second = new AbortController();
   const response = await fetch(url, { headers: { Accept: "application/x-ndjson" }, signal: first.signal });
   const reader = response.body!.getReader();
-  const initial = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  const initial = parseSnapshot(new TextDecoder().decode((await reader.read()).value));
   assert.equal(initial.watching, true); assert.equal(initial.complete, false);
   assert.equal(watches, 1); assert.equal(finiteReads, 0);
   const joinedResponse = await fetch(url, { headers: { Accept: "application/x-ndjson" }, signal: second.signal });
   const joined = joinedResponse.body!.getReader();
-  const replay = JSON.parse(new TextDecoder().decode((await joined.read()).value));
+  const replay = parseSnapshot(new TextDecoder().decode((await joined.read()).value));
   assert.deepEqual(replay, initial);
-  assert.deepEqual(JSON.parse((await read(server, "/preview/node-info.json")).body), snapshot);
+  assert.deepEqual(parseSnapshot((await read(server, "/preview/node-info.json")).body), snapshot);
   assert.equal(finiteReads, 1); assert.equal(watches, 1);
   first.abort();
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.equal(watchSignal.aborted, false);
   publish({ hosts: snapshot.hosts.slice(1, 2), nextRefreshAtMs: Date.now() + 15_000 });
-  const updated = JSON.parse(new TextDecoder().decode((await joined.read()).value));
+  const updated = parseSnapshot(new TextDecoder().decode((await joined.read()).value));
   assert.equal(updated.hosts[0].address, addresses[1]);
   second.abort();
   await until(() => watchSignal.aborted);

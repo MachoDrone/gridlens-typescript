@@ -60,7 +60,7 @@ async function start(stakingProvider: NonNullable<Options["stakingProvider"]>,
   const real200HostsFile = join(directory, "real200.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
   await writeFile(real200HostsFile, JSON.stringify(extraRoster));
-  const server = await startPreviewServer({ hostsFile, real200HostsFile, port: 0, stakingProvider,
+  const server = await startPreviewServer({ now: () => NOW, hostsFile, real200HostsFile, port: 0, stakingProvider,
     metadataProvider: async input => metadata(input), nodeInfoProvider: noState,
     jobProvider: emptyJobs, queueProvider: emptyQueue, solProvider: emptySol, nosProvider: emptyNos, ...extra });
   servers.push(server);

@@ -67,6 +67,20 @@ These are presentation exceptions, not permission to remove actions or strand
 required controls permanently offscreen. The magnification exception requires
 recovery through ordinary native panning or zoom-out.
 
+Live timestamp calculations share a server-referenced clock across API, State,
+Queued, Duration, SOL, NOS, staking and source refresh schedules. For identical
+evidence and delivery confidence at the same time, phone and laptop must agree
+despite different device clock settings or timezones. A delayed connection may
+conservatively retain a reading sooner; that uncertainty must not change its
+elapsed duration, overrun threshold or source refresh schedule. Preserve each source's freshness policy and original
+UTC check times. After suspension, retain known values while server timing is
+revalidated; this must not fabricate source failures or retire activity history.
+Clock-skew acceptance covers repeated refreshes, expiry, replay, combined Queued /
+Duration, resume, device-clock changes, daylight-saving boundaries, delayed
+bootstrap and buffered streams. Timing precision changes must not create extra
+provider reads or mistake a long stream's lifetime for new delivery delay. Automated
+mobile contexts remain separate from physical-device confirmation.
+
 ## Visible-screen layout requirements
 
 Use shared left, top, width, height and scale measurements from the browser's

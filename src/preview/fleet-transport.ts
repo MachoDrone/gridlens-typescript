@@ -1,5 +1,6 @@
 import { createFleetSnapshotValidator, isFleetRoster } from "../contracts/fleet.ts";
 import type { FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
+import { isServerTimeMs } from "./evidence-clock.ts";
 
 type Timer = unknown;
 export interface FleetTransportOptions {
@@ -13,6 +14,8 @@ export interface FleetTransportOptions {
   watchIdleTimeoutMs?: number;
   responseByteLimit?: number;
   frameByteLimit?: number;
+  /** Accepted server emission time plus this request's elapsed dispatch-to-frame time. */
+  onServerTime?: (serverTimeMs: number, requestElapsedMs: number) => void;
 }
 export class FleetTransportError extends Error {
   readonly status: number | undefined;
@@ -35,7 +38,7 @@ export interface FleetRosterSnapshot { addresses: string[]; error: string | null
 /** One bounded browser transport; provider adapters and domain projections stay separate. */
 export function createFleetTransport(options: FleetTransportOptions = {}) {
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
-  const now = options.now ?? Date.now;
+  const now = options.now ?? (() => performance.now());
   const setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
   const clearTimer = options.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>));
   const finiteTimeout = options.finiteTimeoutMs ?? 120_000;
@@ -45,10 +48,20 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
   for (const limit of [finiteTimeout, idleTimeout, responseLimit, frameLimit]) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Fleet transport limits must be positive integers.");
   }
+  const acceptServerTime = (payload: Record<string, unknown>, requestElapsedMs: () => number): void => {
+    if (!("serverTimeMs" in payload)) return;
+    if (!isServerTimeMs(payload.serverTimeMs)) throw new FleetTransportError("Fleet response contained an invalid server time.");
+    const elapsed = requestElapsedMs();
+    if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed > 8_640_000_000_000_000) {
+      throw new FleetTransportError("Fleet response contained invalid elapsed timing.");
+    }
+    options.onServerTime?.(payload.serverTimeMs, elapsed);
+  };
 
   async function request<T>(url: string, external: AbortSignal | undefined, current: (() => boolean) | undefined,
     progressive: boolean, consume: (response: Response, control: {
       wait: <V>(pending: Promise<V>) => Promise<V>; check: () => void; watch: () => void; progress: () => void;
+      requestElapsedMs: () => number;
     }) => Promise<T>, rosterFailure = false): Promise<T> {
     if (!/^\/(?!\/)/.test(url) || /[\\#\u0000-\u0020]/.test(url)) {
       throw new FleetTransportError("Fleet requests require a same-origin path.");
@@ -75,6 +88,7 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
     let completed = false;
     try {
       check();
+      const dispatchedAt = now();
       response = await wait(fetcher(url, { method: "GET", cache: "no-store", redirect: "error",
         credentials: "same-origin", signal: abort.signal,
         headers: { Accept: progressive ? "application/x-ndjson, application/json" : "application/json" } }));
@@ -85,6 +99,7 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
       const value = await consume(response, { wait, check,
         watch: () => { watching = true; schedule(idleTimeout); },
         progress: () => { if (watching) schedule(idleTimeout); },
+        requestElapsedMs: () => now() - dispatchedAt,
       });
       completed = true;
       return value;
@@ -173,6 +188,7 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
             throw new FleetTransportError("Fleet response contained invalid observations or identities.");
           }
           if (payload.failed === true) throw new FleetTransportError("Fleet source could not complete its response.");
+          acceptServerTime(payload, control.requestElapsedMs);
           readOptions.onSnapshot?.(value, complete, payload);
           completed = complete;
           if (complete) final = value;
@@ -192,6 +208,11 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
           }
           roster = { addresses: value.addresses, error: value.error };
           if (!response.ok && roster.error === null) throw new FleetTransportError(`Fleet request failed (HTTP ${response.status}).`, response.status);
+          control.check();
+          if (response.ok && roster.error === null) acceptServerTime(value, control.requestElapsedMs);
+          else if ("serverTimeMs" in value && !isServerTimeMs(value.serverTimeMs)) {
+            throw new FleetTransportError("Fleet response contained an invalid server time.");
+          }
           return false;
         }, 0);
         return roster!;

@@ -91,6 +91,42 @@ Sorting and display toggles never trigger collection. Metadata, State, jobs,
 Queue and SOL can deliver validated progress without waiting for the whole roster.
 Joining viewers reuse existing progress and original timestamps.
 
+Live browser calculations use one server-referenced clock for source validation,
+freshness, job elapsed time and source refresh deadlines. Successful roster replies
+establish the reference before feeds start; finite replies and stream frames carry
+an emission-time `serverTimeMs` that can advance it. Monotonic browser elapsed time
+advances the reference between replies. Phone/laptop clock settings, timezones and
+daylight-saving changes do not change the age of the same evidence. Source details
+keep their original UTC timestamps, and each source keeps its existing validity
+window and future-time allowance. Local retry waits and request timeouts use
+elapsed time separately, so calibration cannot shorten them.
+
+Hiding preserves the reference and observations but suspends freshness confidence
+until a validated data reply arrives after resumption. Known results remain
+retained, without recording a source failure or changing activity history. Server
+time is transport metadata, never an observation timestamp or stored measurement;
+replaying a snapshot does not renew its evidence. Older servers without this field
+keep the previous device-clock behavior until a reference is received. Synthetic
+scenarios retain their sample clock; connection checks do not calibrate data time.
+The browser also measures elapsed time from each request's dispatch to each
+validated response/frame. Server emission time plus that elapsed interval gives
+a conservative upper bound used only for evidence expiry. The original clock
+estimate still controls job elapsed time, overrun warnings, future-timestamp
+validation and refresh/backoff schedules. Slow delivery can therefore dim an
+uncertain reading without adding that delay to its displayed duration.
+
+Compatible samples narrow the bound; a long-running stream cannot widen a
+previously tighter calibration. Suspension discards its earlier precision.
+Readings still render immediately, with their original timestamps and values;
+uncertain freshness does not manufacture source errors or retire job history.
+Precision-only changes recheck display expiry without starting or accelerating
+provider reads. This uses the existing server-time envelope, caches and batching;
+it adds no clock probes, per-host requests or server protocol fields.
+Resuming an untrusted reference reuses an ordinary due data read, or requests
+metadata when no read is due (including paused elapsed clocks with finite
+providers); shared provider caches and budgets still apply.
+Switching synthetic scenarios while visible does not invalidate the reference.
+
 Keep these semantic distinctions:
 
 - Unknown, missing and failed are never measured zero, stopped or confirmed
@@ -113,8 +149,21 @@ Keep these semantic distinctions:
   after failure/expiry, until newer evidence retires or replaces it. Red overrun
   starts only more than five minutes beyond the reported positive limit. This
   changes warning color, not runtime allowance or freshness. Unknown timing is
-  Populating..; confirmed no assignment is a dash. Synthetic elapsed examples
-  keep their reported-time behavior and never become live projections.
+  Populating..; a current confirmed absence is a dash. Expired or failed absence,
+  or an older absence contradicted by validated running State, returns to
+  Populating.. without restoring a retired counter. Original absence and
+  retirement evidence stays in details. Synthetic elapsed examples keep their
+  reported-time behavior and never become live projections.
+  Absence popups describe what the last job reading reported. Retained readings
+  explicitly leave current timing unconfirmed, including while the server clock
+  is awaiting revalidation after suspension; this wording also appears in the
+  combined Queued / Duration summary.
+  When API Offline is currently confirmed and no useful timing exists, the
+  Duration placeholder is a dash with explicit timing-unavailable details.
+  This does not establish job absence or retire a known timer: current/retained
+  counters and queue readings remain available. The placeholder returns to
+  Populating.. if that Offline proof expires or API recovers while timing is
+  still unknown. This presentation rule changes no collection or retry schedule.
 - SOL displays three decimals rounded down; NOS and numeric stake amounts display
   whole NOS rounded half up. Sorting retains exact integers. A verified absent
   associated token account can establish zero for that account; failure cannot.
@@ -141,13 +190,31 @@ cancellation or deferral does not. SOL similarly prioritizes never-attempted
 accounts and then oldest evidence, preserving fairness across reordered rosters.
 Known jobs and first discovery have protected capacity inside shared job limits.
 A State hint can request a cache recheck, but never supplies timing or bypasses
-server budgets.
+server budgets. Initial job discovery also uses the existing validated activity
+priorities within its first-attempt lane, keeping stable ties and first attempts
+ahead of repeated discovery.
 
 Job reads share limits of **16/30 seconds, 400/hour and 2,400/day**. Discovery has
 nested limits of **14/30 seconds, 336/hour and 900/day**; repeats stop at 75% of
 each discovery allowance to preserve first-read capacity. Empty/failed discovery
 backs off from 60 seconds to 15 minutes. Production bulk host-to-job lookup and
 capacity still require a verified backend contract.
+
+Each finite job read admits work for at most 60 seconds of monotonic elapsed
+time. Already started requests finish under their original eight-second timeout;
+expired queued work is released first as pending, without a request or failure
+penalty. Replacement lookups inherit the same window. Every completed response
+still includes the full selected roster, with original evidence times and shared
+cache progress. Visible browsers continue due pending work after a one-second
+minimum; later quota and provider deadlines remain authoritative. This avoids a
+slow but progressing roster read crossing the browser's 120-second response
+timeout and entering its failure retry path. Hidden views still cancel reads.
+
+Local budget deferrals do not start a network timeout or add failure backoff.
+Actual timeouts and failed requests retain their existing backoff; provider,
+quota and host deadlines combine by their latest deadline, not by adding waits.
+Bounded reads do not raise throughput limits: 200 cold host lookups still require
+at least seven minutes under the discovery allowance, before network latency.
 
 SOL, NOS and staking share one RPC transport and limits of **one/second,
 12/minute, 600/hour and 12,000/day**, including network validation and failover.
@@ -206,6 +273,10 @@ close controls and non-overlapping targets. See [UX_CONSISTENCY](UX_CONSISTENCY.
 for complete-component journeys and physical-device acceptance limits.
 
 ## Hosting and feature backlog
+
+Optional request reuse and bandwidth integration ideas are tracked separately in
+[Optimal tool call considerations](optimal-tool-call-considerations.md). These are
+considerations, not scheduled implementation.
 
 The portable gateway, shared contracts, snapshot store, single-writer persistence
 reference, synthetic rehearsal and compiled artifact are implemented. The gateway

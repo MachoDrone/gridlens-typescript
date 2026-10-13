@@ -10,9 +10,11 @@ import { formatIPDisplay, ipModeLabel, nextIPMode, normalizeIPMode } from "../fl
 import type { IPAddresses, IPDisplayMode } from "../fleet/ip-display.ts";
 import { nextDurationMode, normalizeDurationMode, projectDuration } from "../fleet/duration.ts";
 import type { DurationDisplayMode, DurationInput, DurationView } from "../fleet/duration.ts";
+import { projectDurationAvailability } from "../fleet/live-duration.ts";
 import { isJobRecord, JOB_REFRESH_INTERVAL_MS } from "../fleet/jobs.ts";
 import type { JobRecord } from "../fleet/jobs.ts";
 import { LiveActivityDisplay } from "../fleet/live-activity.ts";
+import type { LiveActivityView } from "../fleet/live-activity.ts";
 import { isQueueRecord, projectQueue, QUEUE_REFRESH_INTERVAL_MS } from "../fleet/queue.ts";
 import type { QueueRecord, QueueView } from "../fleet/queue.ts";
 import { normalizeQueuedDurationLayout, projectQueuedDuration } from "../fleet/queued-duration.ts";
@@ -27,6 +29,9 @@ import { isHostMetadataRecord as isMetadataRecord, isNodeInfoRecord } from "../c
 import type { FleetResource } from "../contracts/fleet.ts";
 import { readFleetConfig, fleetResourceURL } from "./fleet-config.ts";
 import { createFleetTransport, fleetReadError } from "./fleet-transport.ts";
+import { createEvidenceClock } from "./evidence-clock.ts";
+import { createRefreshDeadlines } from "./refresh-deadline.ts";
+import type { RefreshDeadline } from "./refresh-deadline.ts";
 import { formatSol, isSolRecord, SOL_DISPLAY_VALIDITY_MS, SOL_REFRESH_INTERVAL_MS } from "../fleet/sol.ts";
 import type { SolRecord } from "../fleet/sol.ts";
 import { formatNos, isNosRecord, NOS_MINT, NOS_DISPLAY_VALIDITY_MS, NOS_REFRESH_INTERVAL_MS } from "../fleet/nos.ts";
@@ -34,8 +39,8 @@ import type { NosRecord } from "../fleet/nos.ts";
 import { formatStakingAmount, isStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../fleet/staking.ts";
 import type { StakingRecord } from "../fleet/staking.ts";
 import { projectStaking } from "../fleet/staking-view.ts";
-import { nextStateExpiryDelay, projectNodeState, projectNodeStateDisplay } from "../fleet/node-state.ts";
-import { nextApiExpiryDelay, projectNodeApi } from "../fleet/node-api.ts";
+import { projectNodeState, projectNodeStateDisplay } from "../fleet/node-state.ts";
+import { projectNodeApi } from "../fleet/node-api.ts";
 import { statusLabel, statusTone } from "../fleet/status-display.ts";
 import { SAMPLE_TIME, SCENARIOS, sampleAddresses, sampleDuration, sampleHardware, sampleInventory, sampleMarket, sampleNodeInfo } from "./fixtures.ts";
 import type { HardwareSample, ScenarioId } from "./fixtures.ts";
@@ -49,7 +54,25 @@ bindFleetTableScroll(document.querySelector<HTMLElement>(".fleet-table-wrap")!);
 bindFleetViewport(document.querySelector<HTMLElement>(".fleet-title-row")!);
 // Service reachability is independent of source freshness and host API status.
 const fleetConfig = readFleetConfig(document);
-const fleetTransport = createFleetTransport();
+const evidenceClock = createEvidenceClock();
+const liveNow = () => evidenceClock.now();
+// Expiry uses a conservative time bound. Elapsed clocks, source validation and
+// refresh/backoff scheduling continue to use the unchanged reference estimate.
+const freshnessNow = () => evidenceClock.freshnessNow();
+const deadlines = createRefreshDeadlines(liveNow);
+const fleetTransport = createFleetTransport({
+  onServerTime(serverTimeMs, requestElapsedMs) {
+    // Initial roster loading may finish while hidden; only active views can
+    // restore timing confidence after suspension.
+    if (!visibleStateView()) return;
+    const change = evidenceClock.accept(serverTimeMs, requestElapsedMs);
+    if ((change.changed || change.freshnessChanged) && visibleStateView() && !inputLoading) {
+      clockRenderPending ||= change.changed;
+      freshnessRenderPending ||= change.freshnessChanged;
+      scheduleProgressRender("state", []);
+    }
+  },
+});
 startConnectionIndicator(document.getElementById("fleet-connection")!, fleetResourceURL(fleetConfig, "connection"));
 
 // Requested Fleet order; staking leads and API, State, Queued, Duration are adjacent.
@@ -63,7 +86,7 @@ const COLUMNS = [
   ["api", "API", "Last confirmed API result from Node Info, separate from State. Online stays green and Offline stays red. Bold means within its checking window; regular weight means stale or unconfirmed. Online uses a 30-second window. Offline stays bold until its recorded retry is overdue, including an eight-second request allowance. Details preserve original check times and the retry deadline. Amber Populating.. means no confirmed result is available yet. State OTHER can still be API Online. Timeouts and inconclusive checks do not overwrite the last confirmed result. This does not establish whether the PC or workload is running."],
   ["state", "State", "Fresh useful Node Info takes precedence, then a freshly verified running assignment unless equally recent or newer contrary evidence supersedes it. Node State keeps its 30-second deadline; job-backed State keeps its original 180-second deadline. The last useful State stays visible in a darker color with animation controlled by State animation. A dim amber spinner means no useful State yet; it does not establish restarting or an in-flight request. Details preserve source times and distinguish retained estimates from confirmed activity."],
   ["queued", "Queued", "One-based position / total in the host’s reported Nosana market queue. The public ordered queue is checked every 20 seconds while visible and expires locally after 30 seconds. Failed or expired positions remain gray; a missing position is unknown, not zero. Arrows connect current queue positions and running job durations. Details preserve the exact host, market and API check time; queue position is not a wait-time estimate."],
-  ["duration", "Duration", "Toggle between a compact elapsed/limit bar and time text. Supplied hosts use the assigned Nosana job’s reported start and timeout, with a local one-second clock. After failed or expired reads, the last verified start keeps counting as a darker estimate until superseded. Bounded bars keep their animation preference; elapsed more than five minutes above the last reported limit is red, dimmer when stale. This display grace does not extend the reported limit or change elapsed time. Amber Populating.. means no useful timing yet; a dash with No running assignment in details means confirmed absence. Known job timings refresh independently of State every 120 seconds while visible; pending discovery follows the permitted retry deadline. Local display validity is 180 seconds. The indexer supplies no indexing-freshness timestamp."],
+  ["duration", "Duration", "Toggle between a compact elapsed/limit bar and time text. Supplied hosts use the assigned Nosana job’s reported start and timeout, with a local one-second clock. After failed or expired reads, the last verified start keeps counting as a darker estimate until superseded. Bounded bars keep their animation preference; elapsed more than five minutes above the last reported limit is red, dimmer when stale. This display grace does not extend the reported limit or change elapsed time. Amber Populating.. means no useful timing yet; a dash with No running assignment in details means current confirmed absence. Expired or failed absence, or newer running evidence, returns to Populating.. without restoring an old counter. When API Offline is currently confirmed and timing is unknown, a dash means timing unavailable; Offline alone does not establish that a job stopped. Known job timings refresh independently of State every 120 seconds while visible; pending discovery follows the permitted retry deadline. Local display validity is 180 seconds. The indexer supplies no indexing-freshness timestamp."],
   ["nodeRuntime", "Node run time", "Node process run time requires its own observation. It cannot be inferred from inventory freshness."],
   ["dailyUptime", "Daily uptime %", "The last completed provider day, with independently verified coverage. No uptime source is connected."],
   ["latestJob", "Latest Job", "The latest independently verified job. Live assignments supporting Duration are shown in Duration details; Latest Job history remains unconnected. The Job durations scenario supplies selected synthetic job identifiers."],
@@ -375,8 +398,24 @@ function movePresentation(parent: HTMLElement, child: HTMLElement, before: Eleme
 
 const sourceContainers = new WeakMap<HTMLTableCellElement, HTMLSpanElement>();
 const durationViews = new WeakMap<HTMLTableCellElement, DurationView>();
+// Keep the deadlines actually painted current. A large render can cross an
+// expiry before timers are armed; recomputing only then would miss that cell.
+const displayExpiry = new WeakMap<HTMLTableCellElement, number>();
 const durationNames = new WeakMap<HTMLTableCellElement, string>();
 const queueViews = new WeakMap<HTMLTableCellElement, QueueView>();
+
+function rememberDisplayExpiry(cell: HTMLTableCellElement, deadline: number | null | undefined): void {
+  if (deadline == null) displayExpiry.delete(cell);
+  else displayExpiry.set(cell, deadline);
+}
+
+function displayedExpiryDates(columns: readonly string[]): number[] {
+  const selector = columns.map(column => `td[data-col="${column}"]`).join(",");
+  return [...element("fleet-rows").querySelectorAll<HTMLTableCellElement>(selector)].flatMap(cell => {
+    const deadline = displayExpiry.get(cell);
+    return deadline === undefined ? [] : [deadline];
+  });
+}
 
 function sourceContainer(cell: HTMLTableCellElement): HTMLSpanElement {
   let container = sourceContainers.get(cell);
@@ -742,14 +781,14 @@ let metadataRecords = new Map<string, HostMetadataRecord>();
 let metadataLoading = false;
 let metadataAttempted = false;
 let metadataError: string | null = null;
-let metadataRefreshDueAt: number | null = null;
+let metadataRefreshDueAt: RefreshDeadline | null = null;
 let nodeInfoRecords = new Map<string, NodeInfoRecord>();
 let nodeInfoLoading = false;
 let nodeInfoAttempted = false;
 let nodeInfoError: string | null = null;
 let stateExpiryTimer: ReturnType<typeof setTimeout> | undefined;
 let stateRefreshTimer: ReturnType<typeof setTimeout> | undefined;
-let stateRefreshDueAt: number | null = null;
+let stateRefreshDueAt: RefreshDeadline | null = null;
 let stateProviderNextAt: number | null | undefined;
 let stateWatching = false;
 let jobRecords = new Map<string, JobRecord>();
@@ -758,7 +797,7 @@ let jobsAttempted = false;
 let jobsError: string | null = null;
 let jobRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let jobTickTimer: ReturnType<typeof setTimeout> | undefined;
-let jobRefreshDueAt: number | null = null;
+let jobRefreshDueAt: RefreshDeadline | null = null;
 let jobProviderNextAt: number | null | undefined;
 let jobWaitReason: "retry-after" | "local-budget" | "discovery-budget" | null = null;
 let jobWaitUntilMs: number | null = null;
@@ -769,34 +808,36 @@ let queueAttempted = false;
 let queueError: string | null = null;
 let queueRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let queueExpiryTimer: ReturnType<typeof setTimeout> | undefined;
-let queueRefreshDueAt: number | null = null;
+let queueRefreshDueAt: RefreshDeadline | null = null;
 let queueProviderNextAt: number | null | undefined;
 let queueWatching = false;
 let solRecords = new Map<string, SolRecord>();
 let solLoading = false;
 let solAttempted = false;
 let solError: string | null = null;
-let solRefreshDueAt: number | null = null;
+let solRefreshDueAt: RefreshDeadline | null = null;
 let solRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let solExpiryTimer: ReturnType<typeof setTimeout> | undefined;
 let nosRecords = new Map<string, NosRecord>();
 let nosLoading = false;
 let nosAttempted = false;
 let nosError: string | null = null;
-let nosRefreshDueAt: number | null = null;
+let nosRefreshDueAt: RefreshDeadline | null = null;
 let nosRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let nosExpiryTimer: ReturnType<typeof setTimeout> | undefined;
 let stakingRecords = new Map<string, StakingRecord>();
 let stakingLoading = false;
 let stakingAttempted = false;
 let stakingError: string | null = null;
-let stakingRefreshDueAt: number | null = null;
+let stakingRefreshDueAt: RefreshDeadline | null = null;
 let stakingRefreshTimer: ReturnType<typeof setTimeout> | undefined;
 let stakingExpiryTimer: ReturnType<typeof setTimeout> | undefined;
 let stakingMarketRefreshRequested = false;
 type ReadKind = "metadata" | "state" | "jobs" | "queue" | "sol" | "nos" | "staking";
 const activeReads = new Map<ReadKind, AbortController>();
 let progressRenderTimer: ReturnType<typeof setTimeout> | undefined;
+let clockRenderPending = false;
+let freshnessRenderPending = false;
 const progressRows = new Map<string, Set<ReadKind>>();
 let pageHidden = false;
 
@@ -812,9 +853,14 @@ function currentRead(kind: ReadKind, controller: AbortController): boolean {
 
 /** Drop ownership synchronously so visibility can resume before an old fetch settles. */
 function pauseReads(): void {
+  // Selecting a synthetic example pauses collection without suspending the
+  // browser's elapsed clock. Only page lifecycle suspension loses time trust.
+  if (pageHidden || document.visibilityState !== "visible") evidenceClock.suspend();
   if (progressRenderTimer !== undefined) clearTimeout(progressRenderTimer);
   progressRenderTimer = undefined;
   progressRows.clear();
+  clockRenderPending = false;
+  freshnessRenderPending = false;
   for (const controller of activeReads.values()) controller.abort();
   if (activeReads.has("metadata")) metadataAttempted = false;
   if (activeReads.has("state")) nodeInfoAttempted = false;
@@ -847,9 +893,13 @@ function scheduleProgressRender(kind: ReadKind, records: readonly { address: str
       kinds.has("metadata") && isMetadataColumn(activeSort.column) ||
       kinds.has("sol") && activeSort.column === "sol" ||
       kinds.has("state") && ["state", "api", "dl", "ul", "ping"].includes(activeSort.column));
-    if (needsSort) render();
+    const clockChanged = clockRenderPending;
+    const freshnessChanged = freshnessRenderPending;
+    clockRenderPending = false;
+    freshnessRenderPending = false;
+    if (needsSort || clockChanged || freshnessChanged) render();
     else {
-      const at = Date.now();
+      const at = liveNow();
       const rows = new Map([...element("fleet-rows").querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')]
         .map(row => [row.dataset.host!, row]));
       for (const [address, kinds] of updates) {
@@ -882,12 +932,21 @@ function scheduleProgressRender(kind: ReadKind, records: readonly { address: str
         if (staking && kinds.has("metadata")) renderStakingCell(staking, address, at);
       }
       renderSuppliedStatus(at);
-      scheduleStateExpiry(at);
+      scheduleStateExpiry();
     }
     scheduleQueueExpiry();
     scheduleJobTick();
     scheduleStakingExpiry();
     scheduleSolExpiry();
+    scheduleNosExpiry();
+    if (clockChanged) {
+      scheduleStateRefresh();
+      scheduleJobRefresh();
+      scheduleQueueRefresh();
+      scheduleSolRefresh();
+      scheduleNosRefresh();
+      scheduleStakingRefresh();
+    }
   }, 16);
 }
 
@@ -909,7 +968,19 @@ async function readProgressive<T extends { address: string }>(
 
 function resumeVisibleView(): void {
   if (!visibleStateView()) pauseReads();
-  else if (!metadataAttempted || metadataRefreshDueAt !== null && metadataRefreshDueAt <= Date.now()) void loadMetadata();
+  else {
+    // Reuse an ordinary resumed read for calibration whenever one is already
+    // due. Finite providers otherwise need one metadata read after OS sleep,
+    // during which performance.now can pause and hide overdue source deadlines.
+    const dueData = ([
+      [nodeInfoAttempted, stateRefreshDueAt], [jobsAttempted, jobRefreshDueAt],
+      [queueAttempted, queueRefreshDueAt], [solAttempted, solRefreshDueAt],
+      [nosAttempted, nosRefreshDueAt], [stakingAttempted, stakingRefreshDueAt],
+    ] satisfies [boolean, RefreshDeadline | null][]).some(([attempted, deadline]) =>
+      !attempted || deadline !== null && deadlines.remaining(deadline) <= 0);
+    if (!metadataAttempted || metadataRefreshDueAt !== null && deadlines.remaining(metadataRefreshDueAt) <= 0 ||
+        !evidenceClock.trusted && !dueData && activeReads.size === 0) void loadMetadata();
+  }
   resumeStateView();
   resumeJobView();
   resumeQueueView();
@@ -926,15 +997,17 @@ function solDeadline(record: SolRecord): number | null {
 }
 
 function solCurrent(record: SolRecord | undefined, at: number): boolean {
+  if (!evidenceClock.trusted) return false;
   if (record === undefined || record.lamports === null || record.retained || record.error !== null || solError !== null) return false;
   const deadline = solDeadline(record);
-  return deadline !== null && at < deadline;
+  return deadline !== null && at < deadline && freshnessNow() < deadline;
 }
 
 function renderSolCell(cell: HTMLTableCellElement, address: string, at: number): void {
   const record = solRecords.get(address);
   const known = record?.lamports != null;
   const current = solCurrent(record, at);
+  rememberDisplayExpiry(cell, current ? solDeadline(record!) : null);
   const text = formatSol(record?.lamports);
   const issue = record?.error ?? solError;
   const details = `Host Address: ${address}\nSOL: ${formatSol(record?.lamports, false)}\nExact lamports: ${record?.lamports ?? "unknown"}\nCommitment: confirmed\nProvider: ${record?.provider ?? "not received"}${record?.endpoint ? ` (${record.endpoint})` : ""}\nContext slot: ${record?.contextSlot ?? "not received"}\nOldest provider batch estimated block time: ${timestamp(record?.blockTimeMs ?? null)}\nAPI check time: ${timestamp(record?.checkedAtMs ?? null)}\nLocal validity deadline: ${timestamp(record?.validUntilMs ?? null)}\n\n${known ? current ? "Current validated balance." : "Retained from the last successful read; current balance is unknown." : "Balance unknown. A missing account or failed check does not establish a zero balance."} ${fleetConfig.sourceMode === "snapshot" ? "This view reads backend snapshots without changing original source times." : "Public RPC checks are best effort, with one shared 30-second refresh deadline across viewers."}${issue ? `\nRead unavailable: ${issue}` : ""}${record?.retryAtMs ? `\nNext eligible retry: ${timestamp(record.retryAtMs)}` : ""}`;
@@ -967,11 +1040,11 @@ function renderSolStatus(at: number): void {
   const retained = [...solRecords.values()].filter(record => record.lamports !== null && !solCurrent(record, at)).length;
   const failed = solError !== null || [...solRecords.values()].some(record => record.error !== null);
   setText(notice, solLoading && solRecords.size === 0 && solError === null ? "Reading confirmed SOL balances…"
-    : `${current}/${suppliedAddresses.length} current SOL balances${retained ? ` · ${retained} retained gray` : ""}. Best-effort checks every 30 seconds while visible; readings expire after 60 seconds.${failed ? ` Some reads are unavailable.${solRefreshDueAt !== null ? ` Next eligible retry: ${timestamp(solRefreshDueAt)}.` : ""}` : ""}`);
+    : `${current}/${suppliedAddresses.length} current SOL balances${retained ? ` · ${retained} retained gray` : ""}. Best-effort checks every 30 seconds while visible; readings expire after 60 seconds.${failed ? ` Some reads are unavailable.${solRefreshDueAt !== null ? ` Next eligible retry: ${timestamp(deadlines.at(solRefreshDueAt))}.` : ""}` : ""}`);
 }
 
 function updateSol(): void {
-  const at = Date.now();
+  const at = liveNow();
   for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')) {
     const cell = row.querySelector<HTMLTableCellElement>('td[data-col="sol"]');
     if (cell) renderSolCell(cell, row.dataset.host!, at);
@@ -983,16 +1056,14 @@ function scheduleSolExpiry(): void {
   if (solExpiryTimer !== undefined) clearTimeout(solExpiryTimer);
   solExpiryTimer = undefined;
   if (!visibleStateView()) return;
-  const nowMs = Date.now();
-  const deadlines = [...solRecords.values()].flatMap(record =>
-    solCurrent(record, nowMs) && solDeadline(record) !== null ? [solDeadline(record)!] : []);
+  const deadlines = displayedExpiryDates(["sol"]);
   if (deadlines.length === 0) return;
   solExpiryTimer = setTimeout(() => {
     solExpiryTimer = undefined;
     if (!visibleStateView()) return;
     updateSol();
     scheduleSolExpiry();
-  }, Math.max(1, Math.min(...deadlines) - nowMs));
+  }, Math.max(1, Math.min(...deadlines) - freshnessNow()));
 }
 
 function scheduleSolRefresh(): void {
@@ -1002,7 +1073,7 @@ function scheduleSolRefresh(): void {
   solRefreshTimer = setTimeout(() => {
     solRefreshTimer = undefined;
     if (visibleStateView()) void loadSol();
-  }, Math.max(1, solRefreshDueAt - Date.now()));
+  }, Math.max(1, deadlines.remaining(solRefreshDueAt)));
 }
 
 function resumeSolView(): void {
@@ -1016,24 +1087,24 @@ function resumeSolView(): void {
 
 async function loadSol(): Promise<void> {
   if (solLoading || inputLoading || inputError || suppliedAddresses.length === 0 || !visibleStateView() ||
-      solAttempted && solRefreshDueAt !== null && solRefreshDueAt > Date.now()) return;
+      solAttempted && solRefreshDueAt !== null && deadlines.remaining(solRefreshDueAt) > 0) return;
   solAttempted = true;
   solLoading = true;
   const controller = startRead("sol");
   if (solRefreshTimer !== undefined) clearTimeout(solRefreshTimer);
   solRefreshTimer = undefined;
-  renderSolStatus(Date.now());
+  renderSolStatus(liveNow());
   try {
     await readProgressive("sol", "sol", controller, isSolRecord, (records, complete, payload) => {
-      if (records.some(record => record.checkedAtMs !== null && record.checkedAtMs > Date.now() + 15_000 ||
-          record.blockTimeMs !== null && record.blockTimeMs > Date.now() + 15_000) ||
+      if (records.some(record => record.checkedAtMs !== null && record.checkedAtMs > liveNow() + 15_000 ||
+          record.blockTimeMs !== null && record.blockTimeMs > liveNow() + 15_000) ||
           !("nextRefreshAtMs" in payload) || payload.nextRefreshAtMs !== null &&
           (typeof payload.nextRefreshAtMs !== "number" || !Number.isFinite(payload.nextRefreshAtMs))) {
         throw new Error("Invalid SOL response.");
       }
       if (complete) {
         solRecords = new Map(records.map(record => [record.address, record]));
-        solRefreshDueAt = payload.nextRefreshAtMs;
+        solRefreshDueAt = deadlines.source(payload.nextRefreshAtMs);
       } else for (const record of records) solRecords.set(record.address, record);
       solError = null;
       if (!complete) scheduleProgressRender("sol", records);
@@ -1041,7 +1112,7 @@ async function loadSol(): Promise<void> {
   } catch (error) {
     if (!currentRead("sol", controller)) return;
     solError = fleetReadError(error, "The confirmed SOL balances could not be loaded.");
-    solRefreshDueAt = Date.now() + SOL_REFRESH_INTERVAL_MS;
+    solRefreshDueAt = deadlines.after(SOL_REFRESH_INTERVAL_MS);
   } finally {
     if (!currentRead("sol", controller)) return;
     activeReads.delete("sol");
@@ -1059,15 +1130,17 @@ function nosDeadline(record: NosRecord): number | null {
 }
 
 function nosCurrent(record: NosRecord | undefined, at: number): boolean {
+  if (!evidenceClock.trusted) return false;
   if (record === undefined || record.amount === null || record.retained || record.error !== null || nosError !== null) return false;
   const deadline = nosDeadline(record);
-  return deadline !== null && at < deadline;
+  return deadline !== null && at < deadline && freshnessNow() < deadline;
 }
 
 function renderNosCell(cell: HTMLTableCellElement, address: string, at: number): void {
   const record = nosRecords.get(address);
   const known = record?.amount != null;
   const current = nosCurrent(record, at);
+  rememberDisplayExpiry(cell, current ? nosDeadline(record!) : null);
   const text = formatNos(record?.amount);
   const issue = record?.error ?? nosError;
   const scope = "Standard associated token account only; additional wallet token accounts, staking and claimable rewards are excluded.";
@@ -1104,11 +1177,11 @@ function renderNosStatus(at: number): void {
   const retained = [...nosRecords.values()].filter(record => record.amount !== null && !nosCurrent(record, at)).length;
   const failed = nosError !== null || [...nosRecords.values()].some(record => record.error !== null);
   setText(notice, nosLoading && nosRecords.size === 0 && nosError === null ? "Reading confirmed NOS balances…"
-    : `${current}/${suppliedAddresses.length} current NOS balances${retained ? ` · ${retained} retained gray` : ""}. Best-effort checks every two minutes while visible; readings expire after three minutes.${failed ? ` Some reads are unavailable.${nosRefreshDueAt !== null ? ` Next eligible retry: ${timestamp(nosRefreshDueAt)}.` : ""}` : ""}`);
+    : `${current}/${suppliedAddresses.length} current NOS balances${retained ? ` · ${retained} retained gray` : ""}. Best-effort checks every two minutes while visible; readings expire after three minutes.${failed ? ` Some reads are unavailable.${nosRefreshDueAt !== null ? ` Next eligible retry: ${timestamp(deadlines.at(nosRefreshDueAt))}.` : ""}` : ""}`);
 }
 
 function updateNos(): void {
-  const at = Date.now();
+  const at = liveNow();
   for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')) {
     const cell = row.querySelector<HTMLTableCellElement>('td[data-col="nos"]');
     if (cell) renderNosCell(cell, row.dataset.host!, at);
@@ -1120,16 +1193,14 @@ function scheduleNosExpiry(): void {
   if (nosExpiryTimer !== undefined) clearTimeout(nosExpiryTimer);
   nosExpiryTimer = undefined;
   if (!visibleStateView()) return;
-  const nowMs = Date.now();
-  const deadlines = [...nosRecords.values()].flatMap(record =>
-    nosCurrent(record, nowMs) && nosDeadline(record) !== null ? [nosDeadline(record)!] : []);
+  const deadlines = displayedExpiryDates(["nos"]);
   if (deadlines.length === 0) return;
   nosExpiryTimer = setTimeout(() => {
     nosExpiryTimer = undefined;
     if (!visibleStateView()) return;
     updateNos();
     scheduleNosExpiry();
-  }, Math.max(1, Math.min(...deadlines) - nowMs));
+  }, Math.max(1, Math.min(...deadlines) - freshnessNow()));
 }
 
 function scheduleNosRefresh(): void {
@@ -1139,7 +1210,7 @@ function scheduleNosRefresh(): void {
   nosRefreshTimer = setTimeout(() => {
     nosRefreshTimer = undefined;
     if (visibleStateView()) void loadNos();
-  }, Math.max(1, nosRefreshDueAt - Date.now()));
+  }, Math.max(1, deadlines.remaining(nosRefreshDueAt)));
 }
 
 function resumeNosView(): void {
@@ -1153,13 +1224,13 @@ function resumeNosView(): void {
 
 async function loadNos(): Promise<void> {
   if (nosLoading || inputLoading || inputError || suppliedAddresses.length === 0 || !visibleStateView() ||
-      nosAttempted && nosRefreshDueAt !== null && nosRefreshDueAt > Date.now()) return;
+      nosAttempted && nosRefreshDueAt !== null && deadlines.remaining(nosRefreshDueAt) > 0) return;
   nosAttempted = true;
   nosLoading = true;
   const controller = startRead("nos");
   if (nosRefreshTimer !== undefined) clearTimeout(nosRefreshTimer);
   nosRefreshTimer = undefined;
-  renderNosStatus(Date.now());
+  renderNosStatus(liveNow());
   try {
     const payload = await fleetTransport.read("nos", previewURL("nos"), {
       addresses: suppliedAddresses, signal: controller.signal, current: () => currentRead("nos", controller), progressive: false,
@@ -1167,19 +1238,19 @@ async function loadNos(): Promise<void> {
     if (!currentRead("nos", controller)) return;
     if (payload === null || typeof payload !== "object" || !("hosts" in payload) || !Array.isArray(payload.hosts) ||
         !payload.hosts.every(isNosRecord) || payload.hosts.length !== suppliedAddresses.length ||
-        payload.hosts.some(record => record.checkedAtMs !== null && record.checkedAtMs > Date.now() + 15_000 ||
-          record.blockTimeMs !== null && record.blockTimeMs > Date.now() + 15_000) ||
+        payload.hosts.some(record => record.checkedAtMs !== null && record.checkedAtMs > liveNow() + 15_000 ||
+          record.blockTimeMs !== null && record.blockTimeMs > liveNow() + 15_000) ||
         new Set(payload.hosts.map(record => record.address)).size !== suppliedAddresses.length ||
         !payload.hosts.every(record => suppliedAddresses.includes(record.address)) ||
         !("nextRefreshAtMs" in payload) || payload.nextRefreshAtMs !== null &&
         (typeof payload.nextRefreshAtMs !== "number" || !Number.isFinite(payload.nextRefreshAtMs))) throw new Error("Invalid NOS response.");
     nosRecords = new Map(payload.hosts.map(record => [record.address, record]));
     nosError = null;
-    nosRefreshDueAt = payload.nextRefreshAtMs;
+    nosRefreshDueAt = deadlines.source(payload.nextRefreshAtMs);
   } catch (error) {
     if (!currentRead("nos", controller)) return;
     nosError = fleetReadError(error, "The confirmed NOS balances could not be loaded.");
-    nosRefreshDueAt = Date.now() + NOS_REFRESH_INTERVAL_MS;
+    nosRefreshDueAt = deadlines.after(NOS_REFRESH_INTERVAL_MS);
   } finally {
     if (!currentRead("nos", controller)) return;
     activeReads.delete("nos");
@@ -1192,12 +1263,16 @@ async function loadNos(): Promise<void> {
 }
 
 function stakingView(address: string, at: number) {
-  return projectStaking(stakingRecords.get(address), metadataRecords.get(address), at, stakingError, metadataError);
+  const view = projectStaking(stakingRecords.get(address), metadataRecords.get(address), at, stakingError, metadataError,
+    supplied ? freshnessNow() : at);
+  return !supplied || evidenceClock.trusted ? view : { ...view, amountCurrent: false, targetCurrent: false,
+    marketCurrent: false, comparisonCurrent: false, satisfied: false, nextExpiryAtMs: null };
 }
 
 function renderStakingCell(cell: HTMLTableCellElement, address: string, at: number): void {
   const record = stakingRecords.get(address);
   const view = stakingView(address, at);
+  rememberDisplayExpiry(cell, supplied ? view.nextExpiryAtMs : null);
   const actual = formatStakingAmount(view.amount);
   const required = formatStakingAmount(view.target);
   const known = view.amount !== null || view.target !== null;
@@ -1267,11 +1342,11 @@ function renderStakingStatus(at: number): void {
   const failed = stakingError !== null || [...stakingRecords.values()].some(record =>
     record.stake.error !== null || record.requirement.error !== null || record.marketError !== null);
   setText(notice, stakingLoading && stakingRecords.size === 0 && stakingError === null ? "Reading confirmed staking vaults and market targets…"
-    : `${current}/${suppliedAddresses.length} current staking vault amounts · ${comparisons} current market comparisons${retained ? ` · ${retained} amounts retained gray` : ""}. Best-effort checks every 30 minutes while visible; readings expire after 35 minutes.${failed ? ` Some reads are unavailable.${stakingRefreshDueAt !== null ? ` Next eligible retry: ${timestamp(stakingRefreshDueAt)}.` : ""}` : ""}`);
+    : `${current}/${suppliedAddresses.length} current staking vault amounts · ${comparisons} current market comparisons${retained ? ` · ${retained} amounts retained gray` : ""}. Best-effort checks every 30 minutes while visible; readings expire after 35 minutes.${failed ? ` Some reads are unavailable.${stakingRefreshDueAt !== null ? ` Next eligible retry: ${timestamp(deadlines.at(stakingRefreshDueAt))}.` : ""}` : ""}`);
 }
 
 function updateStaking(): void {
-  const at = Date.now();
+  const at = liveNow();
   for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')) {
     const cell = row.querySelector<HTMLTableCellElement>('td[data-col="stakedNos"]');
     if (cell) renderStakingCell(cell, row.dataset.host!, at);
@@ -1283,18 +1358,14 @@ function scheduleStakingExpiry(): void {
   if (stakingExpiryTimer !== undefined) clearTimeout(stakingExpiryTimer);
   stakingExpiryTimer = undefined;
   if (!visibleStateView()) return;
-  const nowMs = Date.now();
-  const deadlines = suppliedAddresses.flatMap(address => {
-    const deadline = stakingView(address, nowMs).nextExpiryAtMs;
-    return deadline === null ? [] : [deadline];
-  });
+  const deadlines = displayedExpiryDates(["stakedNos"]);
   if (deadlines.length === 0) return;
   stakingExpiryTimer = setTimeout(() => {
     stakingExpiryTimer = undefined;
     if (!visibleStateView()) return;
     updateStaking();
     scheduleStakingExpiry();
-  }, Math.max(1, Math.min(...deadlines) - nowMs));
+  }, Math.max(1, Math.min(...deadlines) - freshnessNow()));
 }
 
 function scheduleStakingRefresh(): void {
@@ -1304,7 +1375,7 @@ function scheduleStakingRefresh(): void {
   stakingRefreshTimer = setTimeout(() => {
     stakingRefreshTimer = undefined;
     if (visibleStateView()) void loadStaking();
-  }, Math.max(1, stakingRefreshDueAt - Date.now()));
+  }, Math.max(1, deadlines.remaining(stakingRefreshDueAt)));
 }
 
 function resumeStakingView(): void {
@@ -1330,13 +1401,13 @@ function refreshChangedStakingMarkets(): void {
 
 async function loadStaking(marketChanged = false): Promise<void> {
   if (stakingLoading || inputLoading || inputError || suppliedAddresses.length === 0 || !visibleStateView() ||
-      !marketChanged && stakingAttempted && stakingRefreshDueAt !== null && stakingRefreshDueAt > Date.now()) return;
+      !marketChanged && stakingAttempted && stakingRefreshDueAt !== null && deadlines.remaining(stakingRefreshDueAt) > 0) return;
   stakingAttempted = true;
   stakingLoading = true;
   const controller = startRead("staking");
   if (stakingRefreshTimer !== undefined) clearTimeout(stakingRefreshTimer);
   stakingRefreshTimer = undefined;
-  renderStakingStatus(Date.now());
+  renderStakingStatus(liveNow());
   try {
     const payload = await fleetTransport.read("staking", previewURL("staking"), {
       addresses: suppliedAddresses, signal: controller.signal, current: () => currentRead("staking", controller), progressive: false,
@@ -1346,18 +1417,18 @@ async function loadStaking(marketChanged = false): Promise<void> {
         !payload.hosts.every(isStakingRecord) || payload.hosts.length !== suppliedAddresses.length ||
         payload.hosts.some(record => [record.stake.checkedAtMs, record.stake.blockTimeMs,
           record.requirement.checkedAtMs, record.requirement.blockTimeMs, record.marketFetchedAtMs]
-          .some(time => time !== null && time > Date.now() + 15_000)) ||
+          .some(time => time !== null && time > liveNow() + 15_000)) ||
         new Set(payload.hosts.map(record => record.address)).size !== suppliedAddresses.length ||
         !payload.hosts.every(record => suppliedAddresses.includes(record.address)) ||
         !("nextRefreshAtMs" in payload) || payload.nextRefreshAtMs !== null &&
         (typeof payload.nextRefreshAtMs !== "number" || !Number.isFinite(payload.nextRefreshAtMs))) throw new Error("Invalid staking response.");
     stakingRecords = new Map(payload.hosts.map(record => [record.address, record]));
     stakingError = null;
-    stakingRefreshDueAt = payload.nextRefreshAtMs;
+    stakingRefreshDueAt = deadlines.source(payload.nextRefreshAtMs);
   } catch (error) {
     if (!currentRead("staking", controller)) return;
     stakingError = fleetReadError(error, "The confirmed staking vaults and market targets could not be loaded.");
-    stakingRefreshDueAt = Date.now() + STAKING_REFRESH_INTERVAL_MS;
+    stakingRefreshDueAt = deadlines.after(STAKING_REFRESH_INTERVAL_MS);
   } finally {
     if (!currentRead("staking", controller)) return;
     activeReads.delete("staking");
@@ -1408,18 +1479,21 @@ function durationPhase(identity: string): number {
 }
 
 function durationLabel(view: DurationView, name: string): string {
-  const text = queuedDurationLayout === "combined" && view.kind === "queue" ? "Queued" : view.text;
+  const text = view.unavailableReason === "api-offline" ? "Timing unavailable while API is Offline"
+    : queuedDurationLayout === "combined" && view.kind === "queue" ? "Queued" : view.text;
   return `Duration for ${name}: ${text}.${view.freshness === "retained" ? " Stale estimate; current activity unconfirmed." : ""} Open details.`;
 }
 
 function renderDuration(cell: HTMLTableCellElement, view: DurationView, host: Pick<HostView, "id" | "name">, live = false, checkedAt: number | null = null): void {
   durationViews.set(cell, view);
+  rememberDisplayExpiry(cell, live && view.freshness === "current" ? view.validUntilMs : null);
   durationNames.set(cell, host.name);
   const container = sourceContainer(cell);
   container.dataset.durationKind = view.kind;
   cell.dataset.durationKind = view.kind;
   cell.dataset.durationTone = view.tone;
   cell.dataset.durationFreshness = view.freshness;
+  cell.dataset.durationUnavailableReason = view.unavailableReason ?? "";
   // Update the same connected button and fill; ordinary clock/API updates must
   // preserve CSS timelines, keyboard focus and an open dialog’s return target.
   const value = container.querySelector<HTMLButtonElement>(".duration-value") ?? document.createElement("button");
@@ -1430,7 +1504,8 @@ function renderDuration(cell: HTMLTableCellElement, view: DurationView, host: Pi
   const timing = view.kind === "duration";
   const stale = view.freshness === "retained";
   const missing = view.kind === "unknown";
-  const noAssignment = live && missing && view.text !== "Populating..";
+  const offlineUnavailable = view.unavailableReason === "api-offline";
+  const noAssignment = live && missing && view.text !== "Populating.." && !offlineUnavailable;
   const checked = checkedFact(checkedAt, live ? "Job checked" : "Sample observed");
   rememberInfo(cell, {
     summary: timing
@@ -1438,11 +1513,15 @@ function renderDuration(cell: HTMLTableCellElement, view: DurationView, host: Pi
         ink(view.text, stale ? "muted" : view.tone === "exceeded" ? "negative" : view.limitSeconds === null ? "accent" : "positive"),
         ink(view.tone === "exceeded" ? " — over the five-minute grace." : view.limitSeconds === null ? " — no reported limit." : ".")]
       : [ink(view.kind === "queue" ? "Duration: queued; see Queued for the position."
-        : noAssignment ? "Duration: no running timing is shown." : "Duration: no useful timing is available yet.", missing && !noAssignment ? "warning" : "muted")],
+        : offlineUnavailable ? "Duration: timing unavailable while API is Offline."
+          : noAssignment ? stale ? "Duration: earlier reading retained; current timing is unconfirmed."
+            : "Duration: no running timing in the last job reading."
+            : "Duration: no useful timing is available yet.", missing && !noAssignment && !offlineUnavailable ? "warning" : "muted")],
     facts: [
       [ink(timing ? stale ? "Stale estimate; current activity is unconfirmed." : "Current timing reading."
         : view.kind === "queue" ? "Queued activity does not supply a run duration."
-          : noAssignment ? "An absent, ended or superseded assignment leaves a dash." : "Unknown timing is not zero elapsed time.", stale || missing && !noAssignment ? "warning" : "plain")],
+          : offlineUnavailable ? "Job timing is unknown; API Offline does not prove the job stopped."
+            : noAssignment ? "The last job reading reported no running timing." : "Unknown timing is not zero elapsed time.", stale || missing && !noAssignment ? "warning" : "plain")],
       ...(timing ? [[ink(view.limitSeconds === null ? "No valid positive duration limit is reported."
         : "Red starts more than five minutes past the unchanged job limit.", view.tone === "exceeded" ? "negative" : "plain")]] : []),
       ...(timing || !live ? [checked] : []),
@@ -1474,17 +1553,23 @@ function liveQueue(address: string, nowMs: number): QueueView {
   const metadata = metadataRecords.get(address);
   const job = liveActivity(address, nowMs).eligibleJob;
   const state = nodeInfoRecords.get(address);
-  return projectQueue(queueRecords.get(address), address, metadata?.values?.marketAddress ?? null, nowMs, {
+  const view = projectQueue(queueRecords.get(address), address, metadata?.values?.marketAddress ?? null, nowMs, {
+    freshnessAtMs: freshnessNow(),
     ...(job ? { job: jobsError ? { ...job, error: jobsError, retained: true } : job } : {}),
     ...(state ? { state: nodeInfoError ? { ...state, error: nodeInfoError, retained: true } : state } : {}),
     connectionError: queueError ?? metadataError ?? metadata?.error ??
       (metadata?.retained ? "The host’s reported market is retained from an unavailable metadata read." : null),
   });
+  return evidenceClock.trusted ? view : { ...view, current: false, checkCurrent: false,
+    retained: view.kind !== "unknown", description: `${CLOCK_RETAINED_NOTE}\n\n${view.description}` };
 }
 
 function renderLiveQueue(cell: HTMLTableCellElement, address: string, nowMs: number): void {
   const view = liveQueue(address, nowMs);
   const record = queueRecords.get(address);
+  const jobUntil = view.kind === "running" ? liveActivity(address, nowMs).eligibleJob?.validUntilMs : null;
+  rememberDisplayExpiry(cell, view.checkCurrent && record?.validUntilMs != null
+    ? Math.min(record.validUntilMs, jobUntil ?? Infinity) : null);
   cell.dataset.queueKind = view.kind;
   cell.dataset.queueCurrent = String(view.current);
   cell.dataset.queueCheckCurrent = String(view.checkCurrent);
@@ -1527,7 +1612,7 @@ function latestCheck(values: readonly (number | null | undefined)[]): number | n
 }
 
 function checkSchedule(lastAt: number | null, nextAt: number | null | undefined, watching = false, checkingJobs = false): string {
-  const due = nextAt !== null && nextAt !== undefined && nextAt <= Date.now();
+  const due = nextAt !== null && nextAt !== undefined && nextAt <= liveNow();
   const next = due && watching ? " Eligible checks queued/in progress."
     : due && checkingJobs ? " Checking eligible jobs."
       : nextAt !== null && nextAt !== undefined ? ` Next permitted check: ${timestamp(nextAt)}.` : "";
@@ -1550,14 +1635,14 @@ function renderQueueStatus(): void {
   const notice = element("queue-status");
   notice.hidden = !supplied || inputLoading || inputError !== null || suppliedAddresses.length === 0;
   if (notice.hidden) return;
-  const at = Date.now();
+  const at = liveNow();
   const views = suppliedAddresses.map(address => ({ view: liveQueue(address, at), record: queueRecords.get(address) }));
   const checked = views.filter(({ view }) => view.checkCurrent).length;
   const positions = views.filter(({ view }) => view.kind === "position" && view.current).length;
   const absent = views.filter(({ view, record }) => view.checkCurrent && record?.position === null).length;
   const retained = views.filter(({ view }) => view.kind === "position" && view.retained).length;
   const schedule = checkSchedule(latestCheck([...queueRecords.values()].map(record => record.checkedAtMs)),
-    queueProviderNextAt !== undefined ? queueProviderNextAt : queueRefreshDueAt, queueWatching);
+    queueProviderNextAt !== undefined ? queueProviderNextAt : deadlines.at(queueRefreshDueAt), queueWatching);
   const issues = readIssues([queueError, metadataError, ...[...queueRecords.values()].map(record => record.error),
     ...[...metadataRecords.values()].map(record => record.error)]);
   setText(notice, queueLoading && queueRecords.size === 0 && queueError === null ? "Reading Nosana market queues…"
@@ -1568,9 +1653,8 @@ function scheduleQueueExpiry(): void {
   if (queueExpiryTimer !== undefined) clearTimeout(queueExpiryTimer);
   queueExpiryTimer = undefined;
   if (!visibleStateView() || queueError) return;
-  const nowMs = Date.now();
-  const deadlines = [...queueRecords.values()].flatMap(record =>
-    record.validUntilMs !== null && record.validUntilMs > nowMs ? [record.validUntilMs] : []);
+  const nowMs = freshnessNow();
+  const deadlines = displayedExpiryDates(["queued"]);
   if (deadlines.length === 0) return;
   queueExpiryTimer = setTimeout(() => {
     queueExpiryTimer = undefined;
@@ -1587,7 +1671,7 @@ function scheduleQueueRefresh(): void {
   queueRefreshTimer = setTimeout(() => {
     queueRefreshTimer = undefined;
     if (visibleStateView()) void loadQueue();
-  }, Math.max(0, queueRefreshDueAt - Date.now()));
+  }, Math.max(0, deadlines.remaining(queueRefreshDueAt)));
 }
 
 function resumeQueueView(): void {
@@ -1599,9 +1683,19 @@ function resumeQueueView(): void {
   scheduleQueueExpiry();
 }
 
-function liveActivity(address: string, nowMs: number) {
+const CLOCK_RETAINED_NOTE = "The server time reference is awaiting refresh after suspension. Earlier readings are retained; their original check times are unchanged.";
+const DELIVERY_RETAINED_NOTE = "Delivery timing is uncertain, so the original freshness deadline may already have passed. The reading is retained with its original check time; no new source failure is inferred.";
+
+function liveApi(record: NodeInfoRecord | undefined, at: number) {
+  const view = projectNodeApi(record, at, nodeInfoError);
+  const uncertain = view.current && view.expiresAtMs !== null && freshnessNow() >= view.expiresAtMs;
+  return evidenceClock.trusted && !uncertain ? view : { ...view, current: false, expiresAtMs: null,
+    description: `${evidenceClock.trusted ? DELIVERY_RETAINED_NOTE : CLOCK_RETAINED_NOTE}\n\n${view.description}` };
+}
+
+function liveActivity(address: string, nowMs: number): LiveActivityView {
   const metadata = metadataRecords.get(address);
-  return activityDisplay.project({
+  const view = activityDisplay.project({
     address, nowMs,
     state: nodeInfoRecords.get(address), job: jobRecords.get(address), queue: queueRecords.get(address),
     marketAddress: metadata?.values?.marketAddress ?? null,
@@ -1609,6 +1703,31 @@ function liveActivity(address: string, nowMs: number) {
     queueError: queueError ?? metadataError ?? metadata?.error ??
       (metadata?.retained ? "The host’s reported market is retained from an unavailable metadata read." : null),
   });
+  // Clock uncertainty is presentation-only. Feeding a fabricated source error
+  // into the history reconciler would permanently invalidate cached evidence.
+  const at = freshnessNow();
+  const uncertainState = view.state.current !== null && view.state.validUntilMs !== null && at >= view.state.validUntilMs;
+  const uncertainDuration = view.duration.freshness === "current" && view.duration.validUntilMs != null && at >= view.duration.validUntilMs;
+  const note = evidenceClock.trusted ? DELIVERY_RETAINED_NOTE : CLOCK_RETAINED_NOTE;
+  const state = evidenceClock.trusted && !uncertainState ? view.state : {
+    ...view.state, current: null, retained: view.state.reported !== null,
+    description: `${note}\n\n${view.state.description}`,
+  };
+  let duration = view.duration;
+  if (!evidenceClock.trusted) duration = { ...duration,
+    freshness: duration.freshness === "unknown" ? "unknown" : "retained",
+    description: `${note}\n\n${duration.description}`,
+  };
+  else if (uncertainDuration) duration = duration.kind === "duration" ? {
+    ...duration, freshness: "retained", description: `${note}\n\n${duration.description}`,
+  } : {
+    ...duration, kind: "unknown", text: "Populating..", freshness: "unknown", tone: "unbounded", animated: false,
+    description: `${note}\n\n${duration.description}`,
+  };
+  // Availability is presentation-only too; it cannot replace the source/history
+  // selection above or convert clock uncertainty into an Offline confirmation.
+  if (evidenceClock.trusted) duration = projectDurationAvailability(duration, liveApi(nodeInfoRecords.get(address), nowMs));
+  return { ...view, state, duration };
 }
 
 function liveDuration(address: string, nowMs: number): DurationView {
@@ -1632,7 +1751,7 @@ function renderJobStatus(nowMs: number): void {
   const pending = [...jobRecords.values()].filter(record => record.pending).length;
   const failed = [...jobRecords.values()].filter(record => record.error !== null && !record.pending).length;
   const pendingDeadlines = [...jobRecords.values()].flatMap(record => record.pending && record.retryAtMs !== null ? [record.retryAtMs] : []);
-  const retryAt = jobProviderNextAt ?? (pendingDeadlines.length ? Math.min(...pendingDeadlines) : jobRefreshDueAt);
+  const retryAt = jobProviderNextAt ?? (pendingDeadlines.length ? Math.min(...pendingDeadlines) : deadlines.at(jobRefreshDueAt));
   const schedule = checkSchedule(latestCheck([...jobRecords.values()].map(record => record.checkedAtMs)), retryAt, false, jobsLoading);
   const wait = jobWaitReason === "retry-after" ? "Provider Retry-After pause"
     : jobWaitReason === "local-budget" ? "Shared request budget pause"
@@ -1644,7 +1763,7 @@ function renderJobStatus(nowMs: number): void {
 }
 
 function updateLiveDurations(): void {
-  const at = Date.now();
+  const at = liveNow();
   if (["duration", "queued", "state"].includes(activeSort.column)) {
     renderSupplied();
     return;
@@ -1667,11 +1786,12 @@ function scheduleJobTick(): void {
   if (jobTickTimer !== undefined) clearTimeout(jobTickTimer);
   jobTickTimer = undefined;
   if (!visibleStateView() || inputLoading || inputError || suppliedAddresses.length === 0) return;
-  const nowMs = Date.now();
-  let delay = 1_000;
-  for (const record of jobRecords.values()) {
-    if (record.validUntilMs !== null && record.validUntilMs > nowMs) delay = Math.min(delay, record.validUntilMs - nowMs);
-  }
+  const nowMs = liveNow();
+  const expiryNowMs = freshnessNow();
+  // Reanchoring/coalesced rendering must not shift the elapsed-second boundary.
+  // Job starts are Unix seconds, so tick at the next server-referenced second.
+  let delay = 1_000 - nowMs % 1_000;
+  for (const deadline of displayedExpiryDates(["duration"])) delay = Math.min(delay, Math.max(1, deadline - expiryNowMs));
   jobTickTimer = setTimeout(() => {
     jobTickTimer = undefined;
     if (!visibleStateView()) return;
@@ -1687,7 +1807,7 @@ function scheduleJobRefresh(): void {
   jobRefreshTimer = setTimeout(() => {
     jobRefreshTimer = undefined;
     if (visibleStateView()) void loadJobs();
-  }, Math.max(0, jobRefreshDueAt - Date.now()));
+  }, Math.max(0, deadlines.remaining(jobRefreshDueAt)));
 }
 
 function resumeJobView(): void {
@@ -1978,8 +2098,10 @@ function renderNodeInfoCell(cell: HTMLTableCellElement, key: NodeColumn, address
   value.classList.add("node-info-value");
   let details: string;
   let information: InfoContent;
+  displayExpiry.delete(cell);
   if (key === "state") {
     const view = synthetic ? projectNodeStateDisplay(record, nowMs, connectionError) : liveActivity(address, nowMs).state;
+    if (!synthetic && view.current !== null && view.validUntilMs !== null) displayExpiry.set(cell, view.validUntilMs);
     value.classList.toggle("node-state-retained", view.current === null && view.reported !== null);
     value.classList.toggle("node-state-unknown", view.reported === null);
     value.classList.toggle("node-state-animated", view.animated);
@@ -2014,7 +2136,8 @@ function renderNodeInfoCell(cell: HTMLTableCellElement, key: NodeColumn, address
       ], source: details,
     };
   } else if (key === "api") {
-    const view = projectNodeApi(record, nowMs, connectionError);
+    const view = synthetic ? projectNodeApi(record, nowMs, connectionError) : liveApi(record, nowMs);
+    if (!synthetic && view.current && view.expiresAtMs !== null) displayExpiry.set(cell, view.expiresAtMs);
     value.classList.add("node-api-value");
     cell.dataset.apiStatus = view.status;
     cell.dataset.apiCurrent = String(view.current);
@@ -2072,30 +2195,23 @@ function renderNodeInfoStatus(nowMs: number): void {
   const noNetwork = [...nodeInfoRecords.values()].filter(record => record.values?.networkUnavailableReason).length;
   const initialLoading = nodeInfoLoading && nodeInfoRecords.size === 0 && nodeInfoError === null;
   const schedule = checkSchedule(latestCheck([...nodeInfoRecords.values()].map(record => record.fetchedAtMs)),
-    stateProviderNextAt !== undefined ? stateProviderNextAt : stateRefreshDueAt, stateWatching);
+    stateProviderNextAt !== undefined ? stateProviderNextAt : deadlines.at(stateRefreshDueAt), stateWatching);
   const issues = readIssues([nodeInfoError, ...[...nodeInfoRecords.values()].flatMap(record => [record.error, record.activity?.error])]);
   setText(notice, initialLoading ? "Reading Node Info state and network fields…"
     : `${recent}/${suppliedAddresses.length} recent state readings · ${retained} retained estimates · ${suppliedAddresses.length - recent - retained} unknown${failed ? ` · ${failed} unavailable reads; last reported values retained` : ""}${noNetwork ? ` · ${noNetwork} network reports unavailable` : ""}.${nodeInfoError ? " Node Info refresh failed." : ""}${schedule}${issues} Node-backed State expires within 30 seconds; job-backed State uses its original 180-second deadline. Retained icons stay dimmed and follow the State animation setting.`);
 }
 
-function scheduleStateExpiry(projectedAt = Date.now()): void {
+function scheduleStateExpiry(): void {
   if (stateExpiryTimer !== undefined) clearTimeout(stateExpiryTimer);
   stateExpiryTimer = undefined;
-  if (!supplied || !visibleStateView()) return;
-  const records = [...nodeInfoRecords.values()];
-  const nowMs = Date.now();
-  const displayDelays = suppliedAddresses.flatMap(address => {
-    const view = liveActivity(address, projectedAt).state;
-    return view.current !== null && view.validUntilMs !== null
-      ? [Math.max(1, view.validUntilMs - nowMs + 1)] : [];
-  });
-  const delays = [...displayDelays, nextStateExpiryDelay(records, projectedAt, nowMs), nextApiExpiryDelay(records, projectedAt, nowMs)]
-    .filter((delay): delay is number => delay !== null);
-  if (delays.length === 0) return;
-  const delay = Math.min(...delays);
+  if (!supplied || !visibleStateView() || !evidenceClock.trusted) return;
+  const nowMs = freshnessNow();
+  const expiryDates = displayedExpiryDates(["api", "state"]);
+  if (expiryDates.length === 0) return;
+  const delay = Math.max(1, Math.min(...expiryDates) - nowMs);
   stateExpiryTimer = setTimeout(() => {
     // Keep buttons (and dialog return-focus targets) intact while state expires.
-    const at = Date.now();
+    const at = liveNow();
     if (activeSort.column === "api") { render(); return; }
     for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')) {
       const address = row.dataset.host!;
@@ -2106,7 +2222,7 @@ function scheduleStateExpiry(projectedAt = Date.now()): void {
     }
     renderNodeInfoStatus(at);
     updateLiveDurations();
-    scheduleStateExpiry(at);
+    scheduleStateExpiry();
   }, delay);
 }
 
@@ -2122,7 +2238,7 @@ function scheduleStateRefresh(): void {
   stateRefreshTimer = setTimeout(() => {
     stateRefreshTimer = undefined;
     if (visibleStateView()) void loadNodeInfo();
-  }, Math.max(0, stateRefreshDueAt - Date.now()));
+  }, Math.max(0, deadlines.remaining(stateRefreshDueAt)));
 }
 
 function resumeStateView(): void {
@@ -2164,7 +2280,7 @@ function renderSuppliedStatus(nodeProjectionTime: number): void {
 }
 
 function renderSupplied(): void {
-  const nodeProjectionTime = Date.now();
+  const nodeProjectionTime = liveNow();
   renderSuppliedStatus(nodeProjectionTime);
   const tbody = element("fleet-rows");
   const connectedRows = new Map([...tbody.querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')]
@@ -2179,7 +2295,7 @@ function renderSupplied(): void {
       queued: liveQueue(address, nodeProjectionTime).sortValue,
       ...Object.fromEntries(METADATA_COLUMNS.map((key) => [key, metadataValue(metadataRecords.get(address)?.values, key)])),
       state: liveActivity(address, nodeProjectionTime).state.reported,
-      api: projectNodeApi(nodeInfoRecords.get(address), nodeProjectionTime, nodeInfoError).label,
+      api: liveApi(nodeInfoRecords.get(address), nodeProjectionTime).label,
       dl: nodeInfoRecords.get(address)?.values?.dl ?? null,
       ul: nodeInfoRecords.get(address)?.values?.ul ?? null,
       ping: nodeInfoRecords.get(address)?.values?.ping ?? null,
@@ -2259,7 +2375,7 @@ function renderSupplied(): void {
       tbody.insertBefore(row, at);
     }
   });
-  scheduleStateExpiry(nodeProjectionTime);
+  scheduleStateExpiry();
   scheduleSolExpiry();
   scheduleNosExpiry();
   scheduleStakingExpiry();
@@ -2293,7 +2409,7 @@ function render(): void {
   }
   setText(element("preview-description"), fleetConfig.sourceMode === "snapshot"
     ? `${fleetConfig.sourceLabel}. This view reads backend observations; opening or refreshing it does not establish new host evidence. Each value keeps its original source time and freshness deadline. Missing observations stay unknown; retained timings remain dimmed estimates. Host activity and API reachability are independent.` : supplied
-    ? "Metadata comes from Nosana metrics; State uses Node Info with independent job/queue evidence when needed. API shows reachability from that same check; DL/UL/Ping also use Node Info. Duration uses assigned Nosana jobs with an independent local clock; Queued uses the ordered Nosana market queue. SOL uses confirmed public mainnet RPC with shared best-effort 30-second checks. NOS checks standard associated token accounts every two minutes. Staked NOS checks vault holdings and current market targets every 30 minutes. Latest-job history, claimable rewards and physical GPU identity remain unconnected. Duration shows Populating.. until useful timing arrives, and a dash for confirmed absence; State uses a dim amber spinner until useful activity arrives. Other unconnected fields stay unknown. Synthetic scenarios stay separate."
+    ? "Metadata comes from Nosana metrics; State uses Node Info with independent job/queue evidence when needed. API shows reachability from that same check; DL/UL/Ping also use Node Info. Duration uses assigned Nosana jobs with an independent local clock; Queued uses the ordered Nosana market queue. SOL uses confirmed public mainnet RPC with shared best-effort 30-second checks. NOS checks standard associated token accounts every two minutes. Staked NOS checks vault holdings and current market targets every 30 minutes. Latest-job history, claimable rewards and physical GPU identity remain unconnected. Duration shows Populating.. until useful timing arrives, and a dash for current confirmed absence or unavailable timing while API Offline is confirmed; State uses a dim amber spinner until useful activity arrives. Other unconnected fields stay unknown. Synthetic scenarios stay separate."
     : "Sample preview. Market names and hardware readings are synthetic; Job durations and Node states add separate synthetic examples. No live data sources are connected. A dash means unknown, not zero.");
   if (supplied) {
     renderSupplied();
@@ -2454,13 +2570,12 @@ async function loadMetadata(): Promise<void> {
     if (!currentRead("metadata", controller)) return;
     activeReads.delete("metadata");
     metadataLoading = false;
-    const nowMs = Date.now();
     // Metadata remains demand-driven. Resume checks its source-cache deadline,
     // without adding a background metadata loop or replaying missed refreshes.
     const times = [...metadataRecords.values()].flatMap(record => record.fetchedAtMs === null ? [] : [record.fetchedAtMs]);
     const failed = metadataError !== null || [...metadataRecords.values()].some(record => record.error !== null);
-    metadataRefreshDueAt = failed ? nowMs + 60_000 : times.length === 0 ? nowMs + 300_000
-      : Math.min(...times) + 300_000;
+    metadataRefreshDueAt = failed ? deadlines.after(60_000) : times.length === 0 ? deadlines.after(300_000)
+      : deadlines.source(Math.min(...times) + 300_000);
     render();
   }
 }
@@ -2476,7 +2591,7 @@ async function loadNodeInfo(): Promise<void> {
   const controller = startRead("state");
   let madeProgress = false;
   render();
-  const readStartedAt = Date.now();
+  const readStartedAt = performance.now();
   try {
     await readProgressive("node-info", "state", controller, isNodeInfoRecord, (records, complete, payload) => {
       if (complete || payload.watching === true) {
@@ -2490,8 +2605,8 @@ async function loadNodeInfo(): Promise<void> {
         // It must wake discovery too, without duplicating an ordinary cold read
         // or invalidating a timing that is already known.
         return (previous !== undefined || jobRecords.get(record.address)?.job === null) &&
-          projectNodeState(previous, Date.now(), nodeInfoError).reported !== "RUNNING_JOB" &&
-          projectNodeState(record, Date.now()).current === "RUNNING_JOB";
+          projectNodeState(previous, liveNow(), nodeInfoError).reported !== "RUNNING_JOB" &&
+          projectNodeState(record, liveNow()).current === "RUNNING_JOB";
       });
       madeProgress = hasNewStateReads(records, nodeInfoRecords) || madeProgress;
       const updated = records.map(record => [record.address, retainFailedActivity(record, nodeInfoRecords.get(record.address))] as const);
@@ -2499,7 +2614,7 @@ async function loadNodeInfo(): Promise<void> {
       else for (const [address, record] of updated) nodeInfoRecords.set(address, record);
       nodeInfoError = null;
       // Record supersession before coalesced rendering can skip an intermediate frame.
-      for (const record of records) liveActivity(record.address, Date.now());
+      for (const record of records) liveActivity(record.address, liveNow());
       if (newRunningAssignment) {
         if (jobsLoading) jobRefreshRequested = true;
         else void loadJobs();
@@ -2514,18 +2629,31 @@ async function loadNodeInfo(): Promise<void> {
     activeReads.delete("state");
     nodeInfoLoading = false;
     stateWatching = false;
-    const completedAt = Date.now();
+    const completedAt = liveNow();
     const nextDelay = nodeInfoError ? STATE_REFRESH_INTERVAL_MS
-      : nextStateRefreshDelay([...nodeInfoRecords.values()], completedAt, madeProgress, completedAt - readStartedAt);
+      : nextStateRefreshDelay([...nodeInfoRecords.values()], completedAt, madeProgress, performance.now() - readStartedAt);
     // A manual read served from cache must not postpone an already planned
     // update. A failed/unchanged overdue read still waits, avoiding rapid retries.
+    const next = deadlines.after(nextDelay);
     stateRefreshDueAt = nodeInfoError === null && upstreamNextAt !== undefined
-      ? upstreamNextAt === null ? null : Math.max(completedAt + 1_000, upstreamNextAt)
-      : !madeProgress && previousRefreshDueAt !== null && previousRefreshDueAt > completedAt
-        ? Math.min(previousRefreshDueAt, completedAt + nextDelay) : completedAt + nextDelay;
+      ? deadlines.source(upstreamNextAt, 1_000)
+      : !madeProgress && previousRefreshDueAt !== null && deadlines.remaining(previousRefreshDueAt) > 0
+        ? deadlines.earlier(previousRefreshDueAt, next) : next;
     render();
     scheduleStateRefresh();
   }
+}
+
+function nextLegacyJobDeadline(at: number): RefreshDeadline {
+  const records = [...jobRecords.values()];
+  const next = nextJobRefreshAt(records, at);
+  // The finite-provider compatibility policy can choose either a source date
+  // or a local wait. Preserve that distinction when the server clock advances.
+  const source = records.some(record => record.retryAtMs === next && next > at ||
+    !record.pending && record.error === null && record.checkedAtMs !== null &&
+    (record.retryAtMs === null || record.retryAtMs <= at) && next > at &&
+    record.checkedAtMs + (record.job === null ? 60_000 : JOB_REFRESH_INTERVAL_MS) === next);
+  return source ? deadlines.source(next)! : deadlines.after(next - at);
 }
 
 async function loadJobs(): Promise<void> {
@@ -2537,7 +2665,7 @@ async function loadJobs(): Promise<void> {
   jobsAttempted = true;
   jobsLoading = true;
   const controller = startRead("jobs");
-  renderJobStatus(Date.now());
+  renderJobStatus(liveNow());
   try {
     await readProgressive("jobs", "jobs", controller, isJobRecord, (records, complete, payload) => {
       const next = complete ? new Map<string, JobRecord>() : new Map(jobRecords);
@@ -2563,7 +2691,7 @@ async function loadJobs(): Promise<void> {
       }
       jobRecords = next;
       jobsError = null;
-      for (const record of records) liveActivity(record.address, Date.now());
+      for (const record of records) liveActivity(record.address, liveNow());
       if (!complete) scheduleProgressRender("jobs", records);
     });
   } catch (error) {
@@ -2573,21 +2701,26 @@ async function loadJobs(): Promise<void> {
     if (!currentRead("jobs", controller)) return;
     activeReads.delete("jobs");
     jobsLoading = false;
-    const nowMs = Date.now();
+    const nowMs = liveNow();
+    // A bounded server read can finish successfully with eligible work still
+    // pending. Continue from its cache promptly instead of adding another 30s
+    // to every portion. Future provider/quota deadlines remain authoritative.
+    const pendingContinuation = [...jobRecords.values()].some(record => record.pending);
     const next = jobsError === null && upstreamNextAt !== undefined
-      ? upstreamNextAt === null ? null : upstreamNextAt > nowMs ? upstreamNextAt : nowMs + 30_000
-      : jobsError === null ? nextJobRefreshAt([...jobRecords.values()], nowMs) : nowMs + JOB_REFRESH_INTERVAL_MS;
+      ? upstreamNextAt === null ? null : upstreamNextAt > nowMs ? deadlines.source(upstreamNextAt, pendingContinuation ? 1_000 : 0)
+        : deadlines.after(pendingContinuation ? 1_000 : 30_000)
+      : jobsError === null ? nextLegacyJobDeadline(nowMs) : deadlines.after(JOB_REFRESH_INTERVAL_MS);
     // Source times keep cached reads on schedule. An explicit provider retry can
     // move the deadline later, including an hourly/daily budget pause.
-    jobRefreshDueAt = jobsError !== null && previousDueAt !== null && previousDueAt > nowMs
-      ? Math.min(previousDueAt, next ?? Infinity) : next;
+    jobRefreshDueAt = jobsError !== null && previousDueAt !== null && deadlines.remaining(previousDueAt) > 0
+      ? deadlines.earlier(previousDueAt, next) : next;
     if (jobRefreshRequested) {
       jobRefreshRequested = false;
       // A State hint may have changed shared eligibility after this response was
       // captured. Recheck the preview once, even when the older snapshot carried
       // a deadline. The server still enforces upstream budgets and Retry-After;
       // repeated RUNNING reports do not request additional follow-ups.
-      jobRefreshDueAt = nowMs;
+      jobRefreshDueAt = deadlines.after(0);
     }
     if (supplied) updateLiveDurations();
     scheduleJobRefresh();
@@ -2626,7 +2759,7 @@ async function loadQueue(): Promise<void> {
       if (complete) queueRecords = new Map(records.map(record => [record.address, record]));
       else for (const record of records) queueRecords.set(record.address, record);
       queueError = null;
-      for (const record of records) liveActivity(record.address, Date.now());
+      for (const record of records) liveActivity(record.address, liveNow());
       if (!complete) scheduleProgressRender("queue", records);
     });
   } catch (error) {
@@ -2637,12 +2770,11 @@ async function loadQueue(): Promise<void> {
     activeReads.delete("queue");
     queueLoading = false;
     queueWatching = false;
-    const nowMs = Date.now();
-    const next = nowMs + QUEUE_REFRESH_INTERVAL_MS;
+    const next = deadlines.after(QUEUE_REFRESH_INTERVAL_MS);
     // A manual cached read cannot postpone the independent visible-view check.
     queueRefreshDueAt = queueError === null && upstreamNextAt !== undefined
-      ? upstreamNextAt === null ? null : Math.max(nowMs + 1_000, upstreamNextAt)
-      : previousDueAt !== null && previousDueAt > nowMs ? Math.min(previousDueAt, next) : next;
+      ? deadlines.source(upstreamNextAt, 1_000)
+      : previousDueAt !== null && deadlines.remaining(previousDueAt) > 0 ? deadlines.earlier(previousDueAt, next) : next;
     if (supplied) updateLiveDurations();
     scheduleQueueRefresh();
     scheduleQueueExpiry();

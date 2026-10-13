@@ -190,6 +190,24 @@ source identities and date semantics are exported by `./contracts`. Source check
 times are not gateway response times or indexer synchronization watermarks.
 A cache read, heartbeat, login, reload or restart must never refresh them.
 
+The gateway adds `serverTimeMs` (integer Unix milliseconds) to successful roster
+replies and every finite/streamed data envelope at emission, including replay and
+quiet watch frames. This field is gateway-owned, overrides any source-supplied
+field of that name, and is excluded from stored observations. The browser uses it
+to compare original evidence against a shared server reference instead of the
+viewer's wall clock. It never renews source timestamps or validity windows. Keep
+the gateway and trusted ingestion clocks consistent; viewer calibration cannot
+repair an incorrectly timestamped source. Older envelopes without the field are
+accepted for compatibility. Connection-check responses remain independent of data
+timing. The server's optional `now` function is an isolated-test clock for envelope
+emission only; it does not change authorization deadlines or provider scheduling.
+The browser measures each request's elapsed dispatch-to-frame interval and uses
+it with `serverTimeMs` to bound freshness uncertainty. This adds no wire fields
+or source reads. Conservative expiry is separate from elapsed job time, future
+timestamp checks and refresh/backoff scheduling; a slow frame cannot widen an
+earlier compatible, tighter calibration. Gateways must stamp emission time for
+each response rather than reuse a previously serialized server-time envelope.
+
 The reference store provides:
 
 ```ts

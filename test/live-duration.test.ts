@@ -143,7 +143,22 @@ test("invalid local deadlines cannot mint freshness but preserve validated start
     assert.equal(view.freshness, "retained");
     assert.equal(view.elapsedSeconds, 121);
     assert.equal(view.animated, true);
+    assert.equal(view.validUntilMs, null);
   }
+});
+
+test("selected live timing and absence expose their original validated deadline without renewing it", () => {
+  for (const value of [record, { ...record, job: null }, { ...record, retained: true, error: "HTTP 429" },
+    { ...record, job: null, error: "HTTP 429" }]) {
+    const before = structuredClone(value);
+    for (const at of [checkedAtMs, checkedAtMs + JOB_DISPLAY_VALIDITY_MS, checkedAtMs + 86_400_000]) {
+      assert.equal(project(value, at).validUntilMs, record.validUntilMs);
+    }
+    assert.deepEqual(value, before);
+  }
+  assert.equal(projectLiveDuration(undefined, address, checkedAtMs).validUntilMs, undefined);
+  assert.equal(project({ ...record, job: null, checkedAtMs: null, validUntilMs: null }).validUntilMs, undefined);
+  assert.equal(project({ ...record, job: null, validUntilMs: checkedAtMs + JOB_DISPLAY_VALIDITY_MS + 1 }).validUntilMs, null);
 });
 
 test("pending budget delay stays explicit and never extends evidence deadlines", () => {
@@ -223,15 +238,32 @@ test("missing limits preserve elapsed text without motion or an overrun alarm ev
   assert.doesNotMatch(view.description, /EXCEEDED/);
 });
 
-test("confirmed absence stays a dash while missing information keeps populating", () => {
+test("only current confirmed absence uses a dash; expired absence returns to populating", () => {
   const absent = { ...record, job: null };
   assert.equal(project(absent).text, "—");
   assert.equal(project(absent).freshness, "current");
   assert.match(project(absent).description, /No running assignment/);
-  assert.equal(project(absent, checkedAtMs + 86_400_000).text, "—");
-  assert.equal(project(absent, checkedAtMs + 86_400_000).freshness, "retained");
+  assert.equal(project(absent, absent.validUntilMs! - 1).text, "—");
+  for (const at of [absent.validUntilMs!, checkedAtMs + 86_400_000]) {
+    const expired = project(absent, at);
+    assert.equal(expired.text, "Populating..");
+    assert.equal(expired.freshness, "unknown");
+    assert.match(expired.description, /Last confirmed: no running assignment/);
+    assert.match(expired.description, /Original confirmation 2027-01-15T08:00:00.000Z/);
+  }
   assert.equal(project({ ...absent, checkedAtMs: null, validUntilMs: null }).text, "Populating..");
   assert.equal(projectLiveDuration(undefined, address, checkedAtMs).text, "Populating..");
+});
+
+test("failed or malformed absence cannot claim current absence", () => {
+  const absent = { ...record, job: null };
+  for (const changes of [{ retained: true }, { error: "HTTP 429" }, { validUntilMs: null },
+    { validUntilMs: checkedAtMs }, { validUntilMs: checkedAtMs + JOB_DISPLAY_VALIDITY_MS + 1 },
+    { checkedAtMs: checkedAtMs + 1 }]) {
+    assert.equal(project({ ...absent, ...changes }).text, "Populating..");
+  }
+  assert.equal(projectLiveDuration(absent, address, checkedAtMs, "Preview disconnected").text, "Populating..");
+  assert.equal(project(withJob({ state: "COMPLETED" }), record.validUntilMs!).text, "Populating..");
 });
 
 test("browser contract rejects malformed fields and cross-host job data", () => {

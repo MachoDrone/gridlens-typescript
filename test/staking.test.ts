@@ -99,6 +99,51 @@ test("staking and target expire independently at original 35-minute deadlines; f
   }
 });
 
+test("delivery uncertainty expires stake, target and market support independently without hiding their values", () => {
+  for (const expiredPart of ["stake", "requirement"] as const) {
+    const row = reading();
+    row[expiredPart].checkedAtMs = NOW - 100;
+    row[expiredPart].validUntilMs = NOW + STAKING_DISPLAY_VALIDITY_MS - 100;
+    const at = NOW + STAKING_DISPLAY_VALIDITY_MS - 200;
+    const report = metadata(addresses[3]!, at);
+    const before = structuredClone({ row, report });
+    assert.equal(projectStaking(row, report, at).comparisonCurrent, true);
+    const view = projectStaking(row, report, at, null, null, at + 100);
+    assert.equal(view.amountCurrent, expiredPart !== "stake");
+    assert.equal(view.targetCurrent, expiredPart !== "requirement");
+    assert.equal(view.marketCurrent, true);
+    assert.equal(view.comparisonCurrent, false);
+    assert.equal(view.satisfied, false);
+    assert.equal(view.amount, row.stake.amount);
+    assert.equal(view.target, row.requirement.targetAmount);
+    assert.equal(view.nextExpiryAtMs, NOW + STAKING_DISPLAY_VALIDITY_MS);
+    assert.deepEqual({ row, report }, before);
+  }
+  const row = reading();
+  const expiredMarket = projectStaking(row, metadata(), NOW, null, null, NOW + STAKING_MARKET_VALIDITY_MS);
+  assert.equal(expiredMarket.amountCurrent, true);
+  assert.equal(expiredMarket.targetCurrent, false);
+  assert.equal(expiredMarket.marketCurrent, false);
+  assert.equal(expiredMarket.target, row.requirement.targetAmount);
+  assert.equal(expiredMarket.nextExpiryAtMs, row.stake.validUntilMs);
+  assert.deepEqual(projectStaking(row, metadata(), NOW, null, null, NOW - 1), projectStaking(row, metadata(), NOW));
+});
+
+test("freshness uncertainty cannot admit future stake, target or metadata beyond the existing tolerance", () => {
+  for (const futurePart of ["stake", "requirement"] as const) {
+    const row = reading();
+    row[futurePart].checkedAtMs = NOW + 15_001;
+    row[futurePart].validUntilMs = NOW + 15_001 + STAKING_DISPLAY_VALIDITY_MS;
+    const view = projectStaking(row, metadata(), NOW, null, null, NOW + 20_000);
+    assert.equal(futurePart === "stake" ? view.amountCurrent : view.targetCurrent, false);
+    assert.equal(view.satisfied, false);
+  }
+  const view = projectStaking(reading(), metadata(addresses[3]!, NOW + 15_001), NOW, null, null, NOW + 20_000);
+  assert.equal(view.marketCurrent, false);
+  assert.equal(view.targetCurrent, false);
+  assert.equal(view.amountCurrent, true);
+});
+
 test("vault withdrawals and unstaking preserve holdings semantics without presenting full eligibility", () => {
   const row = reading("0", "0");
   row.stake.recordedAmount = "3000000";

@@ -160,7 +160,7 @@ test("expanded phone menu preserves live Duration ticks and scheduled State refr
     const path = new URL(request.url()).pathname;
     if (path.startsWith("/preview/") && path.endsWith(".json") && path !== "/preview/connection.json") reads.push(path);
   });
-  const server = await startPreviewServer({ hostsFile, real200HostsFile, port: 0,
+  const server = await startPreviewServer({ now: () => now, hostsFile, real200HostsFile, port: 0,
     metadataProvider: async input => ({ hosts: input.map(address => ({ address, values: null, fetchedAtMs: null,
       retained: false, error: null, marketError: null })) }),
     nodeInfoProvider: async input => {

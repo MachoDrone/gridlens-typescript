@@ -74,7 +74,7 @@ async function start(): Promise<string> {
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ hostsFile, port: 0,
+  const server = await startPreviewServer({ now: () => NOW, hostsFile, port: 0,
     metadataProvider: async () => metadata(), nodeInfoProvider: async () => nodeInfo(),
     jobProvider: jobs, queueProvider: async () => queue(), nosProvider: emptyNos, stakingProvider: emptyStaking,
     solProvider: async input => ({ hosts: input.map((address, index) => ({
@@ -338,10 +338,10 @@ test("combined details preserve both full source descriptions and timestamps beh
   await page.keyboard.press("Escape");
   await page.clock.fastForward(31_000);
   await page.locator("#queued-duration-layout-toggle").click();
-  await expect(cell(page, "duration", 2)).toHaveText("—");
+  await expect(cell(page, "duration", 2)).toHaveText("Populating..");
   await cell(page, "duration", 2).getByRole("button").click();
   await expectConciseDialog(page);
-  await expect(page.locator(".info-summary")).toContainText("no running timing is shown");
+  await expect(page.locator(".info-summary")).toContainText("no useful timing is available yet");
   expect(await page.locator("#info-body").innerText()).not.toMatch(/assigned job|job checked|no running assignment/i);
   await expect(source).toContainText("previous counter was superseded");
   await expect(source).toContainText(new Date(NOW + 1000).toISOString());

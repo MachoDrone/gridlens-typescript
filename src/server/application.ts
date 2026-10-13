@@ -31,6 +31,8 @@ export interface FleetServerOptions {
   /** Also bounds revocation of an already open feed; injected short values aid tests. */
   accessCheckIntervalMs?: number;
   requestTimeoutMs?: number;
+  /** Wire-envelope time only; access checks and source observations keep their own clocks. */
+  now?: () => number;
 }
 
 export class FleetConfigurationError extends Error {}
@@ -59,7 +61,7 @@ function escapeAttribute(text: string): string {
 
 /** Shared UI and data contracts, with platform access/source adapters supplied explicitly. */
 export async function startFleetServer({ integration, directory = defaultDirectory, host = "127.0.0.1", port = 4173,
-  publicOrigin, basePath = "", accessCheckIntervalMs = 30_000, requestTimeoutMs = 120_000 }: FleetServerOptions): Promise<Server> {
+  publicOrigin, basePath = "", accessCheckIntervalMs = 30_000, requestTimeoutMs = 120_000, now = Date.now }: FleetServerOptions): Promise<Server> {
   if (!integration || typeof integration.resolveAccess !== "function" || typeof integration.source?.read !== "function") {
     throw new FleetConfigurationError("A trusted access resolver and snapshot source are required.");
   }
@@ -182,7 +184,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
       if (!isContext(context)) throw new Error("Invalid authorized roster");
       const owned: FleetContext = { scopeId: context.scopeId, rosterRevision: context.rosterRevision,
         addresses: [...context.addresses] };
-      if (rosterRead) { send(200, { addresses: owned.addresses, error: null, rosterRevision: owned.rosterRevision }); return; }
+      if (rosterRead) { send(200, { addresses: owned.addresses, error: null, rosterRevision: owned.rosterRevision, serverTimeMs: now() }); return; }
       if (request.method === "HEAD") { send(200, {}); return; }
       const stream = request.headers.accept?.split(",").some(value => value.trim().split(";", 1)[0] === "application/x-ndjson") ?? false;
       const watching = stream && watchResources.has(resource) && integration.source.watch !== undefined;
@@ -217,7 +219,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
         if (!stream) return;
         withheld = false;
         if (watching && Date.now() - accountingAt >= 60_000) { frames = 0; bytes = 0; accountingAt = Date.now(); }
-        const body = JSON.stringify({ ...snapshot, complete, ...(watching ? { watching: true } : {}) }) + "\n";
+        const body = JSON.stringify({ ...snapshot, complete, ...(watching ? { watching: true } : {}), serverTimeMs: now() }) + "\n";
         bytes += Buffer.byteLength(body);
         if (++frames > owned.addresses.length * 20 + 20 || Buffer.byteLength(body) > maximumFrameBytes
           || bytes > maximumBodyBytes || response.writableLength > maximumFrameBytes) throw new Error("Fleet stream size limit");
@@ -250,7 +252,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
         const result = normalizeFleetSnapshot(resource, raw, owned.addresses);
         if (!await stillAuthorized()) return;
         if (stream) emit(result, true);
-        else send(200, result);
+        else send(200, { ...result, serverTimeMs: now() });
       }
     };
     void Promise.race([work(), canceled]).catch(() => {
