@@ -58,7 +58,7 @@ async function start(
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs, hostsFile, port: 0, nodeInfoProvider: provider, metadataProvider });
+  const server = await startPreviewServer({ now: () => NOW, stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs, hostsFile, port: 0, nodeInfoProvider: provider, metadataProvider });
   servers.push(server);
   const bound = server.address();
   if (!bound || typeof bound === "string") throw new Error("Missing isolated preview port");

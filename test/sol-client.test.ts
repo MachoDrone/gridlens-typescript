@@ -49,6 +49,28 @@ function harness(handler?: (call: Call) => Response | undefined | Promise<Respon
   return { provider, calls, now: () => time, advance: (ms: number) => { time += ms; }, setTime: (value: number) => { time = value; } };
 }
 
+test("retired SOL cache eviction preserves chain verification, slot watermarks and request pacing", async () => {
+  let regress = false;
+  const fixture = harness(call => regress && call.method === "getMultipleAccounts"
+    ? reply(call.id, { context: { slot: 1 }, value: (call.params[0] as string[]).map(() => ({ lamports: 99 })) }) : undefined);
+  const original = await fixture.provider([host]);
+  fixture.advance(3_600_000);
+  fixture.provider.retention!.prune({ hosts: new Set(), markets: new Set(), nowMs: fixture.now() });
+  assert.equal(fixture.provider.retention!.retryAt!(host), 0);
+  const rejoined = await fixture.provider([host]);
+  assert.equal(rejoined.hosts[0]!.lamports, original.hosts[0]!.lamports);
+  assert.equal(fixture.calls.filter(call => call.method === "getGenesisHash").length, 1);
+  const balances = fixture.calls.filter(call => call.method === "getMultipleAccounts");
+  assert((balances[1]!.params[1] as { minContextSlot: number }).minContextSlot >= original.hosts[0]!.contextSlot!);
+  fixture.advance(3_600_000);
+  fixture.provider.retention!.prune({ hosts: new Set(), markets: new Set(), nowMs: fixture.now() });
+  regress = true;
+  const rejected = await fixture.provider([host]);
+  assert.equal(rejected.hosts[0]!.lamports, null, "evicted values cannot return as retained data");
+  assert.match(rejected.hosts[0]!.error!, /slot/i);
+  for (let index = 1; index < fixture.calls.length; index++) assert(fixture.calls[index]!.time - fixture.calls[index - 1]!.time >= 1_000);
+});
+
 test("200/201 hosts use bounded batches, exact positional identity and one oldest-slot freshness read", async () => {
   for (const count of [200, 201]) {
     const fixture = harness();

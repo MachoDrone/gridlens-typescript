@@ -60,7 +60,7 @@ async function start(provider: (input: readonly string[]) => Promise<HostMetadat
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs,
+  const server = await startPreviewServer({ now: () => FETCHED_AT, stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs,
     hostsFile, port: 0, metadataProvider: provider,
     nodeInfoProvider: async input => ({ hosts: input.map(address => ({
       address, values: null, fetchedAtMs: null, validUntilMs: null,

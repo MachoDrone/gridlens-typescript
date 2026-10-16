@@ -55,7 +55,7 @@ async function start(count: number, overrides: Partial<Options>): Promise<string
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses.slice(0, count)));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, hostsFile, port: 0, solProvider: emptySol,
+  const server = await startPreviewServer({ now: () => NOW, stakingProvider: emptyStaking, nosProvider: emptyNos, hostsFile, port: 0, solProvider: emptySol,
     metadataProvider: async input => ({ hosts: input.map(address => ({ ...metadata(address, NOW), values: null, fetchedAtMs: null })) }),
     nodeInfoProvider: async input => ({ hosts: input.map(address => ({ ...state(address, NOW), values: null, fetchedAtMs: null, validUntilMs: null })) }),
     jobProvider: async input => ({ hosts: input.map(address => ({ ...job(address, NOW), job: null, checkedAtMs: null, validUntilMs: null })) }),
@@ -211,11 +211,12 @@ for (const count of [86, 200]) {
 
 test("canceling an unfinished stream permits immediate resume and ignores its late partial callbacks", async ({ page }) => {
   let calls = 0;
+  let serverNow = NOW;
   let firstSignal: AbortSignal | undefined;
   let oldUpdate: ((snapshot: JobSnapshot) => void) | undefined;
   let release!: () => void;
   const delayed = new Promise<void>(resolve => { release = resolve; });
-  await page.goto(await start(86, { jobProvider: async (input, signal, update) => {
+  await page.goto(await start(86, { now: () => serverNow, jobProvider: async (input, signal, update) => {
     calls++;
     if (calls === 1) {
       firstSignal = signal;
@@ -231,6 +232,8 @@ test("canceling an unfinished stream permits immediate resume and ignores its la
   await expect(cell(page, "duration")).toHaveAttribute("data-duration-tone", "current");
   await visibility(page, "hidden");
   await expect.poll(() => firstSignal?.aborted).toBe(true);
+  // The resumed response is emitted now, while its cached job proof keeps NOW.
+  serverNow = await page.evaluate(() => Date.now());
   await visibility(page, "visible");
   await expect.poll(() => calls).toBe(2);
   await expect(cell(page, "duration")).toHaveText("—");

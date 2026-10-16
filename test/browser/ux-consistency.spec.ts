@@ -876,7 +876,7 @@ test.describe("mobile refresh consistency", () => {
     let stateCalls = 0;
     const reads: string[] = [];
     const external: string[] = [];
-    const server = await startPreviewServer({ hostsFile, real200HostsFile, port: 0,
+    const server = await startPreviewServer({ now: () => now, hostsFile, real200HostsFile, port: 0,
       metadataProvider: async input => ({ hosts: input.map(address => ({ address, values: null, fetchedAtMs: null,
         retained: false, error: null, marketError: null })) }),
       nodeInfoProvider: async input => {

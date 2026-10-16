@@ -62,6 +62,7 @@ async function running(index = 2, at = NOW): Promise<JobSnapshot> {
 }
 
 async function start(queueProvider: () => Promise<QueueSnapshot>, options: {
+  now?: () => number;
   jobProvider?: () => Promise<JobSnapshot>;
   nodeInfoProvider?: (addresses: readonly string[]) => Promise<NodeInfoSnapshot>;
   metadataProvider?: (addresses: readonly string[]) => Promise<HostMetadataSnapshot>;
@@ -70,7 +71,7 @@ async function start(queueProvider: () => Promise<QueueSnapshot>, options: {
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, hostsFile, port: 0, queueProvider,
+  const server = await startPreviewServer({ now: options.now ?? (() => NOW), stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, hostsFile, port: 0, queueProvider,
     jobProvider: options.jobProvider ?? emptyJobs,
     metadataProvider: options.metadataProvider ?? metadata,
     nodeInfoProvider: options.nodeInfoProvider ?? noState,
@@ -208,7 +209,7 @@ test("cached queue evidence expires locally without advancing API times or keepi
   await expect(cell(page)).toHaveAttribute("data-queue-retained", "true");
   await expect(cell(page).getByRole("button")).toHaveCSS("color", "rgb(119, 119, 119)");
   await expect(cell(page)).toHaveAttribute("data-queue-checked-at", String(NOW));
-  await expect(cell(page, 0, "duration")).toHaveText("—");
+  await expect(cell(page, 0, "duration")).toHaveText("Populating..");
   await expect(cell(page, 2)).toHaveText("—");
   await expect(cell(page, 2, "duration").locator(".duration-active")).toHaveCount(1);
   await cell(page).getByRole("button").click();
@@ -233,7 +234,7 @@ test("transport failures retain gray positions and recover without background lo
   fail = true;
   await refresh(page);
   await expect(cell(page)).toHaveAttribute("data-queue-retained", "true");
-  await expect(cell(page, 0, "duration")).toHaveText("—");
+  await expect(cell(page, 0, "duration")).toHaveText("Populating..");
   await expect(page.locator("#queue-status")).toContainText("Queue refresh failed");
   fail = false;
   await refresh(page);
@@ -265,7 +266,7 @@ test("successful absence clears prior positions and queued/running transitions u
   await page.route("**/preview/queue.json", async route => route.fulfill({ json: queues(await page.evaluate(() => Date.now()), [], 0) }));
   await refresh(page);
   await expect(cell(page)).toHaveText("—");
-  await expect(cell(page, 0, "duration")).toHaveText("—");
+  await expect(cell(page, 0, "duration")).toHaveText("Populating..");
 });
 
 test("host identity, duplicate positions and inconsistent market snapshots fail closed", async ({ page }) => {
@@ -283,7 +284,7 @@ test("host identity, duplicate positions and inconsistent market snapshots fail 
     await refresh(page);
     await expect(cell(page)).toHaveText("2/12");
     await expect(cell(page)).toHaveAttribute("data-queue-retained", "true");
-    await expect(cell(page, 0, "duration")).toHaveText("—");
+    await expect(cell(page, 0, "duration")).toHaveText("Populating..");
   }
 });
 
@@ -306,7 +307,7 @@ test("market changes reject prior membership and conflicting running State keeps
   conflict = true;
   await refresh(page);
   await expect(cell(page)).toHaveAttribute("data-queue-retained", "true");
-  await expect(cell(page, 0, "duration")).toHaveText("—");
+  await expect(cell(page, 0, "duration")).toHaveText("Populating..");
   marketChanged = true;
   await refresh(page);
   await expect(cell(page)).toHaveText("—");
@@ -316,7 +317,13 @@ test("market changes reject prior membership and conflicting running State keeps
 
 test("hidden/synthetic views and pagehide pause queue reads, then resume overdue checks", async ({ page }) => {
   let calls = 0;
-  await page.goto(await start(async () => { calls++; return queues(await page.evaluate(() => Date.now())); }));
+  let serverNow = NOW;
+  await page.goto(await start(async () => {
+    calls++;
+    const at = await page.evaluate(() => Date.now());
+    serverNow = at;
+    return queues(at);
+  }, { now: () => serverNow }));
   await openPreviewTools(page);
   await expect(cell(page)).toHaveText("2/12");
   await visibility(page, "hidden");

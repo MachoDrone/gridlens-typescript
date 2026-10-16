@@ -168,3 +168,40 @@ test("fresh confirmed absence remains distinct from an unchecked or expired dash
   assert.equal(project(queued, now, { job: running }).checkCurrent, true);
   assert.equal(project(queued, now, { job: running }).current, false);
 });
+
+test("delivery uncertainty expires queue positions and absence without moving source time or values", () => {
+  for (const record of [queued, empty]) {
+    const before = structuredClone(record);
+    assert.equal(project(record, now, { freshnessAtMs: now + 29_999 }).checkCurrent, true);
+    const uncertain = project(record, now, { freshnessAtMs: now + 30_000 });
+    assert.equal(uncertain.current, false);
+    assert.equal(uncertain.checkCurrent, false);
+    assert.equal(uncertain.text, project(record).text);
+    assert.match(uncertain.description, /may have expired during delivery/);
+    assert.ok(uncertain.description.includes(new Date(record.checkedAtMs!).toISOString()));
+    assert.deepEqual(record, before);
+  }
+  assert.deepEqual(project(queued, now + 30_000, { freshnessAtMs: now }), project(queued, now + 30_000));
+});
+
+test("queue running arrows require the job deadline and use only certainly current Node State", () => {
+  const shortJob = { ...running, validUntilMs: now + 5_000 };
+  assert.equal(project(empty, now, { job: shortJob }).kind, "running");
+  assert.equal(project(empty, now, { job: shortJob, freshnessAtMs: now + 5_000 }).kind, "unknown");
+  const state = { ...node("QUEUED"), validUntilMs: now + 5_000 };
+  const original = structuredClone({ shortJob, state });
+  assert.equal(project(empty, now, { job: running, state }).kind, "unknown");
+  assert.equal(project(empty, now, { job: running, state, freshnessAtMs: now + 5_000 }).kind, "running");
+  assert.deepEqual({ shortJob, state }, original);
+});
+
+test("a later freshness bound cannot admit genuinely future queue, job or Node evidence", () => {
+  const options = { freshnessAtMs: now + 20_000 };
+  const futureQueue = { ...queued, checkedAtMs: now + 1, validUntilMs: now + 30_001 };
+  assert.equal(project(futureQueue, now, options).current, false);
+  assert.doesNotMatch(project(futureQueue, now, options).description, /may have expired during delivery/);
+  const futureJob = { ...running, checkedAtMs: now + 1, validUntilMs: now + 180_001 };
+  assert.equal(project(empty, now, { ...options, job: futureJob }).kind, "unknown");
+  const futureNode = { ...node("RUNNING_JOB"), fetchedAtMs: now + 1, validUntilMs: now + 30_001 };
+  assert.equal(project(queued, now, { ...options, state: futureNode }).current, true);
+});

@@ -48,6 +48,10 @@ export interface DurationView {
   readonly freshness: "current" | "retained" | "unknown";
   readonly tone: "current" | "exceeded" | "retained" | "unbounded";
   readonly animated: boolean;
+  /** Validated original live evidence deadline; presentation never renews it. */
+  readonly validUntilMs?: number | null;
+  /** Presentation only; API reachability does not establish job absence. */
+  readonly unavailableReason?: "api-offline";
 }
 
 export function normalizeDurationMode(value: unknown): DurationDisplayMode {

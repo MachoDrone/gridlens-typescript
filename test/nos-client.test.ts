@@ -83,6 +83,21 @@ function harness(handler?: (call: Call) => Response | undefined | Promise<Respon
     now: () => time, advance: (ms: number) => { time += ms; }, setTime: (value: number) => { time = value; } };
 }
 
+test("retired NOS cache eviction preserves verified mint, shared transport and slot watermarks", async () => {
+  const fixture = harness();
+  const original = await fixture.provider([host]);
+  fixture.advance(3_600_000);
+  fixture.provider.retention!.prune({ hosts: new Set(), markets: new Set(), nowMs: fixture.now() });
+  assert.equal(fixture.provider.retention!.retryAt!(host), 0);
+  const rejoined = await fixture.provider([host]);
+  assert.equal(rejoined.hosts[0]!.amount, original.hosts[0]!.amount);
+  assert.equal(rejoined.hosts[0]!.tokenAccount, original.hosts[0]!.tokenAccount);
+  assert.equal(fixture.calls.filter(call => call.method === "getGenesisHash").length, 1);
+  assert.equal(fixture.calls.filter(call => call.method === "getAccountInfo").length, 1, "mint verification belongs to the provider, not a retired host");
+  const balances = fixture.calls.filter(call => call.method === "getMultipleAccounts");
+  assert((balances[1]!.params[1] as { minContextSlot: number }).minContextSlot >= original.hosts[0]!.contextSlot!);
+});
+
 test("NOS derives standard accounts, verifies the mint and batches 200/201 hosts with one oldest-slot check", async () => {
   assert.equal(accounts[0], "7YRi3YNGuwSQ5rrqRXgRjepE4HW9U7tLYWiRVvYoWcNw");
   for (const count of [200, 201]) {

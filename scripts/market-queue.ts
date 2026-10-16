@@ -1,5 +1,7 @@
 import { createSharedRead, createRequestLimiter, throwIfAborted } from "./shared-read.ts";
 import { createDemandWatch } from "./demand-watch.ts";
+import { combineRetention, pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 import { comparePriority, refreshPriority } from "./scheduling-priority.ts";
 import type { ActivityPriority } from "./scheduling-priority.ts";
 import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
@@ -23,12 +25,14 @@ export interface MarketQueueRecord {
   error: string | null;
 }
 export interface MarketQueueProvider {
+  retention?: ProviderRetention;
   (marketAddress: string, signal?: AbortSignal): Promise<MarketQueueRecord>;
   watch?: (markets: readonly string[], signal: AbortSignal, onUpdate: (record: MarketQueueRecord) => void) => Promise<never>;
   nextRefreshAt?: (market: string) => number;
 }
 /** Progress is emitted as complete currently known market cohorts. */
 export interface QueueProvider {
+  retention?: ProviderRetention;
   (addresses: readonly string[], signal?: AbortSignal, onUpdate?: (snapshot: QueueSnapshot) => void): Promise<QueueSnapshot>;
   watch?: (addresses: readonly string[], signal: AbortSignal, onUpdate: (snapshot: QueueSnapshot) => void) => Promise<never>;
 }
@@ -195,6 +199,18 @@ export function createMarketQueueProvider({ fetch: fetcher = globalThis.fetch, n
       return Promise.reject(new Error("Queue input must contain unique validated market addresses."));
     }
     return watch.watch(markets, signal, (_market, record) => onUpdate(structuredClone(record)));
+  };
+  provider.retention = {
+    marketRetryAt: market => Math.max(cache.get(market)?.nextAttemptAt ?? 0, watch.retryAt(market)),
+    prune: ({ markets, nowMs }) => {
+      const keep = new Set(markets);
+      for (const market of new Set([...cache.keys(), ...attempted])) {
+        if ((cache.get(market)?.nextAttemptAt ?? 0) > nowMs || readMarket.isReading(market)
+          || watch.isWatching(market)) keep.add(market);
+      }
+      pruneCacheKeys(keep, cache, attempted);
+      watch.prune(keep);
+    },
   };
   return provider;
 }
@@ -392,5 +408,12 @@ export function createQueueProvider({ metadataProvider, marketQueueProvider = cr
       });
     };
   }
+  provider.retention = combineRetention(marketQueueProvider.retention, {
+    markets: hosts => [...hosts].flatMap(address => {
+      const market = previous.get(address)?.marketAddress;
+      return market ? [market] : [];
+    }),
+    prune: ({ hosts }) => pruneCacheKeys(hosts, previous),
+  });
   return provider;
 }

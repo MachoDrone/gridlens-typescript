@@ -67,9 +67,12 @@ function unknown(description: string, checkCurrent = false): QueueView {
 /** Resolve presentation only; reading State/Duration here never launches a read. */
 export function projectQueue(
   record: QueueRecord | undefined, address: string, marketAddress: string | null, nowMs: number,
-  options: { job?: JobRecord | undefined; state?: NodeInfoRecord | undefined; connectionError?: string | null } = {},
+  options: { job?: JobRecord | undefined; state?: NodeInfoRecord | undefined; connectionError?: string | null;
+    /** Conservative expiry time only; source validation still uses nowMs. */
+    freshnessAtMs?: number } = {},
 ): QueueView {
   if (!isJobTimestamp(nowMs)) throw new RangeError("Clock must be non-negative integer milliseconds in the Date range");
+  const freshnessAtMs = Math.max(nowMs, options.freshnessAtMs ?? nowMs);
   if (!isMetadataAddress(address) || record && (!isQueueRecord(record) || record.address !== address)) {
     return unknown("Queue position unknown: queue evidence does not match this Host Address or is invalid.");
   }
@@ -78,14 +81,18 @@ export function projectQueue(
   }
   const error = options.connectionError ?? record.error;
   const stateView = options.state?.address === address ? projectNodeState(options.state, nowMs) : null;
-  const state = stateView?.current ?? null;
+  const state = stateView !== null && stateView.validUntilMs !== null &&
+    freshnessAtMs < stateView.validUntilMs ? stateView.current : null;
   const duration = projectLiveDuration(options.job, address, nowMs);
-  const runningAssignment = duration.kind === "duration" && duration.freshness === "current";
+  const runningAssignment = duration.kind === "duration" && duration.freshness === "current" &&
+    isJobTimestamp(duration.validUntilMs) && freshnessAtMs < duration.validUntilMs;
   const runningJob = runningAssignment && duration.limitSeconds !== null;
-  const timingValid = isJobTimestamp(record.checkedAtMs) && record.checkedAtMs <= nowMs &&
+  const timesValid = isJobTimestamp(record.checkedAtMs) && record.checkedAtMs <= nowMs &&
     isJobTimestamp(record.validUntilMs) && record.validUntilMs > record.checkedAtMs &&
-    record.validUntilMs <= record.checkedAtMs + QUEUE_DISPLAY_VALIDITY_MS && nowMs < record.validUntilMs &&
+    record.validUntilMs <= record.checkedAtMs + QUEUE_DISPLAY_VALIDITY_MS &&
     (record.sourceUpdatedAtMs === null || record.sourceUpdatedAtMs <= record.checkedAtMs);
+  const timingValid = timesValid && freshnessAtMs < record.validUntilMs!;
+  const deliveryUncertain = timesValid && nowMs < record.validUntilMs! && record.validUntilMs! <= freshnessAtMs;
   const source = `Host ${address}. Market ${marketAddress}. Source: Nosana indexer ordered host queue. API checked at ${timestamp(record.checkedAtMs)}; local display deadline ${timestamp(record.validUntilMs)}; indexer market updated at ${timestamp(record.sourceUpdatedAtMs)}. The indexer update time is its processing time, not a synchronization watermark. Position is not an estimated wait time.`;
   if (record.position !== null) {
     const conflict = runningAssignment && options.job!.checkedAtMs! >= (record.checkedAtMs ?? 0)
@@ -95,7 +102,8 @@ export function projectQueue(
     const current = timingValid && !record.retained && error === null && conflict === null;
     const text = `${record.position}/${record.total}`;
     const reason = error ?? conflict ?? (record.retained ? "The queue reading is retained after an unavailable read."
-      : !timingValid ? "The queue evidence is expired or its supporting times are invalid." : "");
+      : !timingValid ? deliveryUncertain ? "The queue evidence may have expired during delivery."
+        : "The queue evidence is expired or its supporting times are invalid." : "");
     return {
       kind: "position", text, current, checkCurrent: timingValid && !record.retained && error === null, retained: !current, sortValue: text,
       description: `${current ? "Queue position" : "Last reported queue position"}: ${record.position} of ${record.total} hosts. ${current ? "Position 1 is the front of this market's host queue." : `Current position is unconfirmed. ${reason}`}\n\n${source}`,
@@ -107,6 +115,7 @@ export function projectQueue(
       description: `A current running job has a reported duration limit; see the Duration column on the right.\n\n${duration.description}\n\n${source}` };
   }
   return unknown(`${error !== null ? `Queue read unavailable. ${error}` : !timingValid || record.retained
-    ? "Queue position unknown: the queue reading is unavailable or expired."
+    ? deliveryUncertain && !record.retained ? "Queue position unknown: the queue evidence may have expired during delivery."
+      : "Queue position unknown: the queue reading is unavailable or expired."
     : "This host is not present in the reported market host queue. This does not establish running or stopped state."}\n\n${source}`, timingValid && !record.retained && error === null);
 }

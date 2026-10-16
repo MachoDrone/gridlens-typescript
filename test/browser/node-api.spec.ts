@@ -48,12 +48,12 @@ function matrix(): NodeInfoSnapshot {
   hosts[7] = { ...legacyOther, values: { ...legacyOther.values!, state: "OTHER" } };
   return { hosts };
 }
-async function start(nodeInfoProvider: NonNullable<Options["nodeInfoProvider"]>): Promise<string> {
+async function start(nodeInfoProvider: NonNullable<Options["nodeInfoProvider"]>, now = () => NOW): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "gridlens-node-api-browser-"));
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, hostsFile, port: 0, nodeInfoProvider,
+  const server = await startPreviewServer({ now, stakingProvider: emptyStaking, nosProvider: emptyNos, hostsFile, port: 0, nodeInfoProvider,
     solProvider: emptySol, jobProvider: emptyJobs, queueProvider: emptyQueue,
     metadataProvider: async input => ({ hosts: input.map(address => ({
       address, values: null, fetchedAtMs: null, retained: false, error: null, marketError: null,
@@ -251,6 +251,7 @@ test("preview transport failure retains the last Online in regular weight and a 
 
 test("hide aborts existing Node Info work; immediate resume removes bold from the retained API label and ignores the canceled failure", async ({ page }) => {
   let calls = 0;
+  let serverNow = NOW;
   let pendingSignal: AbortSignal | undefined;
   let releaseOld!: () => void;
   let releaseNew!: () => void;
@@ -261,9 +262,11 @@ test("hide aborts existing Node Info work; immediate resume removes bold from th
     if (call === 2) { pendingSignal = signal; await old; }
     if (call === 3) await resumed;
     const at = await page.evaluate(() => Date.now());
+    // Emission time advances with this new check; earlier proof dates stay intact.
+    serverNow = at;
     return call === 2 ? { hosts: online().hosts.map(record => ({ ...record, error: "Canceled HTTP 503",
       retained: true, apiCheck: { status: "offline" as const, checkedAtMs: at } })) } : online(at);
-  }));
+  }, () => serverNow));
   await openPreviewTools(page);
   await expect(cell(page)).toHaveText("Online");
   await page.clock.fastForward(20_000);
@@ -351,6 +354,7 @@ test("failed checks expire without any successful State evidence or another netw
 
 test("returning from a hidden view immediately removes bold from stale Offline before a new check completes", async ({ page }) => {
   let calls = 0;
+  let serverNow = NOW;
   let release!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   await page.goto(await start(async () => {
@@ -360,8 +364,10 @@ test("returning from a hidden view immediately removes bold from stale Offline b
       apiCheck: { status: "offline" as const, checkedAtMs: NOW },
     })), nextRefreshAtMs: NOW + 60_000 };
     await held;
-    return online(await page.evaluate(() => Date.now()));
-  }));
+    const at = await page.evaluate(() => Date.now());
+    serverNow = at;
+    return online(at);
+  }, () => serverNow));
   await openPreviewTools(page);
   await expect(cell(page)).toHaveText("Offline");
   await page.clock.fastForward(5_000);
@@ -497,7 +503,7 @@ test("confirmed Offline expires with the first HTTP 503 rather than receiving th
         status: "offline" as const, checkedAtMs: NOW + 29_000, firstFailedAtMs: NOW, failureKind: "http" as const, httpStatus: 503,
       },
     })), nextRefreshAtMs: NOW + 60_000 };
-  }));
+  }, () => NOW + 29_000));
   await openPreviewTools(page);
   await expect(cell(page)).toHaveText("Offline");
   await expect(cell(page).getByRole("button")).toHaveCSS("color", "rgb(255, 0, 0)");

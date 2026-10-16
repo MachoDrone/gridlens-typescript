@@ -26,6 +26,9 @@ export function readFleetConfig(document: MetaDocument): FleetConfig {
 }
 
 export function fleetResourceURL(config: FleetConfig, resource: FleetResource | "hosts" | "connection",
-  scenario: "supplied" | "real200" = "supplied"): string {
-  return `${config.apiBase}/${resource}.json${config.sourceMode === "preview" && scenario === "real200" ? "?scenario=real200" : ""}`;
+  scenario: "supplied" | "real200" | "online-gpu-hosts" = "supplied", revision?: string): string {
+  const path = `${config.apiBase}/${resource}.json`;
+  if (config.sourceMode !== "preview" || scenario === "supplied" || resource === "connection") return path;
+  return `${path}?scenario=${scenario}${scenario === "online-gpu-hosts" && resource !== "hosts" && revision
+    ? `&revision=${encodeURIComponent(revision)}` : ""}`;
 }

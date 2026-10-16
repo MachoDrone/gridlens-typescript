@@ -1,5 +1,7 @@
 import { createSharedRead, createRequestLimiter, throwIfAborted } from "./shared-read.ts";
 import { createDemandWatch } from "./demand-watch.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 import {
   isMetadataAddress, normalizeHostMetadata, normalizeMarketLabel,
 } from "../src/fleet/host-metadata.ts";
@@ -13,6 +15,7 @@ const responseByteLimit = 256 * 1024;
 
 /** Metrics publish first; matching market names may follow without changing source times. */
 export interface HostMetadataProvider {
+  retention?: ProviderRetention;
   (addresses: readonly string[], signal?: AbortSignal, onUpdate?: (snapshot: HostMetadataSnapshot) => void): Promise<HostMetadataSnapshot>;
   /** Assignment consumers need validated metrics, without waiting for a display label. */
   readMetadata?: HostMetadataProvider;
@@ -256,5 +259,23 @@ export function createHostMetadataProvider({
       void enrich(record, signal).catch(() => {});
     });
   };
+  provider.retention = {
+    retryAt: address => Math.max(hosts.get(address)?.nextAttemptAt ?? 0, watch.retryAt(address)),
+    markets: retained => [...retained].flatMap(address => {
+      const market = hosts.get(address)?.record.values?.marketAddress;
+      return market ? [market] : [];
+    }),
+    marketRetryAt: market => markets.get(market)?.nextAttemptAt ?? 0,
+    prune: ({ hosts: retained, markets: retainedMarkets, nowMs }) => {
+      const keep = new Set(retained);
+      for (const address of hosts.keys()) if (readHost.isReading(address) || watch.isWatching(address)) keep.add(address);
+      pruneCacheKeys(keep, hosts, attempted);
+      watch.prune(keep);
+      for (const [market, entry] of markets) {
+        if (!retainedMarkets.has(market) && !readMarket.isReading(market) && entry.nextAttemptAt <= nowMs) markets.delete(market);
+      }
+    },
+  };
+  readMetadata.retention = provider.retention;
   return provider;
 }

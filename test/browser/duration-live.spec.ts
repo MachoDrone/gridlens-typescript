@@ -16,6 +16,7 @@ import { SYNTHETIC_HOST_ADDRESSES } from "../fixtures/host-addresses.ts";
 
 const addresses = SYNTHETIC_HOST_ADDRESSES;
 const NOW = Date.UTC(2026, 0, 1, 12);
+let responseTime = NOW;
 // Another artificial address from the fixture byte range, outside its eight jobs.
 const replacementJob = addresses[0]!.slice(0, -1) + "t";
 const servers: Server[] = [];
@@ -51,7 +52,7 @@ async function start(provider: () => Promise<JobSnapshot>, nodeInfoProvider = no
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue,
+  const server = await startPreviewServer({ now: () => responseTime, stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue,
     hostsFile, port: 0, jobProvider: provider, nodeInfoProvider,
     metadataProvider: async input => ({ hosts: input.map(address => ({
       address, values: null, fetchedAtMs: null, retained: false, error: null, marketError: null,
@@ -66,6 +67,10 @@ async function start(provider: () => Promise<JobSnapshot>, nodeInfoProvider = no
 
 function cell(page: Page, index = 0) {
   return page.locator(`#fleet-rows [data-host="${addresses[index]}"] td[data-col="duration"]`);
+}
+
+function durationSource(page: Page, index = 0) {
+  return page.locator(`#fleet-rows [data-host="${addresses[index]}"] .queued-duration-source[data-source="duration"]`);
 }
 
 async function visibility(page: Page, state: "visible" | "hidden"): Promise<void> {
@@ -85,7 +90,7 @@ interface KeptDuration {
 }
 
 async function keepDuration(page: Page, index = 0): Promise<JSHandle<KeptDuration>> {
-  return cell(page, index).evaluateHandle(element => {
+  return durationSource(page, index).evaluateHandle(element => {
     const button = element.querySelector("button")!;
     const track = button.querySelector(".duration-track")!;
     const fill = track.querySelector(".duration-fill")!;
@@ -106,11 +111,13 @@ test.beforeEach(async ({ page, context }) => {
   externalRequests.length = 0;
   await page.clock.install({ time: NOW });
   await page.clock.pauseAt(NOW);
-  await context.route("**/*", route => {
+  await context.route("**/*", async route => {
     if (new URL(route.request().url()).origin !== origin) {
       externalRequests.push(route.request().url());
       return route.abort();
     }
+    // Preserve the fixture clock through reloads after simulated elapsed time.
+    if (new URL(route.request().url()).pathname.startsWith("/preview/")) responseTime = await page.evaluate(() => Date.now());
     return route.continue();
   });
   page.on("pageerror", error => errors.push(error.message));
@@ -367,6 +374,129 @@ test("pending budgets stay visible, respect retry times, and hidden/synthetic vi
   expect(calls).toBe(4);
 });
 
+for (const combined of [false, true]) {
+  test(`confirmed API Offline uses an unavailable dash without hiding job timing (${combined ? "combined" : "separate"})`, async ({ page }) => {
+    let recovered = false;
+    let calls = 0;
+    await page.addInitScript(value => localStorage.setItem("gridlens.preview.queued-duration-layout.v1", value),
+      combined ? "combined" : "separate");
+    await page.goto(await start(async () => {
+      calls++;
+      const result = snapshot();
+      result.hosts[0] = { ...result.hosts[0]!, job: null, checkedAtMs: null, validUntilMs: null,
+        pending: true, retryAtMs: NOW + 3_600_000 };
+      result.hosts[1] = { ...result.hosts[1]!, job: null };
+      result.hosts[3] = { ...result.hosts[3]!, retained: true, error: "Synthetic job refresh failed.", failedAtMs: NOW };
+      result.nextRefreshAtMs = NOW + 3_600_000;
+      return result;
+    }, async input => ({ hosts: input.map(address => ({
+      address, values: null, fetchedAtMs: null, validUntilMs: null, retained: false,
+      error: recovered ? null : "Synthetic HTTP 503 confirmation.",
+      apiCheck: recovered ? { status: "online" as const, checkedAtMs: responseTime }
+        : { status: "offline" as const, checkedAtMs: NOW, firstFailedAtMs: NOW - 1_000,
+          failureKind: "http" as const, httpStatus: 503, nextCheckAtMs: NOW + 900_000 },
+    })) })));
+    await expect(durationSource(page)).toHaveText("—");
+    await expect(cell(page)).toHaveAttribute("data-duration-unavailable-reason", "api-offline");
+    await expect(cell(page)).toHaveAttribute("data-duration-freshness", "unknown");
+    await expect(durationSource(page).getByRole("button")).toHaveAccessibleName(/timing unavailable while API is Offline/i);
+    await expect(durationSource(page, 1)).toHaveText("—");
+    await expect(cell(page, 1)).toHaveAttribute("data-duration-unavailable-reason", "");
+    await expect(cell(page, 2)).toHaveAttribute("data-duration-freshness", "current");
+    await expect(cell(page, 3)).toHaveAttribute("data-duration-freshness", "retained");
+    const kept = await keepDuration(page, 2);
+    await durationSource(page).getByRole("button").click();
+    await expect(page.locator(combined ? ".info-facts" : ".info-summary")).toContainText("timing unavailable while API is Offline");
+    await expect(page.locator(".info-source-body")).toContainText(new Date(NOW).toISOString());
+    await expect(page.locator("#info-body")).not.toContainText("Current evidence confirms no running timing");
+    await page.keyboard.press("Escape");
+    await page.clock.fastForward(180_000);
+    await expect(durationSource(page)).toHaveText("—");
+    await expect(durationSource(page, 1)).toHaveText("—");
+    await expect(cell(page, 1)).toHaveAttribute("data-duration-unavailable-reason", "api-offline");
+    await expect(cell(page, 2)).toHaveAttribute("data-duration-freshness", "retained");
+    await expectKept(kept, false);
+    expect(calls, "Offline presentation and absence expiry must not change discovery deadlines").toBe(1);
+    await page.clock.fastForward(728_000);
+    await expect(durationSource(page)).toHaveText("Populating..");
+    await expect(cell(page)).toHaveAttribute("data-duration-unavailable-reason", "");
+    await expect(page.locator(`#fleet-rows [data-host="${addresses[0]}"] td[data-col="api"]`)).toHaveAttribute("data-api-current", "false");
+    expect(calls).toBe(1);
+    recovered = true;
+    await page.clock.fastForward(20_000);
+    await expect(page.locator(`#fleet-rows [data-host="${addresses[0]}"] td[data-col="api"]`)).toHaveText("Online");
+    await expect(durationSource(page)).toHaveText("Populating..");
+    await expectKept(kept, false);
+    expect(calls, "API recovery without running State does not invent timing or request discovery").toBe(1);
+  });
+
+  test(`expired Duration absence becomes Populating without new reads (${combined ? "combined" : "separate"})`, async ({ page }) => {
+    let calls = 0;
+    await page.addInitScript(value => localStorage.setItem("gridlens.preview.queued-duration-layout.v1", value),
+      combined ? "combined" : "separate");
+    await page.goto(await start(async () => {
+      calls++;
+      return {
+        hosts: snapshot().hosts.map(record => ({ ...record, job: null })),
+        nextRefreshAtMs: NOW + 900_000,
+      };
+    }));
+    await expect(durationSource(page)).toHaveText("—");
+    const button = await durationSource(page).locator(".duration-value").elementHandle();
+    await page.clock.fastForward(180_000);
+    await expect(durationSource(page)).toHaveText("Populating..");
+    await expect(durationSource(page).locator(".duration-value")).toHaveCSS("color", "rgb(245, 158, 11)");
+    expect(await button!.evaluate(element => element.isConnected)).toBe(true);
+    expect(calls, "Expiry must not bypass the provider's future retry deadline").toBe(1);
+    await durationSource(page).getByRole("button").click();
+    await expect(page.getByRole("dialog")).toContainText("2026-01-01T12:00:00.000Z");
+    await expect(page.getByRole("dialog")).toContainText(/no useful timing|unknown timing/i);
+  });
+
+  test(`successful Duration portions continue promptly and respect later budget pauses (${combined ? "combined" : "separate"})`, async ({ page }) => {
+    let calls = 0;
+    await page.addInitScript(value => localStorage.setItem("gridlens.preview.queued-duration-layout.v1", value),
+      combined ? "combined" : "separate");
+    await page.goto(await start(async () => {
+      calls++;
+      const at = await page.evaluate(() => Date.now());
+      const result = snapshot();
+      if (calls < 3) {
+        const firstRetry = combined ? at + 200 : at;
+        result.hosts = result.hosts.map((record, index) => index < calls ? record : {
+          ...record, job: null, checkedAtMs: null, validUntilMs: null, pending: true,
+          retryAtMs: calls === 1 ? firstRetry : NOW + 60_000,
+        });
+        result.nextRefreshAtMs = calls === 1 ? firstRetry : NOW + 60_000;
+        if (calls === 2) {
+          result.waitReason = "discovery-budget";
+          result.waitUntilMs = NOW + 60_000;
+        }
+      } else result.nextRefreshAtMs = at + 120_000;
+      return result;
+    }));
+    await openPreviewTools(page);
+    await expect(page.locator("#jobs-status")).toContainText("7 lookups pending");
+    await expect(durationSource(page, 1)).toHaveText("Populating..");
+    const saved = await keepDuration(page);
+    await page.clock.runFor(999);
+    expect(calls).toBe(1);
+    await page.clock.runFor(1);
+    await expect.poll(() => calls).toBe(2);
+    await expect(page.locator("#jobs-status")).toContainText("6 lookups pending");
+    await expect(durationSource(page, 1).locator(".duration-track")).toHaveCount(1);
+    await expectKept(saved, false);
+    await page.clock.fastForward(58_999);
+    expect(calls).toBe(2);
+    await page.clock.runFor(1);
+    await expect.poll(() => calls).toBe(3);
+    await expect(page.locator("#jobs-status")).toContainText("8/8 current job timings");
+    await expectKept(saved, false);
+    await page.clock.fastForward(1_000);
+    expect(calls, "Completing the final portion returns to ordinary timing refresh").toBe(3);
+  });
+}
+
 test("State transition requests independent job discovery without coupling Duration validity to State", async ({ page }) => {
   let calls = 0;
   let stateCalls = 0;
@@ -483,6 +613,7 @@ test.describe("mobile Duration discovery", () => {
     release();
     await expect.poll(async () => { await page.clock.runFor(20); return calls; }).toBe(2);
     await openPreviewTools(page);
+    await expect(cell(page)).toHaveText("Populating..");
     await expect(page.locator("#jobs-status")).toContainText("2026-01-01T13:00:00.000Z");
     await page.clock.fastForward(20_000);
     await expect.poll(() => stateCalls).toBe(3);

@@ -12,8 +12,10 @@ import { createSharedOperation, throwIfAborted } from "./shared-read.ts";
 import type { SharedOperation } from "./shared-read.ts";
 import { createSolanaRpc, rpcObject, SolanaRpcError, waitForRefresh } from "./solana-rpc.ts";
 import type { BalanceProviderOptions, SolanaProviderState } from "./solana-rpc.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 
-export type StakingProvider = (addresses: readonly string[], signal?: AbortSignal) => Promise<StakingSnapshot>;
+export type StakingProvider = ((addresses: readonly string[], signal?: AbortSignal) => Promise<StakingSnapshot>) & { retention?: ProviderRetention };
 type Task = { kind: "stake" | "market"; keys: string[] };
 type DerivedAccounts = { stakeAccount: string; vaultAccount: string; vaultBump: number };
 const addressEncoder = getAddressEncoder();
@@ -111,6 +113,7 @@ export function createStakingProvider(options: BalanceProviderOptions & { metada
   const accounts = new Map<string, DerivedAccounts>();
   const stakeDue = new Map<string, number>();
   const marketDue = new Map<string, number>();
+  const hostMarkets = new Map<string, string>();
   let highWaterSlot = 0;
   let stoppedForParameters = false;
   let active: { keys: ReadonlySet<string>; operation: SharedOperation<void>; completion: Promise<void> } | undefined;
@@ -245,7 +248,7 @@ export function createStakingProvider(options: BalanceProviderOptions & { metada
     return tasks;
   }
   const taskKeys = (tasks: Task[]): string[] => tasks.flatMap(task => task.keys.map(key => `${task.kind}:${key}`));
-  return async (addresses, signal) => {
+  const provider: StakingProvider = async (addresses, signal) => {
     throwIfAborted(signal);
     if (new Set(addresses).size !== addresses.length || addresses.some(address => !isMetadataAddress(address))) {
       throw new Error("Staking reads require unique valid startup Host Addresses.");
@@ -259,6 +262,11 @@ export function createStakingProvider(options: BalanceProviderOptions & { metada
     }
     throwIfAborted(signal);
     const assignments = new Map(metadata.filter(row => addresses.includes(row.address)).map(row => [row.address, row]));
+    for (const address of addresses) {
+      const market = assignments.get(address)?.values?.marketAddress;
+      if (market) hostMarkets.set(address, market);
+      else hostMarkets.delete(address);
+    }
     const currentMarkets = [...new Set(metadata.filter(row => addresses.includes(row.address) && !row.retained && !row.error &&
       row.fetchedAtMs !== null && row.fetchedAtMs <= now() && now() - row.fetchedAtMs <= 5 * 60_000)
       .map(row => row.values?.marketAddress).filter((market): market is string => isMetadataAddress(market)))];
@@ -302,4 +310,24 @@ export function createStakingProvider(options: BalanceProviderOptions & { metada
         requirement: { ...(marketAddress ? markets.get(marketAddress) ?? { ...blank.requirement, marketAddress } : blank.requirement) } };
     }), nextRefreshAtMs: !stoppedForParameters && Number.isFinite(earliest) ? earliest : null };
   };
+  provider.retention = {
+    retryAt: address => Number.isFinite(stakeDue.get(address)) ? stakeDue.get(address)! : 0,
+    markets: hosts => [...hosts].flatMap(address => {
+      const market = hostMarkets.get(address);
+      return market ? [market] : [];
+    }),
+    marketRetryAt: market => Number.isFinite(marketDue.get(market)) ? marketDue.get(market)! : 0,
+    prune: ({ hosts, markets: retainedMarkets, nowMs }) => {
+      const keepHosts = new Set(hosts);
+      const keepMarkets = new Set(retainedMarkets);
+      for (const key of active?.keys ?? []) {
+        if (key.startsWith("stake:")) keepHosts.add(key.slice(6));
+        else if (key.startsWith("market:")) keepMarkets.add(key.slice(7));
+      }
+      for (const [market, due] of marketDue) if (Number.isFinite(due) && due > nowMs) keepMarkets.add(market);
+      pruneCacheKeys(keepHosts, stakes, accounts, stakeDue, hostMarkets);
+      pruneCacheKeys(keepMarkets, markets, marketDue);
+    },
+  };
+  return provider;
 }

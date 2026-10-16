@@ -191,6 +191,68 @@ test("gateway strips extra raw source fields before finite or progressive public
   }
 });
 
+test("gateway stamps roster and finite/progressive envelopes independently of source timestamps", async t => {
+  let now = 1_000;
+  const snapshots = emptyFleetSnapshots(fleet.addresses);
+  const snapshot = snapshots["node-info"];
+  snapshot.hosts[0]!.apiCheck = { status: "online", checkedAtMs: 100,
+    lastConfirmed: { status: "online", checkedAtMs: 100 } };
+  const source: FleetSource = { async read(resource, _context, _signal, onUpdate) {
+    const raw = { ...snapshots[resource], serverTimeMs: -1 };
+    now = 1_100;
+    onUpdate?.(raw);
+    now = 1_200;
+    return raw;
+  } };
+  const server = await app(t, authenticated(source), { now: () => now });
+  const roster = await (await fetch(`${origin(server)}/api/fleet/hosts.json`, options)).json();
+  assert.equal(roster.serverTimeMs, 1_000);
+  const finite = await (await fetch(`${origin(server)}/api/fleet/node-info.json`, options)).json();
+  assert.equal(finite.serverTimeMs, 1_200);
+  assert.deepEqual(finite.hosts, snapshot.hosts);
+  const response = await fetch(`${origin(server)}/api/fleet/node-info.json`, {
+    headers: { ...options.headers, Accept: "application/x-ndjson" },
+  });
+  const frames = (await response.text()).trim().split("\n").map(line => JSON.parse(line));
+  assert.deepEqual(frames.map(frame => frame.serverTimeMs), [1_100, 1_200]);
+  assert.deepEqual(frames.map(frame => frame.complete), [false, true]);
+  for (const frame of frames) assert.deepEqual(frame.hosts, snapshot.hosts);
+  assert.equal("serverTimeMs" in snapshot, false, "transport clocks are excluded from source observations");
+  assert.deepEqual(await (await fetch(`${origin(server)}/api/fleet/connection.json`)).json(), { status: "ok" });
+});
+
+test("gateway watch stamps each update and empty progress frame with its emission time", async t => {
+  let now = 1_000;
+  let publish!: (snapshot: FleetSnapshots["node-info"]) => void;
+  const snapshot = emptyFleetSnapshots(fleet.addresses)["node-info"];
+  const source: FleetSource = {
+    async read(resource, context) { return emptyFleetSnapshots(context.addresses)[resource]; },
+    watch<K extends FleetResource>(_resource: K, _context: FleetContext, signal: AbortSignal,
+      update: (snapshot: FleetSnapshots[K]) => void): Promise<never> {
+      publish = value => update(value as FleetSnapshots[K]);
+      publish(snapshot);
+      return new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+    },
+  };
+  const server = await app(t, authenticated(source), { now: () => now });
+  const controller = new AbortController();
+  const response = await fetch(`${origin(server)}/api/fleet/node-info.json`, { signal: controller.signal,
+    headers: { ...options.headers, Accept: "application/x-ndjson" } });
+  const reader = response.body!.getReader();
+  const initial = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  assert.equal(initial.serverTimeMs, 1_000);
+  now = 2_000;
+  publish({ hosts: [] });
+  const progress = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  assert.deepEqual(progress, { hosts: [], complete: false, watching: true, serverTimeMs: 2_000 });
+  now = 3_000;
+  publish(snapshot);
+  const replay = JSON.parse(new TextDecoder().decode((await reader.read()).value));
+  assert.equal(replay.serverTimeMs, 3_000);
+  assert.deepEqual(replay.hosts, initial.hosts);
+  controller.abort(); reader.releaseLock();
+});
+
 test("watch updates withheld during access revalidation replay after successful revalidation", async t => {
   const roster = { ...fleet, addresses: [address, second] };
   let resolving!: () => void;

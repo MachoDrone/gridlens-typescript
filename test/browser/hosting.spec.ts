@@ -27,7 +27,7 @@ test("the actual hosted gateway reuses aged data, accepts updates without viewer
   await store.commit(fleet, snapshots(original), 0);
   const integration = { label: "Isolated hosting acceptance — synthetic readings", demonstration: true,
     source: createSnapshotSource(store, { now: () => now }), resolveAccess: async () => fleet };
-  const server = await startFleetServer({ integration, port: 0, basePath: "/tools/fleet" });
+  const server = await startFleetServer({ now: () => now, integration, port: 0, basePath: "/tools/fleet" });
   const bound = server.address();
   if (!bound || typeof bound === "string") throw new Error("Missing hosting test port");
   const origin = `http://127.0.0.1:${bound.port}`;

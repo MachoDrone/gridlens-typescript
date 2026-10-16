@@ -126,12 +126,13 @@ async function acceptUpdatedCheckTime(saved: JSHandle<KeptStatusText>): Promise<
 async function start(
   provider: () => Promise<NodeInfoSnapshot>,
   metadataProvider = emptyMetadata,
+  now = () => NOW,
 ): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "gridlens-state-refresh-browser-"));
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs, hostsFile, port: 0, nodeInfoProvider: provider, metadataProvider });
+  const server = await startPreviewServer({ now, stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs, hostsFile, port: 0, nodeInfoProvider: provider, metadataProvider });
   servers.push(server);
   const bound = server.address();
   if (!bound || typeof bound === "string") throw new Error("Missing isolated preview port");
@@ -559,14 +560,17 @@ test("explicit state changes replace only the affected artwork while neighboring
 
 test("hidden pages and synthetic views stop automatic reads, visibility resumes them, and pagehide cancels them", async ({ page }) => {
   let calls = 0;
+  let serverNow = NOW;
   let release!: () => void;
   const pending = new Promise<void>(resolve => { release = resolve; });
   await page.emulateMedia({ reducedMotion: "no-preference" });
   await page.goto(await start(async () => {
     calls++;
     if (calls === 2) await pending;
-    return snapshot(await page.evaluate(() => Date.now()));
-  }));
+    const at = await page.evaluate(() => Date.now());
+    serverNow = at;
+    return snapshot(at);
+  }, emptyMetadata, () => serverNow));
   await openPreviewTools(page);
   await expect(stateCell(page).locator(".state-running")).toBeVisible();
   await visibility(page, "hidden");

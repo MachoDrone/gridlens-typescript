@@ -1,6 +1,6 @@
 import type { DurationView } from "./duration.ts";
 import { isMetadataAddress } from "./host-metadata.ts";
-import { isJobTimestamp } from "./jobs.ts";
+import { JOB_DISPLAY_VALIDITY_MS, isJobTimestamp } from "./jobs.ts";
 import type { JobRecord } from "./jobs.ts";
 import { projectLiveDuration } from "./live-duration.ts";
 import type { NodeInfoRecord } from "./node-info.ts";
@@ -32,6 +32,7 @@ export interface LiveActivityView {
 
 interface Retirement {
   checkedAtMs: number;
+  validUntilMs: number | null;
   kind: "queue" | "absence" | "state";
   description: string;
   queue: QueueRecord | null;
@@ -48,6 +49,8 @@ interface History {
   jobError: string | null;
   retirement: Retirement | null;
   stateRetiredAt: number;
+  /** Running proof invalidates older absence even after that proof expires. */
+  runningCheckedAt: number;
 }
 
 function sameJob(record: JobRecord | undefined, address: string): record is JobRecord {
@@ -64,18 +67,24 @@ function retainedState(view: NodeStateView, reason: string): NodeStateView {
     description: `Retained State estimate: ${view.reported}. Current activity is unconfirmed. ${reason}\n${view.description}` };
 }
 
-function retiredDuration(retirement: Retirement, nowMs: number, queueCurrent: boolean, node: NodeStateView): DurationView {
+function retiredDuration(retirement: Retirement, nowMs: number, queueCurrent: boolean, node: NodeStateView,
+  runningCheckedAt: number, absenceCurrent: boolean): DurationView {
   const queue = retirement.queue;
+  const contradicted = runningCheckedAt > retirement.checkedAtMs ||
+    retirement.kind !== "absence" && runningCheckedAt === retirement.checkedAtMs;
   const nodeQueued = retirement.node?.reported === "QUEUED" && node.current === "QUEUED" &&
     node.checkedAtMs === retirement.checkedAtMs;
-  if (nodeQueued || queue && queueCurrent && isJobTimestamp(queue.validUntilMs) && nowMs < queue.validUntilMs) return {
+  if (!contradicted && (nodeQueued || queue && queueCurrent && isJobTimestamp(queue.validUntilMs) && nowMs < queue.validUntilMs)) return {
     kind: "queue", text: "⟵", elapsedSeconds: null, limitSeconds: null, percent: null,
-    freshness: "current", tone: "current", animated: false,
+    freshness: "current", tone: "current", animated: false, validUntilMs: retirement.validUntilMs,
     description: `${retirement.description} See the Queued column on the left.`,
   };
-  return { kind: "unknown", text: "—", elapsedSeconds: null, limitSeconds: null, percent: null,
-    freshness: "unknown", tone: "unbounded", animated: false,
-    description: `No running assignment. The previous counter was superseded at ${new Date(retirement.checkedAtMs).toISOString()}. ${retirement.description} This does not establish current activity after the source expires.` };
+  const current = retirement.kind === "absence" && absenceCurrent && !contradicted;
+  return { kind: "unknown", text: current ? "—" : "Populating..", elapsedSeconds: null, limitSeconds: null, percent: null,
+    freshness: current ? "current" : "unknown", tone: "unbounded", animated: false, validUntilMs: retirement.validUntilMs,
+    description: `${current ? "No running assignment." : "Duration pending: current assignment timing is unconfirmed."} The previous counter was superseded at ${new Date(retirement.checkedAtMs).toISOString()}. ${retirement.description}${contradicted
+      ? ` Conflicting running evidence was checked at ${new Date(runningCheckedAt).toISOString()}; it supplies no new job timing.`
+      : current ? "" : " The original supersession remains valid, but no current absence or queued activity is established."}` };
 }
 
 /**
@@ -109,7 +118,7 @@ export class LiveActivityDisplay {
       duration: projectLiveDuration(undefined, address, nowMs), durationJob: undefined, eligibleJob: undefined };
     const history = this.histories.get(address) ?? {
       displayedState: null, job: undefined, lastJobCheck: -1, lastNodeCheck: -1,
-      failedJobCheck: -1, failedNodeCheck: -1, jobError: null, retirement: null, stateRetiredAt: -1,
+      failedJobCheck: -1, failedNodeCheck: -1, jobError: null, retirement: null, stateRetiredAt: -1, runningCheckedAt: -1,
     };
     // Bounded least-recently-used history; active rosters also prune explicitly.
     this.histories.delete(address);
@@ -121,7 +130,7 @@ export class LiveActivityDisplay {
     const jobRecord = sameJob(input.job, address) ? input.job : undefined;
     const jobError = input.jobsError ?? jobRecord?.error ?? null;
     if (jobError !== null || jobRecord?.retained) {
-      history.failedJobCheck = Math.max(history.failedJobCheck, history.job?.checkedAtMs ?? -1,
+      history.failedJobCheck = Math.max(history.failedJobCheck, history.lastJobCheck,
         checked(jobRecord?.checkedAtMs, nowMs) ? jobRecord.checkedAtMs : -1);
       history.jobError = jobError ?? "The last job check was retained after an unavailable refresh.";
     }
@@ -147,6 +156,11 @@ export class LiveActivityDisplay {
     const nodeProofAt = Math.max(nodeRecord?.fetchedAtMs ?? -1, node.checkedAtMs ?? -1);
     const nodeProofValid = nodeRecord !== undefined && isJobTimestamp(nodeProofAt) && nodeProofAt <= nowMs &&
       projectNodeState(nodeRecord, nodeProofAt).current !== null;
+    if (node.reported === "RUNNING_JOB" && node.checkedAtMs !== null && nodeRecord && !nodeRecord.retained &&
+        nodeRecord.error === null && input.stateError == null && nodeRecord.activity?.error == null &&
+        nodeProofValid && node.checkedAtMs > history.failedNodeCheck) {
+      history.runningCheckedAt = Math.max(history.runningCheckedAt, node.checkedAtMs);
+    }
     if (node.reported !== null && node.checkedAtMs !== null && nodeRecord && !nodeRecord.retained &&
         nodeRecord.error === null && input.stateError == null && nodeRecord.activity?.error == null &&
         nodeProofValid && node.checkedAtMs > history.failedNodeCheck && node.reported !== "RUNNING_JOB") {
@@ -154,7 +168,7 @@ export class LiveActivityDisplay {
       // A health check or restart can overlap the indexed assignment. It vetoes
       // job-backed State, but only positive queue/completion/replacement retires
       // the independent Duration clock.
-      if (node.reported === "QUEUED") retire({ checkedAtMs: node.checkedAtMs, kind: "state", queue: null, node,
+      if (node.reported === "QUEUED") retire({ checkedAtMs: node.checkedAtMs, validUntilMs: node.validUntilMs, kind: "state", queue: null, node,
         description: `Node State confirmed QUEUED at ${new Date(node.checkedAtMs).toISOString()}. No ordered queue rank is established by Node State.` });
     }
     const queue = input.queue;
@@ -164,7 +178,7 @@ export class LiveActivityDisplay {
       queue.validUntilMs > queue.checkedAtMs && queue.validUntilMs <= queue.checkedAtMs + QUEUE_DISPLAY_VALIDITY_MS &&
       (queue.sourceUpdatedAtMs === null || queue.sourceUpdatedAtMs <= queue.checkedAtMs) &&
       !queue.retained && queue.error === null && input.queueError == null;
-    if (queueValid) retire({ checkedAtMs: queue.checkedAtMs!, kind: "queue", queue: { ...queue }, node: null,
+    if (queueValid) retire({ checkedAtMs: queue.checkedAtMs!, validUntilMs: queue.validUntilMs, kind: "queue", queue: { ...queue }, node: null,
       description: `Confirmed queued at position ${queue.position}/${queue.total}. API checked at ${new Date(queue.checkedAtMs!).toISOString()}; local deadline ${new Date(queue.validUntilMs!).toISOString()}.` });
 
     const jobView = projectLiveDuration(jobRecord, address, nowMs, jobError);
@@ -172,8 +186,8 @@ export class LiveActivityDisplay {
     const successful = jobRecord !== undefined && checked(jobChecked, nowMs) &&
       !jobRecord.retained && jobError === null && jobChecked > history.failedJobCheck;
     // The provider preserves a successful absence timestamp when the following
-    // replacement lookup is deferred or fails. That absence remains definitive
-    // even though the current refresh has an error and no new job is available.
+    // replacement lookup is deferred or fails. That still retires the previous
+    // job, but a failed or expired check cannot establish current absence.
     const confirmedAbsence = jobRecord?.job === null && checked(jobChecked, nowMs) && !jobRecord.retained;
     if ((successful || confirmedAbsence) && jobChecked! >= history.lastJobCheck) {
       const timing = jobRecord.job;
@@ -184,8 +198,10 @@ export class LiveActivityDisplay {
           isJobTimestamp(timing.timeEnd * 1000) && timing.timeEnd * 1000 <= jobChecked!);
       if (terminal) {
         history.lastJobCheck = jobChecked!;
-        retire({ checkedAtMs: jobChecked!, kind: "absence", queue: null, node: null,
-          description: `${timing ? `Job ${timing.address} was confirmed ${timing.state === "RUNNING" ? "ended" : timing.state}.` : "A successful assignment check confirmed no running job."} Original check ${new Date(jobChecked!).toISOString()}.${jobError ? ` Replacement lookup: ${jobError}` : ""}` });
+        const validUntilMs = checked(jobRecord.validUntilMs, jobChecked! + JOB_DISPLAY_VALIDITY_MS) &&
+          jobRecord.validUntilMs > jobChecked! ? jobRecord.validUntilMs : null;
+        retire({ checkedAtMs: jobChecked!, validUntilMs, kind: "absence", queue: null, node: null,
+          description: `${timing ? `Job ${timing.address} was confirmed ${timing.state === "RUNNING" ? "ended" : timing.state}.` : "A successful assignment check confirmed no running job."} Original check ${new Date(jobChecked!).toISOString()}; local deadline ${validUntilMs === null ? "unavailable" : new Date(validUntilMs).toISOString()}.${jobError ? ` Replacement lookup: ${jobError}` : ""}` });
       }
     }
     // Invalid or mismatched replacements cannot destroy validated timing. A new
@@ -212,10 +228,13 @@ export class LiveActivityDisplay {
       eligibleJob = retained ? { ...eligibleJob, retained: true,
         error: jobError ?? history.jobError ?? "Retained from the last verified running assignment." } : eligibleJob;
     }
+    const absenceCurrent = history.retirement !== null && isJobTimestamp(history.retirement.validUntilMs) &&
+      nowMs < history.retirement.validUntilMs && history.retirement.checkedAtMs > history.failedJobCheck && jobError === null;
     const duration = eligibleJob ? projectLiveDuration(eligibleJob, address, nowMs, jobError)
       : history.retirement ? retiredDuration(history.retirement, nowMs,
         queueValid && queue.checkedAtMs === history.retirement.checkedAtMs &&
-          (node.current === null || node.current === "QUEUED" || node.checkedAtMs! < queue.checkedAtMs!), node)
+          (node.current === null || node.current === "QUEUED" || node.checkedAtMs! < queue.checkedAtMs!), node,
+        history.runningCheckedAt, absenceCurrent)
         : projectLiveDuration(jobRecord, address, nowMs, jobError);
 
     let state: NodeStateView;

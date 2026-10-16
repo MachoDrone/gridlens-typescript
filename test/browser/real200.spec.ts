@@ -31,7 +31,8 @@ type Read = { kind: string; addresses: readonly string[] };
 type Options = NonNullable<Parameters<typeof startPreviewServer>[0]>;
 let origin = "";
 
-async function start({ hosts = real200Hosts, solProvider = emptySol, jobProvider = emptyJobs }: {
+async function start({ hosts = real200Hosts, solProvider = emptySol, jobProvider = emptyJobs, now = Date.now }: {
+  now?: () => number;
   hosts?: readonly string[] | null;
   solProvider?: NonNullable<Options["solProvider"]>;
   jobProvider?: NonNullable<Options["jobProvider"]>;
@@ -45,7 +46,7 @@ async function start({ hosts = real200Hosts, solProvider = emptySol, jobProvider
   const reads: Read[] = [];
   const remember = (kind: string, addresses: readonly string[]) => { reads.push({ kind, addresses: [...addresses] }); };
   const server = await startPreviewServer({
-    hostsFile, real200HostsFile, port: 0,
+    hostsFile, real200HostsFile, port: 0, now,
     metadataProvider: async addresses => {
       remember("metadata", addresses);
       return { hosts: addresses.map(address => ({ address, values: null, fetchedAtMs: null,
@@ -176,7 +177,7 @@ test("switching populated Real200 to supplied hosts loads only the supplied rost
   await page.clock.pauseAt(now);
   const jobAddresses = (large: boolean) => (large ? real200Hosts : defaultHosts)
     .map((_address, index) => fixtureAddress((large ? 1_000 : 2_000) + index));
-  const fixture = await start({ jobProvider: async input => {
+  const fixture = await start({ now: () => now, jobProvider: async input => {
     const large = input.length === 200;
     const jobs = jobAddresses(large);
     return { hosts: input.map((address, index) => ({

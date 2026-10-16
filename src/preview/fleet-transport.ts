@@ -1,9 +1,14 @@
 import { createFleetSnapshotValidator, isFleetRoster } from "../contracts/fleet.ts";
 import type { FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
+import { isServerTimeMs } from "./evidence-clock.ts";
+import { isOnlineRosterStatus } from "../contracts/online-hosts.ts";
+import type { OnlineRosterStatus } from "../contracts/online-hosts.ts";
 
 type Timer = unknown;
 export interface FleetTransportOptions {
   fetch?: typeof globalThis.fetch;
+  /** Per-page dispatched reads, held through body completion. Unbounded by default. */
+  maximumConcurrentRequests?: number;
   now?: () => number;
   setTimer?: (callback: () => void, delayMs: number) => Timer;
   clearTimer?: (timer: Timer) => void;
@@ -13,6 +18,9 @@ export interface FleetTransportOptions {
   watchIdleTimeoutMs?: number;
   responseByteLimit?: number;
   frameByteLimit?: number;
+  /** Accepted server emission time plus this request's elapsed dispatch-to-frame time. */
+  onServerTime?: (serverTimeMs: number, requestElapsedMs: number) => void;
+  onRosterMismatch?: () => void;
 }
 export class FleetTransportError extends Error {
   readonly status: number | undefined;
@@ -29,26 +37,80 @@ interface ReadOptions<R extends FleetResource> {
   current?: () => boolean;
   onSnapshot?: (snapshot: FleetSnapshots[R], complete: boolean, envelope: Record<string, unknown>) => void;
   progressive?: boolean;
+  onlineRevision?: string;
 }
-export interface FleetRosterSnapshot { addresses: string[]; error: string | null }
+export interface FleetRosterSnapshot { addresses: string[]; error: string | null; online?: OnlineRosterStatus }
+
+/** Leave socket capacity for the independent connection probe on large HTTP/1 views. */
+function createRequestAdmission(maximum: number) {
+  let active = 0;
+  const queued: { priority: boolean; signal: AbortSignal; cancel: () => void;
+    resolve: (release: () => void) => void; reject: (reason: unknown) => void }[] = [];
+  const drain = (): void => {
+    while (active < maximum && queued.length) {
+      const priority = queued.findIndex(entry => entry.priority);
+      const entry = queued.splice(priority < 0 ? 0 : priority, 1)[0]!;
+      entry.signal.removeEventListener("abort", entry.cancel);
+      if (entry.signal.aborted) { entry.reject(entry.signal.reason); continue; }
+      active++;
+      let released = false;
+      entry.resolve(() => {
+        if (released) return;
+        released = true;
+        active--;
+        drain();
+      });
+    }
+  };
+  return (signal: AbortSignal, priority: boolean): Promise<() => void> => new Promise((resolve, reject) => {
+    if (signal.aborted) { reject(signal.reason); return; }
+    const entry = { priority, signal, resolve, reject, cancel: (): void => {
+      const index = queued.indexOf(entry);
+      if (index < 0) return;
+      queued.splice(index, 1);
+      reject(signal.reason);
+    } };
+    queued.push(entry);
+    signal.addEventListener("abort", entry.cancel, { once: true });
+    drain();
+  });
+}
 
 /** One bounded browser transport; provider adapters and domain projections stay separate. */
 export function createFleetTransport(options: FleetTransportOptions = {}) {
   const fetcher = options.fetch ?? globalThis.fetch.bind(globalThis);
-  const now = options.now ?? Date.now;
+  const now = options.now ?? (() => performance.now());
   const setTimer = options.setTimer ?? ((callback, ms) => setTimeout(callback, ms));
   const clearTimer = options.clearTimer ?? (timer => clearTimeout(timer as ReturnType<typeof setTimeout>));
   const finiteTimeout = options.finiteTimeoutMs ?? 120_000;
   const idleTimeout = options.watchIdleTimeoutMs ?? 360_000;
   const responseLimit = options.responseByteLimit ?? 16 * 1024 * 1024;
   const frameLimit = options.frameByteLimit ?? 2 * 1024 * 1024;
+  // Online discovery can produce a network-wide cohort. Its bounded full-frame
+  // replay needs more room than a fixed fleet; the total body cap is unchanged.
+  const onlineFrameLimit = Math.min(responseLimit, options.frameByteLimit ?? 8 * 1024 * 1024);
+  const maximumRequests = options.maximumConcurrentRequests ?? Infinity;
+  if (maximumRequests !== Infinity && (!Number.isSafeInteger(maximumRequests) || maximumRequests < 1)) {
+    throw new Error("Fleet request concurrency must be a positive integer or Infinity.");
+  }
+  const admit = maximumRequests === Infinity ? undefined : createRequestAdmission(maximumRequests);
   for (const limit of [finiteTimeout, idleTimeout, responseLimit, frameLimit]) {
     if (!Number.isSafeInteger(limit) || limit < 1) throw new Error("Fleet transport limits must be positive integers.");
   }
+  const acceptServerTime = (payload: Record<string, unknown>, requestElapsedMs: () => number): void => {
+    if (!("serverTimeMs" in payload)) return;
+    if (!isServerTimeMs(payload.serverTimeMs)) throw new FleetTransportError("Fleet response contained an invalid server time.");
+    const elapsed = requestElapsedMs();
+    if (!Number.isFinite(elapsed) || elapsed < 0 || elapsed > 8_640_000_000_000_000) {
+      throw new FleetTransportError("Fleet response contained invalid elapsed timing.");
+    }
+    options.onServerTime?.(payload.serverTimeMs, elapsed);
+  };
 
   async function request<T>(url: string, external: AbortSignal | undefined, current: (() => boolean) | undefined,
     progressive: boolean, consume: (response: Response, control: {
       wait: <V>(pending: Promise<V>) => Promise<V>; check: () => void; watch: () => void; progress: () => void;
+      requestElapsedMs: () => number;
     }) => Promise<T>, rosterFailure = false): Promise<T> {
     if (!/^\/(?!\/)/.test(url) || /[\\#\u0000-\u0020]/.test(url)) {
       throw new FleetTransportError("Fleet requests require a same-origin path.");
@@ -70,11 +132,16 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
     const wait = <V>(pending: Promise<V>): Promise<V> => Promise.race([pending, canceled]);
     if (external?.aborted) cancel();
     else external?.addEventListener("abort", cancel, { once: true });
-    schedule(finiteTimeout);
     let response: Response | undefined;
     let completed = false;
+    let release: (() => void) | undefined;
     try {
       check();
+      if (admit) release = await admit(abort.signal, rosterFailure);
+      // A revision or page lifecycle can change while waiting for a socket slot.
+      check();
+      schedule(finiteTimeout);
+      const dispatchedAt = now();
       response = await wait(fetcher(url, { method: "GET", cache: "no-store", redirect: "error",
         credentials: "same-origin", signal: abort.signal,
         headers: { Accept: progressive ? "application/x-ndjson, application/json" : "application/json" } }));
@@ -85,11 +152,12 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
       const value = await consume(response, { wait, check,
         watch: () => { watching = true; schedule(idleTimeout); },
         progress: () => { if (watching) schedule(idleTimeout); },
+        requestElapsedMs: () => now() - dispatchedAt,
       });
       completed = true;
       return value;
     } finally {
-      clearTimer(timer);
+      if (timer !== undefined) clearTimer(timer);
       external?.removeEventListener("abort", cancel);
       // Successful EOF already releases the transport. Only unfinished or
       // rejected work is canceled; a completed feed must not appear aborted.
@@ -97,13 +165,14 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
         abort.abort();
         if (!response?.body?.locked) void response?.body?.cancel().catch(() => {});
       }
+      release?.();
     }
   }
 
   async function parse(response: Response, control: {
     wait: <V>(pending: Promise<V>) => Promise<V>; check: () => void; watch: () => void; progress: () => void;
   }, allowStream: boolean, accept: (value: unknown, streaming: boolean) => boolean,
-  hostCount: number): Promise<void> {
+  hostCount: number, maximumFrameBytes = frameLimit): Promise<void> {
     const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
     const streaming = type === "application/x-ndjson";
     if (streaming && !allowStream || !streaming && type !== "application/json") throw new FleetTransportError("Fleet response has an unsupported content type.");
@@ -124,7 +193,7 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
     const line = (value: string): void => {
       if (!value.trim()) return;
       const maximumFrames = watching ? hostCount * 20 + 20 : hostCount * 10 + 10;
-      if (++frames > maximumFrames || encoder.encode(value).byteLength > frameLimit) {
+      if (++frames > maximumFrames || encoder.encode(value).byteLength > maximumFrameBytes) {
         throw new FleetTransportError("Fleet stream exceeded its frame limit.");
       }
       const payload: unknown = JSON.parse(value);
@@ -145,7 +214,7 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
         if (streaming) {
           let newline: number;
           while ((newline = buffer.indexOf("\n")) >= 0) { line(buffer.slice(0, newline)); buffer = buffer.slice(newline + 1); }
-          if (encoder.encode(buffer).byteLength > frameLimit) throw new FleetTransportError("Fleet stream exceeded its frame limit.");
+          if (encoder.encode(buffer).byteLength > maximumFrameBytes) throw new FleetTransportError("Fleet stream exceeded its frame limit.");
         }
       }
       buffer += decoder.decode();
@@ -168,18 +237,26 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
         await parse(response, control, readOptions.progressive ?? true, (value, streaming) => {
           control.check();
           const payload = value as Record<string, unknown>;
+          if (readOptions.onlineRevision !== undefined && payload?.onlineRevision !== readOptions.onlineRevision) {
+            throw new FleetTransportError("Online GPU host membership changed.", 409);
+          }
           const complete = streaming ? payload?.complete : true;
           if (completed || typeof complete !== "boolean" || !validSnapshot(resource, value, complete)) {
             throw new FleetTransportError("Fleet response contained invalid observations or identities.");
           }
           if (payload.failed === true) throw new FleetTransportError("Fleet source could not complete its response.");
+          acceptServerTime(payload, control.requestElapsedMs);
           readOptions.onSnapshot?.(value, complete, payload);
           completed = complete;
           if (complete) final = value;
           return payload.watching === true;
-        }, readOptions.addresses.length);
+        }, readOptions.addresses.length, readOptions.onlineRevision === undefined ? frameLimit : onlineFrameLimit);
         if (!completed || !final) throw new FleetTransportError("Fleet stream ended before its final snapshot.");
         return final;
+      }).catch((error: unknown) => {
+        if (readOptions.onlineRevision !== undefined && error instanceof FleetTransportError && error.status === 409 &&
+            !readOptions.signal?.aborted && (!readOptions.current || readOptions.current())) options.onRosterMismatch?.();
+        throw error;
       });
     },
     async roster(url: string, signal?: AbortSignal): Promise<FleetRosterSnapshot> {
@@ -191,7 +268,21 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
             throw new FleetTransportError("Fleet host roster is invalid.");
           }
           roster = { addresses: value.addresses, error: value.error };
+          if ("online" in value) {
+            if (!isOnlineRosterStatus(value.online) ||
+                (value.error === null) !== (value.online.revision !== null) ||
+                value.error !== null && value.addresses.length !== 0) {
+              throw new FleetTransportError("Online GPU host roster status is invalid.");
+            }
+            const { revision, checkedAtMs, nextRefreshAtMs, retained, discoveryError } = value.online;
+            roster.online = { revision, checkedAtMs, nextRefreshAtMs, retained, discoveryError };
+          }
           if (!response.ok && roster.error === null) throw new FleetTransportError(`Fleet request failed (HTTP ${response.status}).`, response.status);
+          control.check();
+          if (response.ok && roster.error === null) acceptServerTime(value, control.requestElapsedMs);
+          else if ("serverTimeMs" in value && !isServerTimeMs(value.serverTimeMs)) {
+            throw new FleetTransportError("Fleet response contained an invalid server time.");
+          }
           return false;
         }, 0);
         return roster!;

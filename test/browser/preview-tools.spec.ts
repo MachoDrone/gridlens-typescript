@@ -13,6 +13,7 @@ import { emptyNos } from "../fixtures/nos.ts";
 import { emptyStaking } from "../fixtures/staking.ts";
 
 const NOW = Date.UTC(2026, 0, 1, 12);
+let responseTime = NOW;
 const servers: Server[] = [];
 const directories: string[] = [];
 const errors: string[] = [];
@@ -31,7 +32,7 @@ async function start(page: Page): Promise<string> {
   await writeFile(hostsFile, JSON.stringify(addresses));
   await writeFile(real200HostsFile, JSON.stringify(addresses.slice(0, 4)));
   const record = (kind: string, input: readonly string[]) => providers.push({ kind, addresses: [...input] });
-  const server = await startPreviewServer({ hostsFile, real200HostsFile, port: 0,
+  const server = await startPreviewServer({ now: () => responseTime, hostsFile, real200HostsFile, port: 0,
     metadataProvider: async input => {
       record("metadata", input);
       return { hosts: input.map(address => ({ address, values: { status: "PREMIUM", marketAddress: null,
@@ -113,12 +114,14 @@ test.beforeEach(async ({ context, page }) => {
   errors.length = externalRequests.length = requests.length = providers.length = 0;
   await page.clock.install({ time: NOW });
   await page.clock.pauseAt(NOW);
-  await context.route("**/*", route => {
+  await context.route("**/*", async route => {
     const url = new URL(route.request().url());
     if (url.origin !== origin) { externalRequests.push(url.href); return route.abort(); }
     // The connection indicator may check the local service without reading data.
     if (url.pathname.startsWith("/preview/") && url.pathname.endsWith(".json") &&
         url.pathname !== "/preview/connection.json") requests.push(url.pathname + url.search);
+    // Preserve the fixture clock through reloads after simulated elapsed time.
+    if (new URL(route.request().url()).pathname.startsWith("/preview/")) responseTime = await page.evaluate(() => Date.now());
     return route.continue();
   });
   page.on("pageerror", error => errors.push(error.message));

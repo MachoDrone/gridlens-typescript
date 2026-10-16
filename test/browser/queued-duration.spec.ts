@@ -57,7 +57,7 @@ async function start(options: {
   directories.push(directory);
   const hostsFile = join(directory, "hosts.json");
   await writeFile(hostsFile, JSON.stringify(addresses));
-  const server = await startPreviewServer({ hostsFile, port: 0,
+  const server = await startPreviewServer({ now: () => NOW, hostsFile, port: 0,
     stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol,
     jobProvider: options.jobs ?? jobSnapshot, queueProvider: options.queue ?? (async () => queueSnapshot()),
     metadataProvider: async input => ({ hosts: input.map(address => ({
@@ -548,7 +548,7 @@ test("changing layouts cannot revive a retired job after its newer queue evidenc
   await visibility(page, "visible");
   await expect(cell(page, 2)).toHaveText("3/12", { useInnerText: true });
   await toggle(page).click();
-  await expect(cell(page, 2, "duration")).toHaveText("—", { useInnerText: true });
+  await expect(cell(page, 2, "duration")).toHaveText("Populating..", { useInnerText: true });
   await expect(cell(page, 2, "duration").locator(".duration-fill")).toHaveCount(0);
   await cell(page, 2, "duration").getByRole("button").click();
   await expect(page.getByRole("dialog")).toContainText("previous counter was superseded");

@@ -1,5 +1,6 @@
 import { DURATION_OVERRUN_GRACE_NOTE, formatDurationSeconds, isDurationOverrun } from "./duration.ts";
 import type { DurationView } from "./duration.ts";
+import type { NodeApiView } from "./node-api.ts";
 import { JOB_DISPLAY_VALIDITY_MS, isJobTimestamp } from "./jobs.ts";
 import type { JobRecord } from "./jobs.ts";
 import { isMetadataAddress } from "./host-metadata.ts";
@@ -44,11 +45,13 @@ export function projectLiveDuration(
   const checkValid = isJobTimestamp(record.checkedAtMs) && record.checkedAtMs <= nowMs;
   const deadlineValid = checkValid && isJobTimestamp(record.validUntilMs) && record.validUntilMs > record.checkedAtMs! &&
     record.validUntilMs <= record.checkedAtMs! + JOB_DISPLAY_VALIDITY_MS;
+  const validUntilMs = deadlineValid ? record.validUntilMs : null;
   const retained = record.retained || error !== null || !deadlineValid || nowMs >= record.validUntilMs!;
-  const absent = (identity = ""): DurationView => ({
-    ...unknown(`${identity}${retained ? "Last confirmed: no running assignment" : "No running assignment"}. Original confirmation ${timestamp(record.checkedAtMs)}. ${context}`),
-    text: "—", freshness: retained ? "retained" : "current",
-  });
+  const absent = (identity = ""): DurationView => {
+    const description = `${identity}${retained ? "Last confirmed: no running assignment; current assignment timing is pending" : "No running assignment"}. Original confirmation ${timestamp(record.checkedAtMs)}. ${context}`;
+    return retained ? { ...unknown(description), validUntilMs }
+      : { ...unknown(description), text: "—", freshness: "current", validUntilMs };
+  };
   const job = record.job;
   if (!job) {
     return checkValid ? absent() : unknown(`Duration ${record.pending ? "pending" : "unavailable"}: no useful assignment information yet. ${context}`);
@@ -73,9 +76,21 @@ export function projectLiveDuration(
     kind: "duration", text, elapsedSeconds, limitSeconds,
     percent: limitSeconds === null ? null : Math.min(100, elapsedSeconds / limitSeconds * 100),
     tone: limitSeconds === null ? "unbounded" : exceeded ? "exceeded" : "current",
-    freshness: retained ? "retained" : "current", animated: limitSeconds !== null,
+    freshness: retained ? "retained" : "current", animated: limitSeconds !== null, validUntilMs,
     description: `${identity}: ${text}. Run start ${timestamp(job.timeStart * 1000)}. Original confirmation ${timestamp(record.checkedAtMs)}. ${retained
       ? `Stale estimate: elapsed time continues from the last verified run start; current activity is unconfirmed (${error ?? (nowMs >= record.validUntilMs! ? "local evidence expired" : "unverified freshness deadline")}).`
       : "Elapsed time from the reported run start; limit from this assigned job's timeout."}${exceeded ? " EXCEEDED: elapsed time is more than 5 minutes beyond the last reported limit." : ""}${limitSeconds === null ? " No valid positive duration limit reported." : ` Last reported limit: ${formatDurationSeconds(limitSeconds)} (${limitSeconds} seconds). ${DURATION_OVERRUN_GRACE_NOTE}`} ${context}`,
+  };
+}
+
+/** Apply to the source projection after its history and clock checks on each render. */
+export function projectDurationAvailability(view: DurationView, api: NodeApiView): DurationView {
+  if (view.kind !== "unknown" || view.freshness !== "unknown" || view.text !== "Populating.." ||
+      api.status !== "Offline" || !api.current || !isJobTimestamp(api.checkedAtMs)) return view;
+  return {
+    ...view,
+    text: "—",
+    unavailableReason: "api-offline",
+    description: `Duration unavailable: API Offline; no verified job timing is available. Last confirmed API check: ${new Date(api.checkedAtMs).toISOString()}. API reachability does not establish whether a job is running.\n\nAPI source\n${api.description}\n\nDuration source\n${view.description}`,
   };
 }
