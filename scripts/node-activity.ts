@@ -1,5 +1,7 @@
 import { createSharedRead, createRequestLimiter, throwIfAborted } from "./shared-read.ts";
 import { createDemandWatch } from "./demand-watch.ts";
+import { combineRetention, pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 import { comparePriority, refreshPriority } from "./scheduling-priority.ts";
 import type { ActivityPriority } from "./scheduling-priority.ts";
 import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
@@ -23,6 +25,7 @@ export interface NodeActivityRequest {
   marketAddress: string;
 }
 export interface NodeActivityProvider {
+  retention?: ProviderRetention;
   (requests: readonly NodeActivityRequest[], signal?: AbortSignal): Promise<Map<string, NodeActivityEvidence>>;
   watch?: (requests: readonly NodeActivityRequest[], signal: AbortSignal,
     onUpdate: (evidence: Map<string, NodeActivityEvidence>) => void) => Promise<never>;
@@ -77,6 +80,7 @@ export function createNodeActivityProvider({
   activityPriority?: ActivityPriority;
 } = {}): NodeActivityProvider {
   const cache = new Map<string, Membership>();
+  const assignments = new Map<string, string>();
   const attempted = new Set<string>();
   const readMembership = createSharedRead<string, Membership>();
   const pauseUntil: Record<Service, number> = { running: 0, queued: 0 };
@@ -245,6 +249,7 @@ export function createNodeActivityProvider({
       || new Set(requests.map(request => request.address)).size !== requests.length) {
       throw new Error("Activity input must contain unique validated Host Addresses and valid market addresses.");
     }
+    for (const request of requests) assignments.set(request.address, request.marketAddress);
   }
   const provider: NodeActivityProvider = async (requests, signal) => {
     throwIfAborted(signal);
@@ -271,6 +276,35 @@ export function createNodeActivityProvider({
         .map(request => [request.address, evidence(request.address, values)])));
     });
   };
+  provider.retention = combineRetention(marketQueueProvider?.retention, {
+    markets: hosts => [...hosts].flatMap(address => {
+      const market = assignments.get(address);
+      return market ? [market] : [];
+    }),
+    marketRetryAt: market => Math.max(cache.get(`running:${market}`)?.nextAttemptAt ?? 0,
+      cache.get(`queued:${market}`)?.nextAttemptAt ?? 0, watch.retryAt(market)),
+    prune: ({ hosts, markets, nowMs }) => {
+      pruneCacheKeys(hosts, assignments);
+      const keepMarkets = new Set(markets);
+      for (const market of marketEvidence.keys()) {
+        if (watch.isWatching(market) || ["running", "queued"].some(service => {
+          const key = `${service}:${market}`;
+          return readMembership.isReading(key) || (cache.get(key)?.nextAttemptAt ?? 0) > nowMs;
+        })) keepMarkets.add(market);
+      }
+      const keepKeys = new Set<string>();
+      for (const key of new Set([...cache.keys(), ...attempted])) {
+        const market = key.slice(key.indexOf(":") + 1);
+        if (keepMarkets.has(market) || readMembership.isReading(key) || (cache.get(key)?.nextAttemptAt ?? 0) > nowMs) {
+          keepKeys.add(key);
+          keepMarkets.add(market);
+        }
+      }
+      pruneCacheKeys(keepKeys, cache, attempted);
+      pruneCacheKeys(keepMarkets, marketEvidence);
+      watch.prune(keepMarkets);
+    },
+  });
   return provider;
 }
 
@@ -444,5 +478,8 @@ export function createReconciledNodeInfoProvider({
       return nodeInfoProvider.watch!(addresses, signal, acceptRaw);
     };
   }
+  provider.retention = combineRetention(nodeInfoProvider.retention, activityProvider.retention, {
+    prune: ({ hosts }) => pruneCacheKeys(hosts, published),
+  });
   return provider;
 }

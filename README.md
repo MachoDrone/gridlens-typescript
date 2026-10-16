@@ -55,6 +55,36 @@ The name does not require 200 addresses; the table shows the actual count.
 Only the selected live roster is requested. Both lists and all viewers share
 upstream caches and request budgets within that server process.
 
+**Online GPU Hosts** is an automatically maintained live scenario. Select it in
+Scenario, or open
+[Online GPU Hosts](http://127.0.0.1:4173/?scenario=online-gpu-hosts).
+The preview reads the public Nosana indexer's complete queued-host and
+running-host lists as candidates, without API keys or wallet access. Candidate
+membership refreshes every minute while viewed and rechecks when reopened.
+The table shows only candidates with a current, successful **API Online** check
+(the existing 30-second proof window). Offline, unconfirmed and expired results
+stay outside the table; their bounded checks continue so recovered hosts can
+reappear automatically. The host count reflects the confirmed subset, and the
+notice below Scenario also shows the candidate count. Address changes require no file
+preparation, rebuild or restart. The existing two host files remain independent.
+
+Explorer's queued-or-running total can include abandoned hosts with old job
+records still marked running. Matching that total alone does not establish current
+reachability. The additional API check confirms a response, not physical GPU health
+or job activity; job age alone never controls inclusion or warning colors.
+A discovery failure retains the candidate list with its original check time and
+a visible stale notice; current API evidence still controls displayed rows. The full
+Fleet table uses the existing shared request budgets: network-wide lists can
+leave many readings pending or stale, and simultaneous live views share capacity.
+No discovery runs while this scenario has no viewers, and its roster stays in
+memory. These public indexer reads are best effort, not a heartbeat guarantee.
+Filtering affects presentation. Duration uses only job timings already cached by
+Supplied Host Addresses or Real200; Online GPU Hosts starts no new job discovery
+or timing-maintenance requests. This protects the existing fleets' job-request
+capacity. Uncached timings remain unknown, and cached readings retain their
+original check times and expiry. Other shared readers still check the candidate
+roster and preserve per-host observations and retry history.
+
 See [development guidance](docs/DEVELOPMENT.md) for default input paths, source
 semantics, saved controls, detached startup and the current backlog. Live rosters
 and CSV exports belong outside Git and build artifacts.
@@ -100,6 +130,9 @@ fall back to the preview's public readers.
 | [`test/`](test/) | Isolated Node and browser checks. |
 | [`docs/HOSTING_HANDOFF.md`](docs/HOSTING_HANDOFF.md) | Runtime artifact, adapter contracts and pending platform decisions. |
 | [`docs/UX_CONSISTENCY.md`](docs/UX_CONSISTENCY.md) | Phone/laptop behavior and acceptance requirements. |
+
+Online discovery belongs only to the local preview; the portable gateway still
+requires its explicitly authorized roster and snapshot adapters.
 
 The preview binds to loopback and is developer tooling, not a public beta service.
 A static host such as GitHub Pages cannot run its Node data server. The portable

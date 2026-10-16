@@ -5,10 +5,12 @@ import { createSharedOperation, throwIfAborted } from "./shared-read.ts";
 import type { SharedOperation } from "./shared-read.ts";
 import { createSolanaRpc, SolanaRpcError as SolError, waitForRefresh } from "./solana-rpc.ts";
 import type { BalanceProviderOptions, SolanaProviderState as ProviderState } from "./solana-rpc.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 export { SOLANA_PROVIDERS as SOL_PROVIDERS, MAINNET_GENESIS_HASH, SolanaRequestBudget as SolRequestBudget } from "./solana-rpc.ts";
 
-export type SolProvider = (addresses: readonly string[], signal?: AbortSignal,
-  onUpdate?: (snapshot: SolSnapshot) => void) => Promise<SolSnapshot>;
+export type SolProvider = ((addresses: readonly string[], signal?: AbortSignal,
+  onUpdate?: (snapshot: SolSnapshot) => void) => Promise<SolSnapshot>) & { retention?: ProviderRetention };
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -26,6 +28,7 @@ export function createSolProvider(options: BalanceProviderOptions = {}): SolProv
   const dueAt = new Map<string, number>();
   const attemptedAt = new Map<string, number>();
   const insertionOrder = new Map<string, number>();
+  let insertionSequence = 0;
   const listeners = new Set<{ addresses: ReadonlySet<string>; signal: AbortSignal | undefined;
     onUpdate: (snapshot: SolSnapshot) => void }>();
   let activeRefresh: {
@@ -193,13 +196,13 @@ export function createSolProvider(options: BalanceProviderOptions = {}): SolProv
     publish(remaining.flat());
   }
 
-  return async (addresses, signal, onUpdate) => {
+  const provider: SolProvider = async (addresses, signal, onUpdate) => {
     throwIfAborted(signal);
     if (new Set(addresses).size !== addresses.length || addresses.some(address => !isMetadataAddress(address))) {
       throw new Error("SOL reads require unique valid startup Host Addresses.");
     }
     if (!addresses.length) return { hosts: [], nextRefreshAtMs: null };
-    for (const address of addresses) if (!insertionOrder.has(address)) insertionOrder.set(address, insertionOrder.size);
+    for (const address of addresses) if (!insertionOrder.has(address)) insertionOrder.set(address, insertionSequence++);
     const listener = onUpdate ? { addresses: new Set(addresses), signal, onUpdate } : undefined;
     if (listener) listeners.add(listener);
     try {
@@ -251,4 +254,13 @@ export function createSolProvider(options: BalanceProviderOptions = {}): SolProv
       if (listener) listeners.delete(listener);
     }
   };
+  provider.retention = {
+    retryAt: address => Number.isFinite(dueAt.get(address)) ? dueAt.get(address)! : 0,
+    prune: ({ hosts }) => {
+      const keep = new Set([...hosts, ...activeRefresh?.addresses ?? [],
+        ...[...listeners].flatMap(listener => [...listener.addresses])]);
+      pruneCacheKeys(keep, records, dueAt, attemptedAt, insertionOrder);
+    },
+  };
+  return provider;
 }

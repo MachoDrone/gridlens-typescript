@@ -7,8 +7,10 @@ import { createSharedOperation, throwIfAborted } from "./shared-read.ts";
 import type { SharedOperation } from "./shared-read.ts";
 import { createSolanaRpc, SolanaRpcError as NosError, waitForRefresh } from "./solana-rpc.ts";
 import type { BalanceProviderOptions, SolanaProviderState as ProviderState } from "./solana-rpc.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 
-export type NosProvider = (addresses: readonly string[], signal?: AbortSignal) => Promise<NosSnapshot>;
+export type NosProvider = ((addresses: readonly string[], signal?: AbortSignal) => Promise<NosSnapshot>) & { retention?: ProviderRetention };
 
 function object(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -206,7 +208,7 @@ export function createNosProvider(options: BalanceProviderOptions = {}): NosProv
     }
   }
 
-  return async (addresses, signal) => {
+  const provider: NosProvider = async (addresses, signal) => {
     throwIfAborted(signal);
     if (new Set(addresses).size !== addresses.length || addresses.some(address => !isMetadataAddress(address))) {
       throw new Error("NOS reads require unique valid startup Host Addresses.");
@@ -253,4 +255,9 @@ export function createNosProvider(options: BalanceProviderOptions = {}): NosProv
     const nextRefreshAtMs = !stoppedForParameters && Number.isFinite(earliest) ? earliest : null;
     return { hosts: addresses.map(address => ({ ...(records.get(address) ?? blank(address)) })), nextRefreshAtMs };
   };
+  provider.retention = {
+    retryAt: address => Number.isFinite(dueAt.get(address)) ? dueAt.get(address)! : 0,
+    prune: ({ hosts }) => pruneCacheKeys(new Set([...hosts, ...activeRefresh?.addresses ?? []]), records, tokenAccounts, dueAt),
+  };
+  return provider;
 }

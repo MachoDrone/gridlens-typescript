@@ -1,5 +1,7 @@
 import { createSharedRead, createRequestLimiter, throwIfAborted } from "./shared-read.ts";
 import { createDemandWatch } from "./demand-watch.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
 import { normalizeNodeInfo } from "../src/fleet/node-info.ts";
 import { NODE_API_ERROR_CODES } from "../src/fleet/node-info.ts";
@@ -19,6 +21,7 @@ const nodeInfoConcurrency = 4;
 
 /** Updates contain only the completed hosts; the final result remains the full ordered roster. */
 export interface NodeInfoProvider {
+  retention?: ProviderRetention;
   (addresses: readonly string[], signal?: AbortSignal, onUpdate?: (snapshot: NodeInfoSnapshot) => void): Promise<NodeInfoSnapshot>;
   watch?: (addresses: readonly string[], signal: AbortSignal, onUpdate: (snapshot: NodeInfoSnapshot) => void) => Promise<never>;
   nextRefreshAt?: (addresses: readonly string[]) => number | null;
@@ -88,8 +91,9 @@ export function createNodeInfoProvider({
 } = {}): NodeInfoProvider {
   const hosts = new Map<string, HostCache>();
   const insertionOrder = new Map<string, number>();
+  let insertionSequence = 0;
   const register = (addresses: readonly string[]): void => {
-    for (const address of addresses) if (!insertionOrder.has(address)) insertionOrder.set(address, insertionOrder.size);
+    for (const address of addresses) if (!insertionOrder.has(address)) insertionOrder.set(address, insertionSequence++);
   };
   const readHost = createSharedRead<string, NodeInfoRecord>();
   const limited = createRequestLimiter(nodeInfoConcurrency);
@@ -390,6 +394,15 @@ export function createNodeInfoProvider({
     return watch.watch(addresses, signal, (_address, record) => onUpdate({
       hosts: [structuredClone(record)], nextRefreshAtMs: provider.nextRefreshAt!(addresses),
     }));
+  };
+  provider.retention = {
+    retryAt: address => Math.max(hosts.get(address)?.nextAttemptAt ?? 0, watch.retryAt(address)),
+    prune: ({ hosts: retained }) => {
+      const keep = new Set(retained);
+      for (const address of insertionOrder.keys()) if (readHost.isReading(address) || watch.isWatching(address)) keep.add(address);
+      pruneCacheKeys(keep, hosts, insertionOrder);
+      watch.prune(keep);
+    },
   };
   return provider;
 }

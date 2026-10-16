@@ -20,6 +20,12 @@ writeFileSync(real200HostsFile, "[]\n");
 process.env.GRIDLENS_HOSTS_FILE = hostsFile;
 
 const server = await startPreviewServer({ stakingProvider: emptyStaking, nosProvider: emptyNos, solProvider: emptySol, queueProvider: emptyQueue, jobProvider: emptyJobs,
+  onlineProvider: {
+    peek: () => ({ addresses: [], error: null, online: { revision: "isolated-empty", checkedAtMs: Date.now(),
+      nextRefreshAtMs: Date.now() + 60_000, retained: false, discoveryError: null } }),
+    read: async () => ({ addresses: [], error: null, online: { revision: "isolated-empty", checkedAtMs: Date.now(),
+      nextRefreshAtMs: Date.now() + 60_000, retained: false, discoveryError: null } }),
+  },
   port: 4174, real200HostsFile,
   // Keep the general layout/sample suites offline. Metadata behavior has its
   // own injected fixture server; this harness must never reach Nosana.

@@ -6,6 +6,7 @@ import { fleetResourceURL, readFleetConfig } from "../src/preview/fleet-config.t
 import { SYNTHETIC_HOST_ADDRESSES as addresses } from "./fixtures/host-addresses.ts";
 import type { HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
 import { createEvidenceClock } from "../src/preview/evidence-clock.ts";
+import { normalizeHostMetadata } from "../src/fleet/host-metadata.ts";
 
 const hosts = addresses.slice(0, 2);
 const snapshot: HostMetadataSnapshot = { hosts: hosts.map(address => ({ address, values: null,
@@ -16,13 +17,246 @@ const meta = (values: Record<string, string>) => ({ querySelector: (query: strin
   return key && key in values ? { content: values[key] } : null;
 } }) as unknown as Pick<Document, "querySelector">;
 
+const watchResponse = (): Response => new Response(new ReadableStream({ start(controller) {
+  controller.enqueue(encode({ ...snapshot, complete: false, watching: true }));
+} }), { headers: { "Content-Type": "application/x-ndjson" } });
+
+test("request admission retains watch slots through body completion and leaves fixed-mode dispatch unbounded", async () => {
+  for (const maximumConcurrentRequests of [undefined, 2]) {
+    const dispatched: string[] = [];
+    const transport = createFleetTransport({
+      ...(maximumConcurrentRequests === undefined ? {} : { maximumConcurrentRequests }),
+      fetch: async url => { dispatched.push(String(url)); return watchResponse(); },
+    });
+    const controllers = Array.from({ length: 3 }, () => new AbortController());
+    const reads = controllers.map((controller, index) => transport.read("metadata", `/read-${index}`, {
+      addresses: hosts, signal: controller.signal,
+    }));
+    const settled = Promise.allSettled(reads);
+    if (maximumConcurrentRequests === undefined) assert.equal(dispatched.length, 3);
+    await setImmediate();
+    assert.equal(dispatched.length, maximumConcurrentRequests ?? 3);
+    controllers[0]!.abort();
+    await setImmediate();
+    assert.deepEqual(dispatched, ["/read-0", "/read-1", "/read-2"]);
+    controllers.forEach(controller => controller.abort());
+    assert((await settled).every(result => result.status === "rejected"));
+  }
+  for (const maximumConcurrentRequests of [0, -1, 1.5, NaN, -Infinity]) {
+    assert.throws(() => createFleetTransport({ maximumConcurrentRequests }), /concurrency/);
+  }
+});
+
+test("queued rosters take the next released slot before finite data reads, which retain FIFO order", async () => {
+  const dispatched: string[] = [];
+  const controller = new AbortController();
+  const transport = createFleetTransport({ maximumConcurrentRequests: 1, fetch: async url => {
+    dispatched.push(String(url));
+    return url === "/watch" ? watchResponse() : url === "/hosts"
+      ? Response.json({ addresses: hosts, error: null }) : Response.json(snapshot);
+  } });
+  const watch = transport.read("metadata", "/watch", { addresses: hosts, signal: controller.signal });
+  const watchCanceled = assert.rejects(watch, { name: "AbortError" });
+  const first = transport.read("metadata", "/first", { addresses: hosts });
+  const second = transport.read("metadata", "/second", { addresses: hosts });
+  const roster = transport.roster("/hosts");
+  await setImmediate();
+  assert.deepEqual(dispatched, ["/watch"]);
+  controller.abort();
+  await Promise.all([watchCanceled, first, second, roster]);
+  assert.deepEqual(dispatched, ["/watch", "/hosts", "/first", "/second"]);
+});
+
+test("queued cancellation settles immediately and superseded reads never dispatch after admission", async () => {
+  const dispatched: string[] = [];
+  const hold = new AbortController(), queued = new AbortController();
+  let current = true;
+  const transport = createFleetTransport({ maximumConcurrentRequests: 1, fetch: async url => {
+    dispatched.push(String(url));
+    return url === "/watch" ? watchResponse() : Response.json(snapshot);
+  } });
+  const watchCanceled = assert.rejects(transport.read("metadata", "/watch", {
+    addresses: hosts, signal: hold.signal,
+  }), { name: "AbortError" });
+  const queuedCanceled = assert.rejects(transport.roster("/canceled", queued.signal), { name: "AbortError" });
+  const staleCanceled = assert.rejects(transport.read("metadata", "/stale", {
+    addresses: hosts, current: () => current,
+  }), { name: "AbortError" });
+  const survivor = transport.read("metadata", "/survivor", { addresses: hosts });
+  await setImmediate();
+  queued.abort();
+  await queuedCanceled;
+  assert.deepEqual(dispatched, ["/watch"]);
+  current = false;
+  hold.abort();
+  await Promise.all([watchCanceled, staleCanceled, survivor]);
+  assert.deepEqual(dispatched, ["/watch", "/survivor"]);
+});
+
+test("admission waiting consumes neither the network deadline nor server transit measurement", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 100_000 });
+  const hold = new AbortController();
+  const elapsed: number[] = [];
+  let finish!: (response: Response) => void;
+  let rosterDispatched = false;
+  const transport = createFleetTransport({ maximumConcurrentRequests: 1, finiteTimeoutMs: 100,
+    watchIdleTimeoutMs: 5_000, now: Date.now,
+    onServerTime: (_time, duration) => elapsed.push(duration), fetch: async url => {
+      if (url === "/watch") return watchResponse();
+      rosterDispatched = true;
+      return new Promise<Response>(resolve => { finish = resolve; });
+    },
+  });
+  const watchCanceled = assert.rejects(transport.read("metadata", "/watch", {
+    addresses: hosts, signal: hold.signal,
+  }), { name: "AbortError" });
+  const roster = transport.roster("/hosts");
+  await setImmediate();
+  t.mock.timers.tick(2_000);
+  await setImmediate();
+  assert.equal(rosterDispatched, false);
+  hold.abort();
+  await watchCanceled;
+  await setImmediate();
+  assert.equal(rosterDispatched, true);
+  t.mock.timers.tick(99);
+  finish(Response.json({ addresses: hosts, error: null, serverTimeMs: 102_099 }));
+  await roster;
+  assert.deepEqual(elapsed, [99]);
+});
+
+test("rejected headers, bodies, callbacks and revisions release admission for the next read", async () => {
+  for (const failure of ["headers", "body", "callback", "revision"] as const) {
+    const dispatched: string[] = [];
+    const transport = createFleetTransport({ maximumConcurrentRequests: 1, fetch: async url => {
+      dispatched.push(String(url));
+      if (url === "/next") return Response.json(snapshot);
+      if (failure === "headers") return new Response("Unavailable", { status: 503 });
+      if (failure === "body") return new Response("bad-json", { headers: { "Content-Type": "application/json" } });
+      return Response.json({ ...snapshot, onlineRevision: "old" });
+    } });
+    const rejected = assert.rejects(transport.read("metadata", "/failure", { addresses: hosts,
+      ...(failure === "revision" ? { onlineRevision: "current" } : {}),
+      onSnapshot: () => { if (failure === "callback") throw new Error("Observer failed"); },
+    }));
+    const next = transport.read("metadata", "/next", { addresses: hosts });
+    await Promise.all([rejected, next]);
+    assert.deepEqual(dispatched, ["/failure", "/next"]);
+  }
+});
+
+test("timed-out uncooperative fetches and bodies release admission without waiting for producer cancellation", async t => {
+  t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: 100_000 });
+  for (const headers of [false, true]) {
+    const dispatched: string[] = [];
+    const transport = createFleetTransport({ maximumConcurrentRequests: 1, finiteTimeoutMs: 100, fetch: async url => {
+      dispatched.push(String(url));
+      if (url === "/next") return Response.json(snapshot);
+      return headers ? new Response(new ReadableStream({ cancel: () => new Promise(() => {}) }), {
+        headers: { "Content-Type": "application/json" },
+      }) : new Promise<Response>(() => {});
+    } });
+    const rejected = assert.rejects(transport.read("metadata", "/stalled", { addresses: hosts }), /timed out/);
+    const next = transport.read("metadata", "/next", { addresses: hosts });
+    await setImmediate();
+    t.mock.timers.tick(100);
+    await Promise.all([rejected, next]);
+    assert.deepEqual(dispatched, ["/stalled", "/next"]);
+  }
+});
+
+test("Online roster status is validated and sanitized without changing fixed roster replies", async () => {
+  const online = { revision: "revision-1", checkedAtMs: 1_000, nextRefreshAtMs: 61_000,
+    retained: false, discoveryError: null };
+  const transport = createFleetTransport({ fetch: async () => Response.json({ addresses: hosts, error: null,
+    online: { ...online, untrustedExtra: "discard" } }) });
+  assert.deepEqual(await transport.roster("/preview/hosts.json?scenario=online-gpu-hosts"), { addresses: hosts, error: null, online });
+  for (const bad of [null, { ...online, checkedAtMs: null }, { ...online, revision: "bad/revision" },
+    { ...online, retained: true }, { ...online, nextRefreshAtMs: 999 }]) {
+    const invalid = createFleetTransport({ fetch: async () => Response.json({ addresses: hosts, error: null, online: bad }) });
+    await assert.rejects(invalid.roster("/preview/hosts.json"), /roster status is invalid/);
+  }
+  const inconsistent = createFleetTransport({ fetch: async () => Response.json({ addresses: hosts, error: "Failure", online }) });
+  await assert.rejects(inconsistent.roster("/preview/hosts.json"), /roster status is invalid/);
+});
+
+test("Online data requires its captured revision before clock calibration or publication", async () => {
+  for (const streaming of [false, true]) {
+    for (const onlineRevision of [undefined, "old-revision", "revision-1"]) {
+      const events: string[] = [];
+      const payload = { ...snapshot, onlineRevision, serverTimeMs: 2_000, ...(streaming ? { complete: true } : {}) };
+      const transport = createFleetTransport({ fetch: async () => streaming
+        ? new Response(encode(payload), { headers: { "Content-Type": "application/x-ndjson" } }) : Response.json(payload),
+      onServerTime: () => events.push("time"), onRosterMismatch: () => events.push("mismatch") });
+      const read = transport.read("metadata", "/preview/metadata.json?scenario=online-gpu-hosts&revision=revision-1", {
+        addresses: hosts, onlineRevision: "revision-1", onSnapshot: () => events.push("snapshot"),
+      });
+      if (onlineRevision === "revision-1") { await read; assert.deepEqual(events, ["time", "snapshot"]); }
+      else { await assert.rejects(read, error => error instanceof FleetTransportError && error.status === 409);
+        assert.deepEqual(events, ["mismatch"]); }
+    }
+  }
+});
+
+test("HTTP 409 requests a fresh Online roster without affecting fixed scenarios", async () => {
+  let mismatches = 0;
+  const transport = createFleetTransport({ fetch: async () => Response.json({ error: "Changed" }, { status: 409 }),
+    onRosterMismatch: () => { mismatches++; } });
+  await assert.rejects(transport.read("metadata", "/preview/metadata.json", { addresses: hosts }));
+  assert.equal(mismatches, 0);
+  await assert.rejects(transport.read("metadata", "/preview/metadata.json?scenario=online-gpu-hosts&revision=old", {
+    addresses: hosts, onlineRevision: "old",
+  }));
+  assert.equal(mismatches, 1);
+});
+
+test("2000-host normalized Unicode metadata fits bounded Online frames while fixed and explicit limits remain enforced", async () => {
+  const alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  const addresses = Array.from({ length: 2_000 }, (_, index) => {
+    const number = index + 1;
+    let remaining = number;
+    let encoded = "";
+    while (remaining) { encoded = alphabet[remaining % 58]! + encoded; remaining = Math.floor(remaining / 58); }
+    return "1".repeat(32 - Math.ceil(Math.log2(number + 1) / 8)) + encoded;
+  });
+  const short = "界".repeat(64);
+  const long = "界".repeat(256);
+  const hosts = addresses.map(address => ({ address, values: {
+    ...normalizeHostMetadata(address, { nodeAddress: address, status: short, metrics: {
+      cpu: { cpu_model: long }, gpu: { cuda_driver_version: short, nvml_driver_version: short },
+      package_version: short, system_environment: long,
+    } }), marketLabel: long,
+  }, fetchedAtMs: 1_000, retained: false, error: null, marketError: null }));
+  const frame = encode({ hosts, onlineRevision: "large", complete: true });
+  assert(frame.byteLength > 2 * 1024 * 1024 && frame.byteLength < 8 * 1024 * 1024);
+  const fetch = async () => new Response(frame, { headers: { "Content-Type": "application/x-ndjson" } });
+  const transport = createFleetTransport({ fetch });
+  const result = await transport.read("metadata", "/preview/metadata.json?scenario=online-gpu-hosts&revision=large", {
+    addresses, onlineRevision: "large",
+  });
+  assert.equal(result.hosts.length, 2_000);
+  assert.equal(result.hosts[1_999]?.values?.cpu, long);
+  await assert.rejects(transport.read("metadata", "/preview/metadata.json", { addresses }), /frame limit/);
+  const strict = createFleetTransport({ fetch, frameByteLimit: 2 * 1024 * 1024 });
+  await assert.rejects(strict.read("metadata", "/preview/metadata.json", { addresses, onlineRevision: "large" }), /frame limit/);
+  const oversized = createFleetTransport({ fetch: async () => new Response(encode({ hosts: snapshot.hosts,
+    onlineRevision: "large", complete: true, padding: "x".repeat(8 * 1024 * 1024),
+  }), { headers: { "Content-Type": "application/x-ndjson" } }) });
+  await assert.rejects(oversized.read("metadata", "/preview/metadata.json", { addresses: snapshot.hosts.map(host => host.address),
+    onlineRevision: "large" }), /frame limit/);
+});
+
 test("trusted Fleet configuration supports a same-origin prefix without URL query overrides", () => {
   const defaults = readFleetConfig(meta({}));
   assert.equal(fleetResourceURL(defaults, "jobs", "real200"), "/preview/jobs.json?scenario=real200");
+  assert.equal(fleetResourceURL(defaults, "hosts", "online-gpu-hosts", "revision-1"), "/preview/hosts.json?scenario=online-gpu-hosts");
+  assert.equal(fleetResourceURL(defaults, "jobs", "online-gpu-hosts", "revision-1"), "/preview/jobs.json?scenario=online-gpu-hosts&revision=revision-1");
+  assert.equal(fleetResourceURL(defaults, "connection", "online-gpu-hosts"), "/preview/connection.json");
   const hosted = readFleetConfig(meta({ "gridlens-api-base": "/api/fleet/", "gridlens-source-mode": "snapshot",
     "gridlens-source-label": "Local snapshot rehearsal" }));
   assert.equal(fleetResourceURL(hosted, "connection"), "/api/fleet/connection.json");
   assert.equal(fleetResourceURL(hosted, "jobs", "real200"), "/api/fleet/jobs.json");
+  assert.equal(fleetResourceURL(hosted, "jobs", "online-gpu-hosts", "revision-1"), "/api/fleet/jobs.json");
   assert.equal(hosted.sourceLabel, "Local snapshot rehearsal");
   for (const path of ["https://example.invalid/api", "//example.invalid/api", "/a/../b", "/api?token=x", "/api#x", "/%2fapi", "/a\\b"]) {
     assert.throws(() => readFleetConfig(meta({ "gridlens-api-base": path })), /same-origin/);

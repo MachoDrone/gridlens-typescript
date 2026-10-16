@@ -87,6 +87,22 @@ function harness(handler?: (call: Call) => Response | undefined | Promise<Respon
     now: () => time, advance: (ms: number) => { time += ms; }, failMetadata: () => { metadataError = true; } };
 }
 
+test("retired stake/account/market eviction preserves provider chain state and watermark", async () => {
+  const fixture = harness();
+  const original = await fixture.provider([host]);
+  fixture.advance(3_600_000);
+  fixture.provider.retention!.prune({ hosts: new Set(), markets: new Set(), nowMs: fixture.now() });
+  assert.equal(fixture.provider.retention!.retryAt!(host), 0);
+  assert.equal(fixture.provider.retention!.marketRetryAt!(market), 0);
+  assert.deepEqual([...fixture.provider.retention!.markets!(new Set([host]))], []);
+  const rejoined = await fixture.provider([host]);
+  assert.equal(rejoined.hosts[0]!.stake.amount, original.hosts[0]!.stake.amount);
+  assert.equal(rejoined.hosts[0]!.requirement.targetAmount, original.hosts[0]!.requirement.targetAmount);
+  assert.equal(fixture.calls.filter(call => call.method === "getGenesisHash").length, 1);
+  const batches = fixture.calls.filter(call => call.method === "getMultipleAccounts");
+  assert((batches[2]!.params[1] as { minContextSlot: number }).minContextSlot >= original.hosts[0]!.requirement.contextSlot!);
+});
+
 test("stake/vault pairs stay together and market requirements deduplicate with independent evidence", async () => {
   const fixture = harness();
   const result = await fixture.provider(hosts);

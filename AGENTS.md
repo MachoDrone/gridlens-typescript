@@ -4,6 +4,30 @@ Read `README.md` and `docs/DEVELOPMENT.md` first. They describe the current
 application, architecture, implemented fields and remaining work. User
 instructions take precedence. Use this repository as the working directory.
 
+Communication requirements apply by default, without a special "Truth Mode":
+
+- Before giving wording to relay to developers, verify each consequential claim
+  against the current application code/configuration, observed runtime evidence
+  or authoritative documentation. Supply concise evidence references separately
+  from the copyable wording. Omit unsupported details or explicitly say unknown.
+- Distinguish observed facts, hypotheses and unresolved questions. Identify the
+  component that enforces a limit: GridLens, an upstream provider, the network or
+  the development tool. Do not attribute a local limiter to the provider or user.
+  An HTTP 403 alone does not establish rate limiting, its cause or its scope.
+- Describe the application's actual data path. MCP tools available to the coding
+  agent do not establish that the application uses MCP for metrics or transport.
+  Verify runtime wiring before naming a protocol, integration or deployment.
+- Label local retry eligibility separately from a recovery forecast. Give an ETA
+  only with its evidence, timezone and conditions; say no confirmed recovery time
+  when the evidence cannot establish one.
+- Disclose relevant code changes, restarts, cache/counter resets and other
+  interventions during troubleshooting. If multiple variables changed, explain
+  that the comparison cannot isolate a cause. Continued display of cached data
+  is not proof of a fresh successful request.
+- State assistant-introduced regressions plainly when supported by evidence.
+  Correct misleading statements promptly and provide replacement wording suitable
+  for the user to relay; do not require the user to discover the discrepancy.
+
 The local live preview is `http://127.0.0.1:4173`; use the pinned toolchain below.
 Keep a healthy preview running across tasks. When starting a persistent preview,
 use the development guide's detached `nohup setsid` recipe. Keep PID/log records outside Git,
@@ -27,11 +51,12 @@ graceful termination releases its single-writer lock.
 
 - Application logic, server code, build scripts and tests use TypeScript. A
   runnable Fleet preview reads selected public Nosana data for explicitly
-  supplied host addresses. Synthetic scenarios stay separate.
+  supplied host addresses or the separate Online GPU Hosts scenario. Synthetic scenarios stay separate.
 - The address file is external developer input, read once at preview startup:
   `GRIDLENS_HOSTS_FILE` or `~/.local/share/gridlens-typescript/hosts.json`.
-  Never add discovery, seeding, synchronization, address maintenance or file-writing
-  logic. Report missing/invalid input without creating or replacing it. Keep
+  Never add seeding, synchronization, address maintenance or file-writing logic
+  to these external inputs. Discovery is authorized only for the separate
+  Online GPU Hosts scenario below. Report missing/invalid input without creating or replacing it. Keep
   addresses out of Git/build output and test only with isolated files. External
   edits take effect after restarting the preview; five-character Explorer links
   sort using the full public address. No measurements may be inferred from an address.
@@ -47,6 +72,37 @@ graceful termination releases its single-writer lock.
   must not collect the other. Tests use isolated explicit inputs and injected
   providers, never a developer's Real200 file. Missing/invalid Real200 input must
   not affect the default roster.
+- Online GPU Hosts (`?scenario=online-gpu-hosts`) discovers the complete public
+  indexer queued/running union as candidates in memory. Explorer's headline
+  includes historical running records and is not current-presence proof.
+  Refresh candidates every 60 seconds only while viewed; opening/resuming
+  revalidates through shared cache. Add immediately, remove after two successful
+  absences, and retain dated candidate membership on failure. Display only hosts
+  with current API Online evidence under the existing 30-second proof window and
+  trusted clock; Offline, unconfirmed, expired or merely job-backed hosts stay
+  hidden. Keep all candidates eligible for bounded recovery checks, without extra
+  probes, altered budgets or arbitrary job-age exclusions. Count the displayed
+  subset and show its candidate count; label diagnostic coverage as candidates.
+  Preserve surviving rows/focus and original evidence; reconcile admission on
+  progress, expiry and clock suspension/resumption. Keep visible discovery
+  check/stale status distinct from API reachability and State.
+  Data reads require the current server-issued revision; preserve surviving rows,
+  controls and original evidence, and cancel superseded feeds. Share existing
+  provider budgets without increasing limits or promising network-wide fresh
+  readings. Bound dynamic retention while preserving fixed rosters, active work,
+  retry deadlines, global cooldowns and budget history. No roster persistence,
+  wallet access, input-file mutation or discovery in the portable gateway.
+  See docs/DEVELOPMENT.md for bounds and lifecycle; test only injected discovery.
+  Online Duration reads are cache-only: use the shared job provider's non-dispatching
+  peek, preserve original records/times and return unknowns for missing entries.
+  Only Supplied Host Addresses and Real200 initiate job discovery/maintenance;
+  Online reads, manual refresh and State hints must consume no job allowance.
+  Keep the explanatory Online job policy visible below Scenario. Preserve all
+  existing limits and cooldowns; do not use restarts as a quota workaround.
+  Online browser transport admits at most five concurrent data/roster requests
+  through complete response consumption/cancellation, prioritizing queued roster
+  reads. Connection checks stay outside the gate; queued reads start no network
+  timeout and cancel without dispatch. This is per page, not a cross-tab guarantee.
 - The live metadata adapter reads Host Address, Status, Market label,
   RAM/Disk GB, CPU model, CUDA/NVIDIA driver versions, reported package version
   and System release from anonymous Nosana metrics plus a deduplicated market

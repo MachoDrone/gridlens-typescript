@@ -13,6 +13,8 @@ export function createDemandWatch<K, V>({ read, peek, dueAt, compare, canRead, n
   watch(keys: readonly K[], signal: AbortSignal, update: (key: K, value: V) => void): Promise<never>;
   publish(key: K, value: V): void;
   isWatching(key: K): boolean;
+  retryAt(key: K): number;
+  prune(keep: ReadonlySet<K>): void;
 } {
   const viewers = new Set<{ keys: Set<K>; update: (key: K, value: V) => void }>();
   const pending = new Map<K, AbortController>();
@@ -20,6 +22,7 @@ export function createDemandWatch<K, V>({ read, peek, dueAt, compare, canRead, n
   const unexpectedRetryAt = new Map<K, number>();
   const insertion = new Map<K, number>();
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let insertionSequence = 0;
 
   function interest(): Set<K> {
     return new Set([...viewers].flatMap(viewer => [...viewer.keys]));
@@ -72,11 +75,21 @@ export function createDemandWatch<K, V>({ read, peek, dueAt, compare, canRead, n
   return {
     publish,
     isWatching: key => [...viewers].some(viewer => viewer.keys.has(key)),
+    retryAt: key => unexpectedRetryAt.get(key) ?? 0,
+    prune(keep) {
+      const watching = interest();
+      for (const collection of [published, unexpectedRetryAt, insertion]) {
+        for (const key of collection.keys()) {
+          if (!keep.has(key) && !watching.has(key) && !pending.has(key)
+            && (unexpectedRetryAt.get(key) ?? 0) <= now()) collection.delete(key);
+        }
+      }
+    },
     watch(keys, signal, update) {
       if (signal.aborted) return Promise.reject(signal.reason);
       return new Promise<never>((_resolve, reject) => {
         const viewer = { keys: new Set(keys), update };
-        for (const key of keys) if (!insertion.has(key)) insertion.set(key, insertion.size);
+        for (const key of keys) if (!insertion.has(key)) insertion.set(key, insertionSequence++);
         const cancel = (): void => {
           viewers.delete(viewer);
           signal.removeEventListener("abort", cancel);

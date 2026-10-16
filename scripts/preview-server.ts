@@ -5,6 +5,7 @@ import type { Server } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { hostAddressFilePath, loadHostAddressFile, real200HostAddressFilePath } from "./host-address-file.ts";
+import type { HostAddressInput } from "./host-address-file.ts";
 import { createHostMetadataProvider } from "./host-metadata.ts";
 import { createSchedulingEvidence } from "./scheduling-priority.ts";
 import type { HostMetadataProvider } from "./host-metadata.ts";
@@ -27,12 +28,17 @@ import { createSharedProgressRead, mergeHostUpdates } from "./shared-progress.ts
 import type { HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
 import type { JobSnapshot } from "../src/fleet/jobs.ts";
+import { JOB_REFRESH_INTERVAL_MS } from "../src/fleet/jobs.ts";
 import type { QueueSnapshot } from "../src/fleet/queue.ts";
 import type { SolSnapshot } from "../src/fleet/sol.ts";
 import { NOS_MINT, NOS_REFRESH_INTERVAL_MS } from "../src/fleet/nos.ts";
 import type { NosSnapshot } from "../src/fleet/nos.ts";
 import { blankStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../src/fleet/staking.ts";
 import type { StakingSnapshot } from "../src/fleet/staking.ts";
+import { createOnlineHostsProvider } from "./online-hosts.ts";
+import type { OnlineHostsProvider } from "./online-hosts.ts";
+import type { OnlineHostsSnapshot } from "../src/contracts/online-hosts.ts";
+import { createOnlineRetention } from "./online-retention.ts";
 type Snapshot = HostMetadataSnapshot | NodeInfoSnapshot | JobSnapshot | QueueSnapshot | SolSnapshot | NosSnapshot | StakingSnapshot;
 
 const defaultDirectory = fileURLToPath(new URL("../dist/", import.meta.url));
@@ -53,7 +59,7 @@ export function previewPort(arguments_: readonly string[]): number {
 
 /** Developer-only preview. Port zero is allowed for isolated tests. */
 export async function startPreviewServer(
-  { directory = defaultDirectory, port = 4173, hostsFile, real200HostsFile, onHostsInputError, metadataProvider, nodeInfoProvider, jobProvider, queueProvider, solProvider, nosProvider, stakingProvider, now = Date.now }: {
+  { directory = defaultDirectory, port = 4173, hostsFile, real200HostsFile, onHostsInputError, metadataProvider, nodeInfoProvider, jobProvider, queueProvider, solProvider, nosProvider, stakingProvider, onlineProvider, now = Date.now }: {
     directory?: string;
     port?: number;
     hostsFile?: string;
@@ -66,7 +72,8 @@ export async function startPreviewServer(
     solProvider?: SolProvider;
     nosProvider?: NosProvider;
     stakingProvider?: StakingProvider;
-    /** Wire-envelope time only; never renews provider evidence or scheduling. */
+    onlineProvider?: OnlineHostsProvider;
+    /** Wire-envelope/cache-read time only; never renews evidence or active provider scheduling. */
     now?: () => number;
   } = {},
 ): Promise<Server> {
@@ -90,6 +97,22 @@ export async function startPreviewServer(
     loadHostAddressFile(real200HostAddressFilePath(real200HostsFile === undefined ? {} : { hostsFile: real200HostsFile })) :
     { addresses: [], error: "Real200 Host Address input is not configured. Supply GRIDLENS_REAL200_HOSTS_FILE and restart the preview." };
   const inputs = { supplied: suppliedInput, real200: real200Input };
+  let onlineHosts = onlineProvider;
+  let onlineInput: OnlineHostsSnapshot | undefined;
+  const onlineConsumers = new Map<AbortController, { revision: string; close: () => void }>();
+  const pendingOnlineInput = (): OnlineHostsSnapshot => ({
+    addresses: [], error: "Online GPU Hosts have not been loaded. Refresh the host list to start discovery.",
+    online: { revision: null, checkedAtMs: null, nextRefreshAtMs: now(), retained: false, discoveryError: null },
+  });
+  const peekOnline = (): OnlineHostsSnapshot => onlineInput ?? pendingOnlineInput();
+  function retireOnlineReads(revision: string | null): void {
+    for (const [controller, consumer] of onlineConsumers) {
+      if (consumer.revision === revision) continue;
+      onlineConsumers.delete(controller);
+      controller.abort();
+      consumer.close();
+    }
+  }
   let provider = metadataProvider;
   let nodeProvider = nodeInfoProvider;
   let jobsProvider = jobProvider;
@@ -127,6 +150,12 @@ export async function startPreviewServer(
     };
   }
   const marketQueueProvider = createMarketQueueProvider({ activityPriority: scheduling.marketPriority });
+  const onlineRetention = createOnlineRetention({
+    pinned: [...suppliedInput.addresses, ...real200Input.addresses], now,
+    caches: () => [provider?.retention, nodeProvider?.retention, jobsProvider?.retention, queuesProvider?.retention,
+      balancesProvider?.retention, tokensProvider?.retention, stakesProvider?.retention,
+      marketQueueProvider.retention, scheduling.retention],
+  });
   const sharedRoutes = createSharedProgressRead<string, Snapshot>(mergeHostUpdates);
   type Read = (addresses: readonly string[], signal: AbortSignal, onUpdate: (update: Snapshot) => void) => Promise<Snapshot>;
   const getNodeProvider = (): NodeInfoProvider => nodeProvider ??= createReconciledNodeInfoProvider({
@@ -274,27 +303,79 @@ export async function startPreviewServer(
     const parameters = new URLSearchParams((request.url ?? "").split("?").slice(1).join("?"));
     const scenarios = parameters.getAll("scenario");
     if ((path === "/preview/hosts.json" || Object.hasOwn(routes, path)) &&
-      (scenarios.length > 1 || scenarios.length === 1 && !["supplied", "real200"].includes(scenarios[0]!))) {
-      const body = JSON.stringify({ addresses: [], hosts: [], error: "Unknown preview scenario. Choose supplied or real200." });
+      (scenarios.length > 1 || scenarios.length === 1 && !["supplied", "real200", "online-gpu-hosts"].includes(scenarios[0]!))) {
+      const body = JSON.stringify({ addresses: [], hosts: [], error: "Unknown preview scenario. Choose supplied, real200 or online-gpu-hosts." });
       response.writeHead(400, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body) });
       response.end(request.method === "HEAD" ? undefined : body);
       return;
     }
-    const scenario = scenarios[0] === "real200" ? "real200" : "supplied";
-    const input = inputs[scenario];
+    const scenario = scenarios[0] === "online-gpu-hosts" ? "online-gpu-hosts" : scenarios[0] === "real200" ? "real200" : "supplied";
+    const online = scenario === "online-gpu-hosts";
+    const revisions = parameters.getAll("revision");
+    if (online && (path === "/preview/hosts.json" || Object.hasOwn(routes, path)) &&
+        (revisions.length > 1 || revisions.length === 1 &&
+          (path === "/preview/hosts.json" || !/^[A-Za-z0-9_-]{1,128}$/.test(revisions[0]!)))) {
+      const body = JSON.stringify({ addresses: [], hosts: [], error: "Invalid Online GPU Hosts revision selection." });
+      response.writeHead(400, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body) });
+      response.end(request.method === "HEAD" ? undefined : body);
+      return;
+    }
+    const input = online ? peekOnline() : inputs[scenario];
     if (path === "/preview/hosts.json") {
-      const inputBody = Buffer.from(JSON.stringify({ ...input, ...(!input.error ? { serverTimeMs: now() } : {}) }));
-      response.writeHead(input.error ? 503 : 200, {
-        "Content-Type": "application/json; charset=utf-8",
-        "Content-Length": inputBody.byteLength,
-      });
-      response.end(request.method === "HEAD" ? undefined : inputBody);
+      const sendInput = (value: HostAddressInput | OnlineHostsSnapshot): void => {
+        if (response.destroyed || response.writableEnded) return;
+        const inputBody = Buffer.from(JSON.stringify({ ...value, ...(!value.error ? { serverTimeMs: now() } : {}) }));
+        response.writeHead(value.error ? 503 : 200, {
+          "Content-Type": "application/json; charset=utf-8", "Content-Length": inputBody.byteLength,
+        });
+        response.end(request.method === "HEAD" ? undefined : inputBody);
+      };
+      if (!online || request.method === "HEAD") { sendInput(input); return; }
+      const consumer = new AbortController();
+      const disconnect = (): void => { consumer.abort(); };
+      response.once("close", disconnect);
+      onlineHosts ??= createOnlineHostsProvider({ admit: addresses => onlineRetention.accept(addresses) });
+      void Promise.resolve().then(() => onlineHosts!.read(consumer.signal)).then(snapshot => {
+        if (consumer.signal.aborted) return;
+        // Injected providers use the same bounded admission as the real source.
+        if (snapshot.online.revision !== null && !onlineRetention.accept(snapshot.addresses)) {
+          const previous = peekOnline();
+          const message = "Online GPU Hosts discovery reached the retained-host capacity. Previously discovered hosts are retained.";
+          onlineInput = { ...previous, error: previous.online.revision === null ? message : null,
+            online: { ...previous.online, retained: previous.online.revision !== null, discoveryError: message,
+              nextRefreshAtMs: Math.max(now() + 60_000, snapshot.online.nextRefreshAtMs) } };
+          sendInput(onlineInput);
+          return;
+        }
+        onlineInput = { ...snapshot, addresses: [...snapshot.addresses], online: { ...snapshot.online } };
+        retireOnlineReads(snapshot.online.revision);
+        sendInput(snapshot);
+      }, () => {
+        if (consumer.signal.aborted) return;
+        const snapshot = peekOnline();
+        const message = "Online GPU Hosts discovery could not be completed. Previously discovered hosts are retained.";
+        onlineInput = { ...snapshot, error: snapshot.online.revision === null ? message : null,
+          online: { ...snapshot.online, retained: snapshot.online.revision !== null, discoveryError: message,
+            nextRefreshAtMs: Math.max(now() + 60_000, snapshot.online.nextRefreshAtMs) } };
+        sendInput(onlineInput);
+      }).finally(() => response.off("close", disconnect));
       return;
     }
     const route = Object.hasOwn(routes, path) ? routes[path] : undefined;
     if (route) {
+      const onlineRevision = online ? (input as OnlineHostsSnapshot).online.revision : null;
+      const revisionConflict = (): void => {
+        if (response.destroyed || response.writableEnded) return;
+        if (response.headersSent) { response.end(); return; }
+        const body = JSON.stringify({ hosts: [], error: "Online GPU Hosts changed. Refresh the host list before reading values." });
+        response.writeHead(409, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body) });
+        response.end(request.method === "HEAD" ? undefined : body);
+      };
+      if (online && (onlineRevision === null || revisions.length !== 1 || revisions[0] !== onlineRevision)) {
+        revisionConflict(); return;
+      }
       // HEAD, invalid and empty input never dispatch upstream work. Query input
-      // cannot add addresses; every provider receives the immutable startup list.
+      // cannot add addresses; every read captures one server-owned roster revision.
       if (request.method === "HEAD") {
         response.writeHead(input.error ? 503 : 200, { "Content-Type": "application/json; charset=utf-8" });
         response.end();
@@ -302,7 +383,7 @@ export async function startPreviewServer(
       }
       const send = (status: number, snapshot: Snapshot): void => {
         if (response.destroyed || response.writableEnded) return;
-        const body = Buffer.from(JSON.stringify({ ...snapshot, serverTimeMs: now() }));
+        const body = Buffer.from(JSON.stringify({ ...snapshot, ...(online ? { onlineRevision } : {}), serverTimeMs: now() }));
         response.writeHead(status, {
           "Content-Type": "application/json; charset=utf-8", "Content-Length": body.byteLength,
         });
@@ -315,35 +396,49 @@ export async function startPreviewServer(
       const consumer = new AbortController();
       const disconnect = (): void => { consumer.abort(); };
       response.once("close", disconnect);
+      if (onlineRevision !== null) onlineConsumers.set(consumer, { revision: onlineRevision, close: revisionConflict });
+      const addresses = [...input.addresses];
+      const releaseRetention = online ? onlineRetention.hold(addresses) : () => {};
       const progressive = path !== "/preview/nos.json" && path !== "/preview/staking.json" &&
         request.headers.accept?.split(",").some(value => value.trim().split(";", 1)[0] === "application/x-ndjson");
       // Watch consumers remain distinct from finite JSON callers, while the
       // providers underneath share their caches, pending reads and request limits.
       const watch = progressive ? route.watch?.() : undefined;
+      const read: Read = online && path === "/preview/jobs.json" ? async addresses => ({
+        // Network-wide job enrichment cannot spend the fixed fleets' shared
+        // assignment/maintenance allowance. Reuse observations without joining
+        // pending work or constructing an otherwise unused job provider.
+        ...(jobsProvider?.peek?.(addresses) ?? { hosts: addresses.map(address => ({
+          address, job: null, checkedAtMs: null, validUntilMs: null, failedAtMs: null,
+          retained: false, pending: false, retryAtMs: null, error: null,
+        })), waitReason: null, waitUntilMs: null }),
+        nextRefreshAtMs: now() + JOB_REFRESH_INTERVAL_MS,
+      }) : watch ?? route.read;
       const stream = (snapshot: Snapshot, complete: boolean, failed = false): void => {
         if (consumer.signal.aborted || response.destroyed || response.writableEnded) return;
         if (!response.headersSent) {
           response.writeHead(200, { "Content-Type": "application/x-ndjson; charset=utf-8", "X-Accel-Buffering": "no" });
         }
         // Backpressure must not retain unbounded snapshots for a stalled viewer.
-        if (response.writableLength > 2 * 1024 * 1024) {
+        if (response.writableLength > (online ? 8 : 2) * 1024 * 1024) {
           consumer.abort(); response.destroy(); return;
         }
-        response.write(JSON.stringify({ ...snapshot, complete, ...(watch ? { watching: true } : {}), ...(failed ? { failed: true } : {}), serverTimeMs: now() }) + "\n");
+        response.write(JSON.stringify({ ...snapshot, complete, ...(watch ? { watching: true } : {}), ...(failed ? { failed: true } : {}),
+          ...(online ? { onlineRevision } : {}), serverTimeMs: now() }) + "\n");
         if (complete) response.end();
       };
-      void sharedRoutes(`${scenario}:${path}${watch ? ":watch" : ""}`,
-        (signal, emit) => (watch ?? route.read)(input.addresses, signal, emit), consumer.signal,
+      void sharedRoutes(`${scenario}:${onlineRevision ?? ""}:${path}${watch ? ":watch" : ""}`,
+        (signal, emit) => read(addresses, signal, emit), consumer.signal,
         progressive ? snapshot => stream(snapshot, false) : undefined,
       ).then(
-        snapshot => progressive ? stream(snapshot, true) : send(200, snapshot),
+        snapshot => { if (!consumer.signal.aborted) { if (progressive) stream(snapshot, true); else send(200, snapshot); } },
         () => {
           if (!consumer.signal.aborted) {
-            if (progressive) stream(route.failure(input.addresses), true, true);
-            else send(502, route.failure(input.addresses));
+            if (progressive) stream(route.failure(addresses), true, true);
+            else send(502, route.failure(addresses));
           }
         },
-      ).finally(() => { response.off("close", disconnect); });
+      ).finally(() => { response.off("close", disconnect); onlineConsumers.delete(consumer); releaseRetention(); });
       return;
     }
     const asset = loaded.get(path);

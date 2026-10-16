@@ -3,6 +3,8 @@ import type { HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
 import { isJobRecord } from "../src/fleet/jobs.ts";
 import type { JobRecord, JobSnapshot } from "../src/fleet/jobs.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 
 /** Ordering hints only: these never make a read eligible or renew evidence. */
 export type ActivityPriority = (address: string, nowMs: number) => 0 | 1 | 2;
@@ -57,6 +59,13 @@ export function createSchedulingEvidence(now: () => number = Date.now) {
     return 2;
   };
   return {
+    retention: {
+      markets: hosts => [...hosts].flatMap(address => {
+        const market = assignments.get(address)?.market;
+        return market ? [market] : [];
+      }),
+      prune: ({ hosts }) => pruneCacheKeys(hosts, assignments, nodes, nodeOutcomes, invalidatedActivity, jobs),
+    } satisfies ProviderRetention,
     activityPriority,
     marketPriority(market: string, time: number): 0 | 1 | 2 {
       let priority: 0 | 1 | 2 = 2;

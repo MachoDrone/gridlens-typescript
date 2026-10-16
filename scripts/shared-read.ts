@@ -88,11 +88,12 @@ export function createSharedOperation<T>(
   };
 }
 
-export function createSharedRead<K, T>(): (
-  key: K, action: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal,
-) => Promise<T> {
+export function createSharedRead<K, T>(): {
+  (key: K, action: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T>;
+  isReading(key: K): boolean;
+} {
   const pending = new Map<K, SharedOperation<T>>();
-  return (key, action, signal) => {
+  const read = (key: K, action: (signal: AbortSignal) => Promise<T>, signal?: AbortSignal): Promise<T> => {
     if (signal?.aborted) return Promise.reject(signal.reason);
     let operation = pending.get(key);
     if (!operation) {
@@ -104,6 +105,8 @@ export function createSharedRead<K, T>(): (
     }
     return operation.read(signal);
   };
+  read.isReading = (key: K): boolean => pending.has(key);
+  return read;
 }
 
 /** Canceled queued reads never dispatch; active fetches receive the same signal. */

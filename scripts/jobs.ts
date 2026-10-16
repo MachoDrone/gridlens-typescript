@@ -4,6 +4,8 @@ import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
 import { JOB_DISPLAY_VALIDITY_MS, JOB_REFRESH_INTERVAL_MS, isJobTimestamp } from "../src/fleet/jobs.ts";
 import type { JobRecord, JobSnapshot, JobTiming } from "../src/fleet/jobs.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
+import { pruneCacheKeys } from "./online-retention.ts";
+import type { ProviderRetention } from "./online-retention.ts";
 
 const origin = "https://blockchain-indexer.k8s.prd.nos.ci";
 const failureBackoffMs = 60_000;
@@ -23,8 +25,11 @@ interface WorkWindow { readonly deadline: number }
 
 export type JobProvider = ((addresses: readonly string[], signal?: AbortSignal,
   onUpdate?: (snapshot: JobSnapshot) => void) => Promise<JobSnapshot>) & {
+  /** Read existing observations without collecting, subscribing or changing provider state. */
+  peek?: (addresses: readonly string[]) => JobSnapshot;
   /** State only invalidates assignment lookup; it never supplies job timing. */
   observeStates?: (snapshot: NodeInfoSnapshot) => void;
+  retention?: ProviderRetention;
 };
 
 interface HostCache {
@@ -90,6 +95,12 @@ function blank(address: string): JobRecord {
     retained: false, pending: false, retryAtMs: null, error: null };
 }
 
+function validateAddresses(addresses: readonly string[]): void {
+  if (addresses.some(address => !isMetadataAddress(address)) || new Set(addresses).size !== addresses.length) {
+    throw new Error("Job input must contain unique validated Host Addresses.");
+  }
+}
+
 /** Anonymous on-demand reads. All caches, dispatch budgets and pauses are shared in memory. */
 export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Date.now, timeoutMs = 8_000,
   elapsedNow = () => performance.now(), activityPriority = () => 2 }: {
@@ -109,12 +120,13 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
   const discoveryDispatches: number[] = [];
   const limited = createRequestLimiter(2);
   let pauseUntil = 0;
+  let insertionSequence = 0;
 
   function cache(address: string): HostCache {
     let value = hosts.get(address);
     if (!value) {
       value = { record: blank(address), nextAttemptAt: 0, maintenanceAttemptAt: 0, lastLookupAt: -Infinity,
-        forceDiscovery: false, revision: 0, emptyLookups: 0, failures: 0, maintenanceFailures: 0, order: hosts.size };
+        forceDiscovery: false, revision: 0, emptyLookups: 0, failures: 0, maintenanceFailures: 0, order: insertionSequence++ };
       hosts.set(address, value);
     }
     return value;
@@ -445,9 +457,7 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
   const provider: JobProvider = async (addresses, signal, onUpdate) => {
     throwIfAborted(signal);
     const window: WorkWindow = { deadline: elapsedNow() + workWindowMs };
-    if (addresses.some(address => !isMetadataAddress(address)) || new Set(addresses).size !== addresses.length) {
-      throw new Error("Job input must contain unique validated Host Addresses.");
-    }
+    validateAddresses(addresses);
     const unsubscribe: (() => void)[] = [];
     if (onUpdate) {
       const emit = (selected: readonly string[]): void => {
@@ -521,6 +531,21 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
     }
   };
 
+  provider.peek = addresses => {
+    validateAddresses(addresses);
+    return {
+      hosts: addresses.map(address => {
+        const record = hosts.get(address)?.record;
+        return record ? { ...record, job: record.job ? { ...record.job } : null } : blank(address);
+      }),
+      // This schedules another cache read only. Original evidence and all
+      // provider retry/budget history remain untouched, even when overdue.
+      nextRefreshAtMs: addresses.length ? now() + JOB_REFRESH_INTERVAL_MS : null,
+      waitReason: null,
+      waitUntilMs: null,
+    };
+  };
+
   provider.observeStates = snapshot => {
     for (const record of snapshot.hosts) {
       if (!isMetadataAddress(record.address) || record.error || record.retained ||
@@ -552,6 +577,16 @@ export function createJobProvider({ fetch: fetcher = globalThis.fetch, now = Dat
           retryAtMs: Math.max(entry.nextAttemptAt, nextDispatchAt(discoveryKind(entry))) };
       }
     }
+  };
+  provider.retention = {
+    retryAt: address => {
+      const entry = hosts.get(address);
+      return Math.max(entry?.nextAttemptAt ?? 0, entry?.maintenanceAttemptAt ?? 0, entry?.record.retryAtMs ?? 0);
+    },
+    prune: ({ hosts: retained }) => {
+      const keep = new Set([...retained, ...pending.keys(), ...observers.keys()]);
+      pruneCacheKeys(keep, hosts, reportedStates);
+    },
   };
   return provider;
 }
