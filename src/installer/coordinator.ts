@@ -13,8 +13,11 @@ export interface InstallOptions {
   bindAddress?: string;
   port?: number;
   certificate?: { certificate: string; privateKey: string };
+  /** Explicit operator choice for an endpoint that is not effectively published. */
+  repairPort?: number;
 }
 export interface InstallResult { config: InstallationConfig; retainedNewer: boolean; certificate: string }
+export interface EndpointStatus { state: "healthy" | "missing" | "stopped" | "detached" | "unpublished"; repairRequired: boolean }
 export class Coordinator {
   readonly runner: DockerRunner;
   constructor(runner: DockerRunner) { this.runner = runner; }
@@ -33,7 +36,7 @@ export class Coordinator {
       checked(this.runner, ["rm", name]);
     }
   }
-  private startRuntime(config: InstallationConfig): void {
+  private runtimeArguments(config: InstallationConfig): { owner: string[]; gateway: string[] } {
     const { instance, active, origin } = config;
     const common = ["--detach", "--restart", "unless-stopped", ...restrictions, "--user", "1000:1000",
       ...labels(instance), "--network", resourceName(instance, "network")];
@@ -50,10 +53,10 @@ export class Coordinator {
       "--publish", `${bind}:${config.port}:8443/tcp`, "--env", "GRIDLENS_SOCKET=/ipc/read.sock",
       "--env", "GRIDLENS_TLS_CERT=/tls/server.crt", "--env", "GRIDLENS_TLS_KEY=/tls/server.key",
       "--env", `GRIDLENS_PUBLIC_ORIGIN=${origin}`, active.imageId, "node", "scripts/shared-gateway.ts"];
-    for (const [role,args] of [["owner",ownerArgs],["gateway",gatewayArgs]] as const) {
-      const name = resourceName(instance, role);
-      const existing = inspectOwned(this.runner, "container", name, instance);
-      if (existing) {
+    return { owner: ownerArgs, gateway: gatewayArgs };
+  }
+  private validateRuntime(config: InstallationConfig, role: "owner" | "gateway", existing: Record<string, unknown>): void {
+        const { instance, active } = config, args = this.runtimeArguments(config)[role];
         if (existing.Image !== active.imageId) throw new InstallerError("A previous runtime is still present. Rerun upgrade recovery before continuing.");
         const host=existing.HostConfig as Record<string,unknown>|undefined;
         const cfg=existing.Config as Record<string,unknown>|undefined;
@@ -71,9 +74,87 @@ export class Coordinator {
         if(role==="owner"&&Object.keys(ports).length!==0||role==="gateway"&&(Object.keys(ports).length!==1||ports["8443/tcp"]?.length!==1
           ||ports["8443/tcp"]![0]!.HostIp!==config.bindAddress||ports["8443/tcp"]![0]!.HostPort!==String(config.port))
           ||JSON.stringify(cfg.Cmd)!==JSON.stringify(["node",`scripts/shared-${role}.ts`]))throw new InstallerError("An existing runtime has changed its command or published ports; it was left untouched for review.");
-        const state = existing.State as { Running?: boolean } | undefined;
-        if (!state?.Running) checked(this.runner, ["start", name]);
+  }
+  private targetConfiguration(config: InstallationConfig): InstallationConfig {
+    const { pendingPort, ...saved } = config;
+    return pendingPort === undefined ? saved : { ...saved, port: pendingPort, origin: originFor(config.bindAddress, pendingPort) };
+  }
+  private validateGateway(config: InstallationConfig, gateway: Record<string, unknown>): "saved" | "target" {
+    try { this.validateRuntime(config, "gateway", gateway); return "saved"; }
+    catch (error) {
+      if (config.pendingPort === undefined) throw error;
+      try { this.validateRuntime(this.targetConfiguration(config), "gateway", gateway); return "target"; }
+      catch { throw error; }
+    }
+  }
+  private effectiveEndpoint(config: InstallationConfig, gateway: Record<string, unknown>): EndpointStatus {
+    const state = gateway.State as { Running?: boolean } | undefined;
+    if (!state?.Running) return { state: "stopped", repairRequired: true };
+    const settings = gateway.NetworkSettings as { Networks?: Record<string, { NetworkID?: string; EndpointID?: string; IPAddress?: string; GlobalIPv6Address?: string }>; Ports?: Record<string, { HostIp?: string; HostPort?: string }[] | null> } | undefined;
+    const network = settings?.Networks?.[resourceName(config.instance, "network")];
+    const ownedNetwork = inspectOwned(this.runner, "network", resourceName(config.instance, "network"), config.instance);
+    if (!ownedNetwork || typeof ownedNetwork.Id !== "string" || network?.NetworkID !== ownedNetwork.Id || !network.EndpointID
+      || !network.IPAddress && !network.GlobalIPv6Address) return { state: "detached", repairRequired: true };
+    const ports = settings?.Ports?.["8443/tcp"];
+    if (!Array.isArray(ports) || ports.length !== 1 || ports[0]?.HostIp !== config.bindAddress || ports[0]?.HostPort !== String(config.port))
+      return { state: "unpublished", repairRequired: true };
+    return { state: "healthy", repairRequired: false };
+  }
+  endpointStatus(config: InstallationConfig): EndpointStatus {
+    const gateway = inspectOwned(this.runner, "container", resourceName(config.instance, "gateway"), config.instance);
+    if (!gateway) return { state: "missing", repairRequired: true };
+    this.validateGateway(config, gateway);
+    return this.effectiveEndpoint(this.targetConfiguration(config), gateway);
+  }
+  private removeGateway(config: InstallationConfig, gateway: Record<string, unknown>): void {
+    this.validateGateway(config, gateway);
+    const name = resourceName(config.instance, "gateway");
+    if ((gateway.State as { Running?: boolean } | undefined)?.Running) checked(this.runner, ["stop", "--time", "30", name]);
+    checked(this.runner, ["rm", name]);
+  }
+  private prepareEndpoint(config: InstallationConfig, repairPort: number | undefined): InstallationConfig {
+    if (repairPort !== undefined) {
+      originFor(config.bindAddress, repairPort);
+      if (config.pendingPort === undefined && repairPort === config.port) return config;
+      if (!this.endpointStatus(config).repairRequired && repairPort !== config.pendingPort) throw new InstallerError("The saved dashboard endpoint is working. Its port was preserved.");
+      if (config.pendingPort !== undefined && repairPort !== config.pendingPort) {
+        // A prior target may itself have lost a port race. Remove only its fully
+        // validated, nonworking gateway before replacing that existing intent.
+        const gateway = inspectOwned(this.runner, "container", resourceName(config.instance, "gateway"), config.instance);
+        if (gateway && !(repairPort === config.port && this.validateGateway(config, gateway) === "saved" && !this.effectiveEndpoint(config, gateway).repairRequired)) this.removeGateway(config, gateway);
+      }
+      if (repairPort === config.port) { const { pendingPort: _pending, ...saved } = config; config = { ...saved, phase: "prepared" }; this.save(config); }
+      else { config = { ...config, pendingPort: repairPort, phase: "prepared" }; this.save(config); }
+    }
+    if (config.pendingPort !== undefined) {
+      const gateway = inspectOwned(this.runner, "container", resourceName(config.instance, "gateway"), config.instance);
+      if (gateway && this.validateGateway(config, gateway) === "saved") this.removeGateway(config, gateway);
+    }
+    return config;
+  }
+  private startRuntime(config: InstallationConfig): void {
+    const { instance } = config, arguments_ = this.runtimeArguments(config);
+    for (const role of ["owner", "gateway"] as const) {
+      const name = resourceName(instance, role), args = arguments_[role];
+      let existing = inspectOwned(this.runner, "container", name, instance);
+      if (existing) {
+        this.validateRuntime(config, role, existing);
+        if (!(existing.State as { Running?: boolean } | undefined)?.Running) checked(this.runner, ["start", name]);
       } else checked(this.runner, args);
+      if (role === "gateway") {
+        existing = inspectOwned(this.runner, "container", name, instance);
+        if (!existing) throw new InstallerError("The owned gateway is missing after creation.");
+        this.validateRuntime(config, role, existing);
+        if (this.effectiveEndpoint(config, existing).repairRequired) {
+          // A failed Docker port allocation can leave a container that later
+          // starts without any endpoint. One owned replacement is bounded.
+          this.removeGateway(config, existing); checked(this.runner, args);
+          const repaired = inspectOwned(this.runner, "container", name, instance);
+          if (!repaired) throw new InstallerError("Gateway replacement did not create an owned container.");
+          this.validateRuntime(config, role, repaired);
+          if (this.effectiveEndpoint(config, repaired).repairRequired) throw new InstallerError("The gateway has no effective network or HTTPS port. Saved identity and data remain intact; rerun setup to repair the endpoint.");
+        }
+      }
     }
     // The control socket is never exposed to the web gateway or published as a port.
     let ready=false;
@@ -103,6 +184,13 @@ export class Coordinator {
       throw new InstallerError("Reruns preserve the saved address, port and TLS identity. Use the saved configuration.");
     }
     let retainedNewer = false;
+    if (!config && options.repairPort !== undefined) throw new InstallerError("Endpoint repair requires an existing installation.");
+    if (config && config.phase !== "applying") {
+      if (options.action === "rollback" && !config.previous) throw new InstallerError("No matched image/state recovery pair is available.");
+      if (options.action !== "rollback" && release.sequence === config.active.sequence && release.imageId !== config.active.imageId)
+        throw new InstallerError("The same release sequence identifies a different image; setup stopped.");
+    }
+    if (config && config.phase !== "applying") config = this.prepareEndpoint(config, options.repairPort);
     if (!config) {
       if (options.action !== "setup" || !options.bindAddress) throw new InstallerError("This instance needs first-time setup with its assigned private address.");
       const origin=originFor(options.bindAddress,options.port??8789);
@@ -137,8 +225,9 @@ export class Coordinator {
     } else if (release.sequence === config.active.sequence && release.imageId !== config.active.imageId) {
       throw new InstallerError("The same release sequence identifies a different image; setup stopped.");
     }
-    this.startRuntime(config);
-    config={...config,phase:"ready"}; this.save(config);
+    const target = this.targetConfiguration(config);
+    this.startRuntime(target);
+    config={...target,phase:"ready"}; this.save(config);
     const certificate=this.helper(instance,config.active.imageId,"certificate");
     return {config,retainedNewer,certificate};
   }

@@ -6,9 +6,9 @@
 </style><script type="module" src="/shared-setup.js"></script></head>
 <body><main><h1>GridLens shared backend</h1><p><strong>Shared cache</strong> · Freshness belongs to each reading.</p>
 <nav><a href="/">Open Fleet</a> · <a href="/setup">Computer setup</a></nav><p id="message" role="status" aria-live="polite"></p>
-<section id="login"><h2>Connect this browser</h2><p>Use the short-lived connection code displayed by the terminal on the backend computer. Verify the server identity and trust its certificate first.</p>
+<section id="login"><h2>Connect this browser</h2><p>Open the sign-in link shown by GridLens setup to connect automatically. If you have a connection code instead, enter it below.</p>
 <form id="login-form"><label class="field">Connection code<input id="code" autocomplete="off" required maxlength="64"></label><label class="field">Device name<input id="device-name" value="Web browser" required maxlength="80"></label><button class="primary" type="submit">Connect</button></form></section>
 <section id="setup" hidden><h2 id="step-title"></h2><p id="step-description"></p><div id="step"></div></section>
 <section id="monitoring" hidden><h2>Computer monitoring permissions</h2><p class="muted">Pausing or revoking collection retains dated readings. Forgetting credentials also pauses that computer. These actions are separate from device access.</p><div id="monitoring-list"></div></section>
-<section id="devices" hidden><h2>Connected devices</h2><p class="muted">A device receives access to this fleet and roster revision. It receives no SSH permissions.</p><button id="new-code">Create phone connection code</button><p id="pair-code" class="success"></p><div id="device-list"></div></section>
+<section id="devices" hidden><h2>Connected devices</h2><p class="muted">A device receives access to this fleet and roster revision. It receives no SSH permissions.</p><button id="new-code">Connect another browser</button><p id="pair-code" class="success"></p><div id="device-list"></div></section>
 </main></body></html>

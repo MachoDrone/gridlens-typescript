@@ -7,13 +7,24 @@ let current: SetupView | undefined;
 let selected = new Set<string>();
 let filtering = "";
 let lastSignature = "";
+let signingIn = false;
+let refreshing = false;
+let connected = false;
+let signInRevision = 0;
 const message = (text: string, kind = "pending") => { const node = el("message"); node.textContent = text; node.className = kind; };
+class RequestError extends Error {
+  readonly status: number;
+  constructor(status: number) {
+    super(status === 401 || status === 403 ? "Access is unavailable. Open a new sign-in link from GridLens setup." : "The backend could not complete this request. Retry when it is available.");
+    this.status = status;
+  }
+}
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15_000);
   try {
     const response = await fetch(`/api/shared/${path}`, { credentials: "same-origin", cache: "no-store", signal: controller.signal,
       ...(body === undefined ? {} : { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }) });
-    if (!response.ok) throw new Error(response.status === 401 || response.status === 403 ? "Access is unavailable. Connect with a new terminal code." : "The backend could not complete this request. Retry when it is available.");
+    if (!response.ok) throw new RequestError(response.status);
     const text = await response.text(); if (text.length > 2 * 1024 * 1024) throw new Error("Setup response was too large.");
     return JSON.parse(text) as T;
   } finally { clearTimeout(timer); }
@@ -110,21 +121,70 @@ async function monitoring(): Promise<void> {
     row.append(actions); list.append(row);
   }
 }
+async function signIn(code: string): Promise<void> {
+  if (signingIn) return;
+  signingIn = true; connected = false; signInRevision++;
+  const submit = el<HTMLFormElement>("login-form").querySelector<HTMLButtonElement>("button[type=submit]")!;
+  submit.disabled = true; el<HTMLInputElement>("code").value = "";
+  message("Signing in…", "pending");
+  try {
+    await api("login", { version: 1, code, deviceName: el<HTMLInputElement>("device-name").value });
+    signingIn = false; connected = true; message("Browser connected.", "success");
+    await refresh();
+  } catch (error) {
+    el("login").hidden = false;
+    message(error instanceof RequestError && [400, 401, 403, 409].includes(error.status)
+      ? "This sign-in link or code has expired, was already used, or is not valid. Run GridLens setup again and open its new sign-in link."
+      : "Sign-in could not be completed. Check your connection, then open a new sign-in link from GridLens setup.", "failure");
+  } finally { signingIn = false; submit.disabled = false; }
+}
 el("login-form").addEventListener("submit", event => {
-  event.preventDefault(); void api("login", { version: 1, code: el<HTMLInputElement>("code").value, deviceName: el<HTMLInputElement>("device-name").value })
-    .then(() => { el<HTMLInputElement>("code").value = ""; message("Browser connected.", "success"); return refresh(); })
-    .catch(error => message(error instanceof Error ? error.message : "Connection failed.", "failure"));
+  event.preventDefault(); void signIn(el<HTMLInputElement>("code").value.trim());
 });
-el("new-code").addEventListener("click", () => { void api<{ code: string; expiresAtMs: number; serverId: string }>("pair-code", {})
-  .then(value => { el("pair-code").textContent = `Code: ${value.code} · expires ${new Date(value.expiresAtMs).toLocaleTimeString()} · server ${value.serverId}`; })
+el("new-code").addEventListener("click", () => { void api<{ code: string; expiresAtMs: number }>("pair-code", {})
+  .then(value => {
+    if (typeof value.code !== "string" || !/^[A-Za-z0-9_-]{12}$/.test(value.code) || !Number.isSafeInteger(value.expiresAtMs) || value.expiresAtMs <= Date.now()) throw new Error("Invalid connection link.");
+    const link = document.createElement("a"); link.href = `${location.origin}/connect#code=${value.code}`;
+    link.textContent = "Open GridLens on the other device";
+    el("pair-code").replaceChildren(link, text("span", ` · Keep this link private. It works once and expires at ${new Date(value.expiresAtMs).toLocaleTimeString()}.`));
+  })
   .catch(() => message("Connection code could not be created.", "failure")); });
 async function refresh(): Promise<void> {
+  if (signingIn || refreshing) return;
+  refreshing = true;
+  const revision = signInRevision;
   try {
-    const status = await api<{ role: string; serverId: string }>("status"); el("login").hidden = true;
-    if (status.role === "operator") { render(await api<SetupView>("setup")); if (el("devices").hidden) await devices(); if (el("monitoring").hidden) await monitoring(); }
+    const status = await api<{ role: string; serverId: string }>("status");
+    if (revision !== signInRevision) return;
+    connected = true; el("login").hidden = true;
+    if (status.role === "operator") {
+      const view = await api<SetupView>("setup");
+      if (revision !== signInRevision) return;
+      render(view); if (el("devices").hidden) await devices(); if (el("monitoring").hidden) await monitoring();
+    }
     else { el("setup").hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
-  } catch (error) { message(error instanceof Error ? error.message : "Backend unavailable. Dated readings remain in Fleet.", "failure"); el("login").hidden = false; }
+  } catch (error) {
+    if (revision !== signInRevision) return;
+    if (error instanceof RequestError && [401, 403].includes(error.status)) connected = false;
+    el("login").hidden = false;
+    for (const id of ["setup", "devices", "monitoring"]) el(id).hidden = true;
+    lastSignature = "";
+    message(error instanceof RequestError && [401, 403].includes(error.status)
+      ? "Open the sign-in link shown by GridLens setup, or enter its connection code below."
+      : "Backend unavailable. Check your existing network or VPN connection and try again.", "pending");
+  } finally { refreshing = false; }
 }
-void refresh();
-setInterval(() => { if (!document.hidden) void refresh(); }, 3000);
+// Fragments never enter HTTP requests. Remove the one-use secret from browser
+// history before submitting it, and never store or retry it automatically.
+function start(): void {
+  const fragment = location.hash;
+  if (!fragment) { void refresh(); return; }
+  const code = /^#code=([A-Za-z0-9_-]{12})$/.exec(fragment)?.[1];
+  try { history.replaceState(null, "", location.pathname + location.search); }
+  catch { message("The sign-in link could not be cleared safely. Open the dashboard address and enter a new connection code.", "failure"); return; }
+  if (location.pathname === "/connect" && code) { void signIn(code); return; }
+  message("This sign-in link is not valid. Run GridLens setup again and open its new sign-in link.", "failure");
+}
+start();
+setInterval(() => { if (connected && !document.hidden) void refresh(); }, 3000);
 export {};

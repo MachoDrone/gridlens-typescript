@@ -6,17 +6,39 @@ import type { FleetIntegration, FleetServerOptions } from "../server/application
 import { startFleetServer } from "../server/application.ts";
 import { ownerCall, readJson, sendJson, SharedHttpError } from "./ipc.ts";
 import { join } from "node:path";
+import { isIP } from "node:net";
 
-export function requestToken(request: IncomingMessage): string | null {
+export type GatewayTransport = "https" | "vpn-http";
+const cookieName = (transport: GatewayTransport): string => transport === "vpn-http" ? "gridlens-vpn" : "__Host-gridlens";
+
+/** HTTP is an explicit private-network option, never inferred from proxy headers. */
+export function validateGatewayOrigin(publicOrigin: string, transport: GatewayTransport = "https"): void {
+  if (transport !== "https" && transport !== "vpn-http") throw new Error("Unsupported gateway transport.");
+  const origin = new URL(publicOrigin);
+  if (origin.protocol !== (transport === "vpn-http" ? "http:" : "https:") || origin.username || origin.password
+    || origin.pathname !== "/" || origin.search || origin.hash) throw new Error("Set the canonical origin for the selected gateway transport.");
+  if (transport === "vpn-http") {
+    const host = origin.hostname.replace(/^\[|\]$/g, ""), version = isIP(host), parts = host.split(".").map(Number);
+    const privateIp = version === 4 && (parts[0] === 10 || parts[0] === 172 && parts[1]! >= 16 && parts[1]! <= 31
+      || parts[0] === 192 && parts[1] === 168 || parts[0] === 127)
+      || version === 6 && (/^f[cd][a-f0-9]{2}:/i.test(host) || host === "::1");
+    if (!privateIp || origin.origin !== publicOrigin) throw new Error("VPN HTTP requires an exact private IP origin on the existing private network.");
+  }
+}
+
+export function requestToken(request: IncomingMessage, transport: GatewayTransport = "https"): string | null {
   const authorization = request.headers.authorization;
   if (authorization !== undefined) return /^Bearer [A-Za-z0-9_-]{43}$/.test(authorization) ? authorization.slice(7) : null;
-  const cookies = (request.headers.cookie ?? "").split(";").map(value => value.trim()).filter(value => value.startsWith("__Host-gridlens="));
-  return cookies.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(cookies[0]!.slice(16)) ? cookies[0]!.slice(16) : null;
+  const prefix = `${cookieName(transport)}=`;
+  const cookies = (request.headers.cookie ?? "").split(";").map(value => value.trim()).filter(value => value.startsWith(prefix));
+  return cookies.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(cookies[0]!.slice(prefix.length)) ? cookies[0]!.slice(prefix.length) : null;
 }
-export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, setupScript: Buffer): FleetIntegration {
+export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, setupScript: Buffer,
+  { transport = "https" }: { transport?: GatewayTransport } = {}): FleetIntegration {
+  if (transport !== "https" && transport !== "vpn-http") throw new Error("Unsupported gateway transport.");
   const call = <T>(body: unknown, signal?: AbortSignal) => ownerCall<T>(socketPath, body, signal);
   const makeSource = (request: IncomingMessage): FleetSource => {
-    const token = requestToken(request);
+    const token = requestToken(request, transport);
     return {
       async read<K extends FleetResource>(resource: K, context: FleetContext, signal: AbortSignal): Promise<FleetSnapshots[K]> {
         if (resource === "job-history") {
@@ -49,7 +71,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     source: { async read() { throw new Error("Request-bound shared access required."); } }, sourceForRequest: makeSource,
     async resolveAccess(request, signal) {
       try {
-        const context = await call<FleetContext>({ operation: "resolve", token: requestToken(request) }, signal);
+        const context = await call<FleetContext>({ operation: "resolve", token: requestToken(request, transport) }, signal);
         if (request.headers["x-gridlens-scope"] !== undefined && request.headers["x-gridlens-scope"] !== context.scopeId
           || request.headers["x-gridlens-roster-revision"] !== undefined && request.headers["x-gridlens-roster-revision"] !== context.rosterRevision) return null;
         return context;
@@ -57,6 +79,17 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     },
     async handleRequest(request, response) {
       const url = new URL(request.url ?? "/", "https://gateway.invalid");
+      if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
+        const token = requestToken(request, transport);
+        let authorized = false;
+        if (token) {
+          try { await call({ operation: "resolve", token }); authorized = true; }
+          catch (error) { if (!(error instanceof SharedHttpError && [401, 403, 409].includes(error.status))) throw error; }
+        }
+        if (!authorized) {
+          response.writeHead(302, { Location: "/connect", "Content-Length": 0 }); response.end(); return true;
+        }
+      }
       if (["/connect", "/setup"].includes(url.pathname) && request.method === "GET") {
         response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": setupHtml.length,
           "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
@@ -67,7 +100,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
       }
       if (!url.pathname.startsWith("/api/shared/")) return false;
       try {
-        const token = requestToken(request), route = url.pathname.slice("/api/shared/".length);
+        const token = requestToken(request, transport), route = url.pathname.slice("/api/shared/".length);
         const getOperations: Record<string, string> = { status: "status", capabilities: "status", observations: "observations", devices: "devices", setup: "setup", monitoring: "monitoring" };
         const postOperations: Record<string, string> = { pair: "pair", login: "pair", "pair-code": "pair-code", revoke: "revoke", "setup-action": "setup-action", "gpu-history": "gpu-history", "monitoring-action": "monitoring-action" };
         if (request.method === "GET" && getOperations[route] && !url.search) {
@@ -81,7 +114,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         const result = await call<Record<string, unknown>>({ ...input, operation: postOperations[route], token });
         if (route === "login") {
           if (typeof result.token !== "string") throw new SharedHttpError(502);
-          response.setHeader("Set-Cookie", `__Host-gridlens=${result.token}; Path=/; Secure; HttpOnly; SameSite=Strict`);
+          response.setHeader("Set-Cookie", `${cookieName(transport)}=${result.token}; Path=/;${transport === "https" ? " Secure;" : ""} HttpOnly; SameSite=Strict`);
           const { token: _secret, ...publicResult } = result; sendJson(response, 200, publicResult);
         } else sendJson(response, 200, result);
       } catch (error) { sendJson(response, error instanceof SharedHttpError ? error.status : 502, { error: "Shared cache request failed. Check access and retry." }); }
@@ -89,12 +122,17 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     },
   };
 }
-export async function startSharedGateway(options: { socketPath: string; certPath: string; keyPath: string; publicOrigin: string;
-  directory: string; host?: string; port?: number }) {
-  const [cert, key, html, script] = await Promise.all([readFile(options.certPath), readFile(options.keyPath),
-    readFile(join(options.directory, "shared-setup.html")), readFile(join(options.directory, "preview/shared-setup.js"))]);
-  const integration = createGatewayIntegration(options.socketPath, html, script);
+export async function startSharedGateway(options: { socketPath: string; certPath?: string; keyPath?: string; publicOrigin: string;
+  directory: string; host?: string; port?: number; transport?: GatewayTransport }) {
+  const transport = options.transport ?? "https";
+  validateGatewayOrigin(options.publicOrigin, transport);
+  if (transport === "https" && (!options.certPath || !options.keyPath)) throw new Error("HTTPS requires its saved certificate and key.");
+  const [html, script, tls] = await Promise.all([
+    readFile(join(options.directory, "shared-setup.html")), readFile(join(options.directory, "preview/shared-setup.js")),
+    transport === "https" ? Promise.all([readFile(options.certPath!), readFile(options.keyPath!)]).then(([cert, key]) => ({ cert, key })) : undefined,
+  ]);
+  const integration = createGatewayIntegration(options.socketPath, html, script, { transport });
   const server: FleetServerOptions = { integration, directory: options.directory, host: options.host ?? "0.0.0.0",
-    port: options.port ?? 8443, publicOrigin: options.publicOrigin, tls: { cert, key }, accessCheckIntervalMs: 1000 };
+    port: options.port ?? 8443, publicOrigin: options.publicOrigin, ...(tls ? { tls } : {}), accessCheckIntervalMs: 1000 };
   return { server: await startFleetServer(server), integration };
 }

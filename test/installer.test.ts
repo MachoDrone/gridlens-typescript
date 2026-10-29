@@ -32,7 +32,7 @@ class DockerFixture implements DockerRunner {
       const item=this.objects.get(`${args[0]}:${name}`);return item?ok([item]):missing;
     }
     if(["volume","network"].includes(args[0]!)&&args[1]==="create"){
-      this.objects.set(`${args[0]}:${name}`,{Labels:{[PRODUCT_LABEL]:PRODUCT,[INSTANCE_LABEL]:"default"}});return ok(name);
+      this.objects.set(`${args[0]}:${name}`,{Id:`fixture-${name}`,Labels:{[PRODUCT_LABEL]:PRODUCT,[INSTANCE_LABEL]:"default"}});return ok(name);
     }
     if(args[0]==="run"&&args.includes("src/installer/container-init.ts")){
       const operation=name,body=JSON.parse(typeof input==="string"?input:"{}");
@@ -50,7 +50,8 @@ class DockerFixture implements DockerRunner {
       const imageId=args.find(p=>/^sha256:/.test(p))!;
       this.objects.set(`container:${at("--name")}`,{Image:imageId,Config:{Labels:{[PRODUCT_LABEL]:PRODUCT,[INSTANCE_LABEL]:"default"},User:at("--user"),Cmd:["node",name]},
         HostConfig:{ReadonlyRootfs:true,Privileged:false,NetworkMode:at("--network"),CapDrop:["ALL"],SecurityOpt:["no-new-privileges:true"],PortBindings:args.includes("--publish")?{"8443/tcp":[{HostIp:at("--publish").split(":")[0],HostPort:at("--publish").split(":")[1]}]}:{}},
-        Mounts:args.flatMap((value,index)=>value==="--mount"?[args[index+1]!]:[]).map(spec=>{const p=spec.split(",");return {Type:"volume",Name:p.find(v=>v.startsWith("src="))!.slice(4),Destination:p.find(v=>v.startsWith("dst="))!.slice(4),RW:!p.includes("readonly")};}),State:{Running:true}});
+        Mounts:args.flatMap((value,index)=>value==="--mount"?[args[index+1]!]:[]).map(spec=>{const p=spec.split(",");return {Type:"volume",Name:p.find(v=>v.startsWith("src="))!.slice(4),Destination:p.find(v=>v.startsWith("dst="))!.slice(4),RW:!p.includes("readonly")};}),State:{Running:true},
+        NetworkSettings:{Networks:{[at("--network")]:{NetworkID:`fixture-${at("--network")}`,EndpointID:"fixture-endpoint",IPAddress:"172.30.0.2"}},Ports:args.includes("--publish")?{"8443/tcp":[{HostIp:at("--publish").split(":")[0],HostPort:at("--publish").split(":")[1]}]}:{}}});
       return ok("synthetic-container");
     }
     if(args[0]==="stop"){const item=this.objects.get(`container:${name}`);if(item)item.State={Running:false};return ok();}

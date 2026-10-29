@@ -1,15 +1,43 @@
-# Modern Docker installation candidate
+# Modern Docker installation and recovery
 
 The modern backend is separate from the loopback developer preview and the legacy
 installer. Its TypeScript terminal coordinator manages a single collection owner
 and an unprivileged HTTPS gateway on a chosen PC, which may also run Nosana. This
-source revision is a local candidate. It passed an isolated Docker installation
-rehearsal on an authorized Nosana host; no live fleet was enabled and no modern
-release has been published.
+source revision prepares the next development installer candidate, **0.1.0-dev.3**.
+The published **0.1.0-dev.1** release remains immutable. The address-selection,
+TLS-default and endpoint-recovery changes described below have targeted tests and
+real Docker verification, but have not been published in a new release.
 The source `scripts/modern-start.sh` intentionally refuses to run until the release
 builder supplies a tested executable checksum and pinned GitHub release tag.
 
 ## Operator flow
+
+### Browser access through an existing VPN
+
+The opt-in `--vpn-web` mode adds a private HTTP browser address without certificate
+installation. Use it only on your trusted private LAN/existing VPN: the VPN protects
+remote traffic, while the local LAN leg uses HTTP. It creates a separate labeled,
+unprivileged gateway sharing the same collection owner and permissions. It does
+not configure a VPN, expose a public address, or duplicate collection. The existing
+HTTPS endpoint and its certificate remain available for native Android pairing.
+
+Run the release launcher with `--vpn-web` (optionally `--web-port PORT`). On an
+existing instance it retains the HTTPS address and normally uses the next port
+for the browser gateway. Reruns retain the saved browser port; occupied ports are
+reported without stopping another service. The persistent container uses
+`unless-stopped` and retains its own endpoint metadata. A different image or
+changed isolation is refused rather than silently replacing that gateway.
+
+Setup prints **OPEN GRIDLENS** followed by a private one-use sign-in link. Opening
+it signs the browser in automatically, without extracting JSON, entering a code,
+or choosing a device name. The link expires after five minutes. Its code is carried
+in a URL fragment, removed from browser history before the login request, and
+never retried automatically. Bookmark the separate dashboard URL for subsequent
+visits. `--connect` produces a fresh link. Browsers without a session are directed
+to the connection page. Older HTTPS browser builds retain a clearly labeled
+manual code fallback. Native Android's existing manual HTTPS pairing is unchanged.
+
+### HTTPS access
 
 Use the generated **modern-start.sh** from a reviewed release in
 `MachoDrone/gridlens-typescript`. The legacy `gridlens-installer` entry point is
@@ -26,19 +54,51 @@ in the terminal; passwordless sudo is not required. Docker creates its ordinary
 container networking and named volumes, which are host effects. Setup does not
 change VPN interfaces, DNS, sysctls or existing WireGuard configuration.
 
-On first setup, enter the chosen PC's assigned private address and HTTPS port
-(default 8789). Use the address reachable through the operator's existing VPN;
-GridLens does not infer reachable routes from matching IPs. An occupied port fails
-visibly. Choose another available port during first setup; saved ports are retained
-on rerun. Select either an existing trusted certificate with that IP in its SAN,
-or private-certificate creation. Certificate keys and their passphrases are entered
-or selected only in the terminal. TLS identity remains in named volumes.
+Run the setup terminal on the chosen backend PC, including through an interactive
+SSH login. The candidate lists that PC's assigned RFC1918 IPv4 and IPv6 ULA
+addresses as numbered choices. When one conventional LAN/Wi-Fi interface has an
+unambiguous eligible address, it marks a recommendation; **Enter accepts that
+number**. Multiple plausible LAN choices require an explicit selection. Existing
+private VPN interfaces remain available as explicit choices. Detection establishes
+a local assignment, not that a phone can reach it through a VPN.
 
-With a private certificate, export its **public** CA certificate through the
-trusted setup channel and install it in each client's trust store before opening
-the dashboard. The printed server-certificate SHA-256 value is the separate leaf
-pin used for Android pairing, not the CA certificate's fingerprint. Never skip
-certificate validation. A changed paired identity requires explicit repair.
+Localhost, link-local and global addresses are excluded. Read-only Docker bridge
+metadata excludes Docker-owned names and gateway addresses; known Podman/CNI/veth
+interfaces are also excluded. A legitimate host bridge is not excluded merely
+because it is named `br0`. Global/public-only and CGNAT address support remain
+deferred. If no eligible address exists, setup explains the existing-private-network
+or VPN prerequisite; it supplies no localhost or invented-address fallback.
+
+The candidate probes a temporary listener on the selected local IP before offering
+a port. It prefers **8789**, then checks the bounded range through **8799**. Enter
+accepts the available recommendation, or the operator can choose another port from
+1024 through 65535. Invalid or occupied choices prompt again without stopping the
+existing service. A probe releases its listener immediately, so another process
+can still take the port before Docker binds it; the recovery flow below handles
+that race. A healthy saved endpoint retains its port without probing its own
+already-bound listener.
+
+For HTTPS, **Private certificate is recommended and Enter selects it**. The other
+choice accepts an existing trusted certificate covering the selected IP in its
+SAN. Invalid options prompt again. Existing certificate/key files, their match,
+dates and selected IP are checked before installation configuration changes.
+Certificate keys and passphrases stay in the terminal; saved TLS identity remains
+in named volumes.
+
+With a private certificate, **Enter saves the public CA certificate** at the
+recommended `~/gridlens-INSTANCE-ca.crt` path; type `skip` explicitly to skip the
+export. Leading `~/` expands to the current user's home directory. Repeating an
+export to a file containing the same public certificate succeeds without rewriting
+it. A different file, symbolic link or oversized file is left unchanged and prompts
+for another path. Comparison reads are bounded and require a public-certificate
+header; certificate contents and private-key material are never printed.
+
+Transfer that public CA through the trusted setup channel and import it in clients
+that do not already trust it. The terminal labels **PUBLIC CA certificate SHA-256**
+separately from **Server TLS certificate SHA-256 (Android pin)**. An existing trusted
+server certificate needs no new CA import when the clients already trust its
+issuer, and its public export remains optional. Never skip certificate validation.
+A changed paired identity requires explicit repair.
 The generated leaf certificate lasts one year; renewal and trust
 rotation require an explicit identity-preserving certificate workflow and remain
 an operational follow-up before a long-lived release.
@@ -101,6 +161,29 @@ Interrupted application resumes the durably selected pair; incomplete preparatio
 can be rerun without replacing saved identities. Never manually restore an old
 ledger as part of ordinary rollback.
 
+### Recover an incomplete dashboard endpoint
+
+The candidate checks the gateway's actual running state, attachment to the exact
+owned Docker network, and effective published IP/port. A configured port declaration
+alone is not proof of a working endpoint. A running container left detached after
+a failed Docker port allocation is repairable; a healthy endpoint is left alone.
+
+If a broken endpoint's saved port is free, rerun repairs the same endpoint. If the
+port is occupied, the terminal asks for an explicit free replacement while retaining
+the address, TLS certificate, server identity, credentials and data. It removes or
+recreates only the verified owned gateway for this repair; an already-running
+collection owner is retained. Unowned resources, invalid saved configuration and
+unexpected runtime isolation, mounts or configured publication settings stop recovery for
+review instead of being adopted or silently rewritten.
+
+Before replacing a gateway for a new port, the coordinator records a `pendingPort`
+intent. The previous saved port/origin remains until the replacement's effective
+endpoint verifies; then the target becomes the saved endpoint. An interrupted
+rerun resumes that intent. If the pending target itself loses a port race, the
+terminal can ask for another explicit free target. An already-recorded image/state
+upgrade transaction resumes before endpoint selection. Repeating setup never
+regenerates saved identities or refills the safety ledger's budgets.
+
 There is no automatic fleet deployment or legacy migration in this candidate.
 All label validation occurs before destructive container changes. Existing
 WireGuard and unrelated containers remain outside its authority.
@@ -152,9 +235,9 @@ was built and run using a dedicated durable modern release identity in protected
 local storage. Its private key remains outside source and artifacts; neither the
 Android nor legacy signing identity was reused. The candidate includes a detached
 signature, public verification metadata, licenses and checksum-pinned launcher,
-without source files or build intermediates. The first release must review this
-new trust anchor before publication; preparing the signed candidate does not
-establish a published channel or authorize deployment. Earlier disposable-key
+without source files or build intermediates. The modern signing identity is
+separate from Android and legacy signing. Preparing a later candidate does not
+authorize replacing an immutable release or deploying it. Earlier disposable-key
 smoke tests remain separate from this durable signing identity.
 
 Actual container acceptance passed against **Docker 29.7.2 over SSH** on an
@@ -180,9 +263,23 @@ gateway port reachable with Docker 29.7.2. The fixture now keeps the owner solel
 on that internal network and attaches only the gateway to a second labeled ingress
 network. These were harness corrections, not corresponding application fixes.
 
-No physical PC reboot, live fleet enablement or NVIDIA/GPU recorder lifecycle
-test was performed. Existing Nosana Podman workloads were left alone. The exact
-published launcher and physical VPN/phone acceptance remain pending.
+The published development installer subsequently reproduced a real failure:
+Docker rejected an occupied port with exit 125, and a later rerun could leave the
+gateway running without an effective network endpoint. Targeted candidate tests
+and a Docker reproduction now verify gateway-only repair, preserved owner process,
+server/TLS identity and volumes, successful HTTPS, and another healthy rerun.
+
+An operator-requested repair of an existing installation was also completed on
+the explicitly selected replacement port. Five protected volume checkpoints were
+verified first. The new GridLens owner/gateway were briefly stopped for that
+checkpoint; the owner was restarted before endpoint repair and retained through
+the repair itself. Existing Nosana Podman workloads and legacy GridLens resources
+were unchanged. This repair did not enable new fleet monitoring, and the tested
+recovery changes still await a new development release.
+
+No physical PC reboot or NVIDIA/GPU recorder lifecycle test was performed.
+Physical VPN/phone acceptance and the eventual published dev.2 setup/upgrade
+entry points remain separate checks.
 
 ### Run isolated Docker acceptance
 

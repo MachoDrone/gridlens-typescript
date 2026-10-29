@@ -10,8 +10,19 @@ provider checkpoints, a SQLite owner, HTTPS pairing and terminal-backed setup.
 It is separate from the preview behavior documented below. See the
 [modern installer](MODERN_INSTALL.md) for its runtime isolation and recovery,
 candidate build commands and completed isolated Docker acceptance. Published
-launcher, physical reboot, GPU recorder lifecycle and physical-phone acceptance
-remain pending; no live fleet is enabled.
+0.1.0-dev.1 remains immutable. The pending dev.2 installer candidate adds numbered
+private-address selection, a private-TLS Enter default, local port probes and
+effective-endpoint recovery with a persistent pending-port intent. Targeted tests
+and real Docker repair checks pass; the new release's public entry points,
+physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
+separate. Endpoint repair did not enable new fleet monitoring.
+
+The pending dev.3 candidate includes those installer fixes plus explicitly chosen
+`--vpn-web` access: a separate private HTTP browser gateway shares the existing
+owner and cache, while the HTTPS address remains available for Android. Browser
+sign-in uses a single-use fragment link, including links for another browser.
+No VPN changes or duplicate collection are introduced. Local LAN traffic uses
+HTTP in this opt-in mode; it requires the operator's trusted existing network.
 
 ## Toolchain and commands
 

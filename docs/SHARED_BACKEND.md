@@ -5,7 +5,8 @@ cache, authenticated HTTPS gateway, browser setup and optional Android pairing.
 The developer preview remains a separate application composition with its original
 startup files and demand-driven public readers. No operator host file is imported
 or rewritten by installed setup. The candidate passed isolated Docker acceptance
-on an authorized Nosana host. It has not been published or enabled for a live fleet.
+on an authorized Nosana host. Development release 0.1.0-dev.1 is published;
+later candidates and live fleet enrollment have separate acceptance records.
 
 ## Data and authority
 
@@ -32,7 +33,7 @@ Ordinary paired image/cache rollback preserves that ledger and the credential
 volume. It cannot replenish request allowances or reinstate revoked access.
 See [installation and recovery](MODERN_INSTALL.md) for the named-volume layout.
 
-The gateway has only the restricted read socket and its TLS leaf certificate/key.
+The HTTPS gateway has only the restricted read socket and its TLS leaf certificate/key.
 It receives no Docker socket, SSH credentials, state database, terminal control
 socket or shell operation. The owner validates bearer access against the exact
 server, fleet and roster revision. The gateway revalidates before returning a
@@ -53,6 +54,16 @@ safety ledger. Pair attempts are durably limited. Operator codes come only from
 terminal control; an authorized operator can create viewer codes and revoke
 devices in browser setup. Browser sessions use a Secure, HttpOnly, SameSite cookie.
 The Android adapter keeps its bearer outside bundled browser content.
+
+The explicitly selected `--vpn-web` option adds a private HTTP browser gateway on
+the existing LAN/VPN. This gateway receives only the restricted read socket and
+uses a separate HttpOnly, SameSite cookie; it does not receive TLS keys or change
+the HTTPS endpoint used by Android. Local LAN traffic is unencrypted in this
+operator-selected mode. Exact Host/Origin and fleet permissions remain enforced.
+The terminal prints a one-use browser sign-in link, and connected operators can
+create viewer links for other browsers. The code travels in the URL fragment,
+which the browser removes before submitting it once. No certificate installation
+is required for that HTTP browser address. Native Android pairing remains HTTPS.
 
 `/connect` accepts a connection code and device name. `/setup` offers a single
 computer checkbox list, partial-IP/name search, persistent selections, counts and

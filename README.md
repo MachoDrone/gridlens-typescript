@@ -13,8 +13,15 @@ A separate [shared backend candidate](docs/SHARED_BACKEND.md) adds durable SQLit
 collection, authenticated HTTPS, browser setup and optional Android pairing.
 Its [modern Docker installer](docs/MODERN_INSTALL.md) is separate from the legacy
 installer and this developer preview. Isolated Docker acceptance passed on an
-authorized Nosana host, including HTTPS, cache sharing and recovery. The candidate
-has not been published or enabled for a live fleet; physical reboot, GPU recorder
+authorized Nosana host, including HTTPS, cache sharing and recovery. Development
+release **0.1.0-dev.1** is published and immutable. The next installer candidate
+adds a detected-private-IP menu, an Enter default for private TLS, available-port
+recommendations and safe recovery from failed gateway publication. Those fixes
+have targeted tests and real Docker verification but are not yet published.
+An additional pending **0.1.0-dev.3** candidate adds opt-in browser access over an
+existing private LAN/VPN without certificate installation (`--vpn-web`), plus a
+one-use browser sign-in link. Its HTTP LAN traffic is unencrypted; the existing
+HTTPS endpoint remains available for Android. Physical reboot, GPU recorder
 lifecycle and physical-phone acceptance remain separate.
 
 **Country** appears after System at the right edge of Fleet. It reuses the country
@@ -43,10 +50,10 @@ request limits, so a large expansion may remain pending. A five-minute cache
 avoids repeated page reads; Refresh remains subject to shared limits and backoff.
 
 **Current status:** the live local preview, portable hosting gateway and shared
-backend candidate are implemented. The shared backend passed isolated Docker
-acceptance; a live deployment is not enabled. Per-operator beta links and CSV
-uploads remain proposals. Some columns remain unknown until verified sources are
-connected.
+backend are implemented. The shared backend passed isolated Docker acceptance;
+installer endpoint repair was separately verified on an existing installation
+without enabling new fleet monitoring. Per-operator beta links and CSV uploads
+remain proposals. Some columns remain unknown until verified sources are connected.
 
 ## Run the live preview
 
