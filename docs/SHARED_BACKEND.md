@@ -1,7 +1,7 @@
 # Shared backend candidate
 
 The installed composition adds a TypeScript collection owner, durable SQLite
-cache, authenticated HTTPS gateway, browser setup and optional Android pairing.
+cache, authenticated HTTPS gateway, terminal setup and optional Android pairing.
 The developer preview remains a separate application composition with its original
 startup files and demand-driven public readers. No operator host file is imported
 or rewritten by installed setup. The candidate passed isolated Docker acceptance
@@ -48,20 +48,19 @@ history. Cache availability does not establish fresh or complete readings.
 
 ## Pairing and setup
 
-The terminal creates a five-minute, single-use connection code. Only its hash is
-persisted. Pairing creates a random device bearer whose hash is retained in the
+For separately paired HTTPS clients, the terminal creates a five-minute,
+single-use connection code. Only its hash is persisted. Pairing creates a random
+device bearer whose hash is retained in the
 safety ledger. Pair attempts are durably limited. Operator codes come only from
 terminal control; an authorized operator can create viewer codes and revoke
 devices in browser setup. Browser sessions use a Secure, HttpOnly, SameSite cookie.
 The Android adapter keeps its bearer outside bundled browser content.
 
 The explicitly selected `--vpn-web` option adds a private HTTP browser gateway on
-the existing LAN/VPN. This gateway receives only the restricted read socket and
-uses a separate HttpOnly, SameSite cookie; it does not receive TLS keys or change
-the HTTPS endpoint used by Android. Local LAN traffic is unencrypted in this
-operator-selected mode. Exact Host/Origin and fleet permissions remain enforced.
-The dev.4 candidate changes this explicitly selected private-network browser
-address to ordinary access without pairing or time-limited links. A dedicated
+the existing LAN/VPN. It does not receive TLS keys or change the HTTPS endpoint
+used by Android. Local LAN traffic is unencrypted in this operator-selected mode.
+Exact Host/Origin and fleet permissions remain enforced. This private-network
+browser address opens directly without pairing or time-limited links. A dedicated
 revocable server-side gateway grant authorizes only its configured fleet's current
 roster. The browser receives neither that grant's secret nor a cookie. Anyone who
 can reach the private address has operator access to that fleet; network access
@@ -71,27 +70,28 @@ Reruns cannot revive a revoked grant. No certificate installation is required fo
 that HTTP browser address. Native Android pairing remains HTTPS and keeps its
 existing device-level access rules.
 
-In HTTPS pairing mode `/connect` accepts a connection code and device name; the
-private-network browser mode opens directly. `/setup` starts an explicitly chosen
-private-network scan from the backend owner, acknowledges immediately and exposes
-bounded progress/cancel/retry actions. The single computer checkbox list retains
-partial-IP/name filtering, selections, counts and **Selection complete**. The page
-explains the scan location; suggested networks come only from verified host
-interface metadata supplied by the local installer. It does not change VPN
-configuration. SSH responses alone are not Nosana identities.
+The dev.6 setup wizard completes onboarding in one terminal before printing the
+browser address. It chooses an explicit private network, shows bounded search
+progress, and presents one numbered computer list with partial-IP/name filters,
+retained selections, counts and **Selection complete**. Suggestions come only from
+verified host-interface metadata. It does not change VPN configuration. SSH
+responses alone are not Nosana identities. Empty or failed searches offer retry;
+`q` at the offered prompts pauses setup, and Ctrl+C during search cancels it.
 
-Selected new SSH fingerprints appear once for confirmation. Saved matching keys
-skip that review; changed keys stay blocked across scans and restarts. Key files,
-passphrases, computer passwords and optional sudo input belong to the controlling
-terminal, which stays open while browser choices progress. A short-lived terminal
-presence indicator is display-only and does not grant access; it is unrelated to
-browser sign-in or private-network access. The browser never receives those
-secrets. Remembered credentials use
+Selected new SSH fingerprints appear once for confirmation in the same terminal.
+Saved matching keys skip that review; changed keys stay blocked across scans and
+restarts. Key files, passphrases, computer passwords and optional sudo input stay
+in the terminal. The deployed `/setup` page is read-only status and a command for
+running setup again; **Manage computers** opens it from Fleet. No browser choices
+are required during onboarding. Existing browser setup API compatibility remains,
+while native HTTPS pairing continues independently. A terminal presence indicator
+does not grant access or impose a browser sign-in expiry. Remembered credentials use
 authenticated encryption in a separate owner-only volume; a party controlling
 that volume and its key can still decrypt them.
 
-The highlighted **Inspect + automatic IP** option is separate from explicit full
-rewards/GPU approval. Inspection saves every verified host on selected computers,
+The terminal recommends **Inspect + automatic IP**. Full rewards/GPU monitoring
+requires a separate explicit approval and defaults to No. Inspection saves every
+verified host on selected computers,
 including multiple hosts per PC. It reads only bounded running-container inventory
 and the node's public local API; unresolved identities are excluded and reported.
 It does not start, restart or rename Nosana workloads. Partial inspection retains
@@ -100,10 +100,12 @@ Inspection-only revisits preserve existing healthy monitoring. Pauses and
 revocations remain authoritative. Interrupted setup retains selections/trust and
 requires terminal sign-in again before work continues.
 
-Saving new membership advances the roster revision. The terminal prints a fresh
-operator connection code to reconnect the browser and see the saved-fleet summary.
-Previously paired viewers must explicitly pair to the changed coverage. Reusing an
-IP address does not transfer access or SSH authority.
+Saving new membership advances the roster revision. The terminal reports saved
+host/computer counts and exclusions, then prints the ordinary private-VPN browser
+address when setup is complete. Existing saved fleets default to Finish, with an
+Add computers choice; incomplete results offer retry. Separately paired HTTPS
+viewers must explicitly pair to changed coverage. Reusing an IP address does not
+transfer access or SSH authority.
 
 ## Verified local readings
 

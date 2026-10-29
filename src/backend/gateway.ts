@@ -40,6 +40,8 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     throw new Error("Private-network access requires its configured HTTP gateway grant.");
   const privateNetwork = privateNetworkToken !== undefined;
   const tokenFor = (request: IncomingMessage): string | null => privateNetworkToken ?? requestToken(request, transport);
+  setupHtml = Buffer.from(setupHtml.toString("utf8")
+    .replace("</head>", '<meta name="gridlens-setup-mode" content="terminal"></head>'));
   if (privateNetwork) setupHtml = Buffer.from(setupHtml.toString("utf8")
     .replace("</head>", '<meta name="gridlens-private-network" content="1"></head>')
     .replace('<section id="login">', '<section id="login" hidden>'));

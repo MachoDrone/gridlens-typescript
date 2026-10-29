@@ -202,6 +202,7 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
     if (typeof body.scopeId !== "string") throw new SharedHttpError(400);
     const scopeId = body.scopeId, current = readState(scopeId);
     if (body.operation === "setup-status") return read(scopeId);
+    if (body.operation === "setup-action") return action(scopeId, body);
     if (body.operation === "setup-terminal") {
       if (body.connected !== undefined && typeof body.connected !== "boolean") throw new SharedHttpError(400);
       if (body.connected === false) terminals.delete(scopeId); else terminals.set(scopeId, now() + 30_000);

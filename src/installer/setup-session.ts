@@ -6,7 +6,13 @@ import { privateAddress } from "./config.ts";
 import { InstallerError } from "./release.ts";
 import type { TerminalPrompts } from "./terminal.ts";
 
-export interface TerminalSetupView { revision: number; phase: string; savedHosts?: number; inspectedPcs?: number }
+export interface TerminalSetupView {
+  revision: number; phase: string; savedHosts?: number; inspectedPcs?: number;
+  computers?: { id: string; host: string; name: string; fingerprint: string }[];
+  selected?: string[]; trusted?: string[]; exclusions?: string[];
+  scan?: { range: string; port: number; total: number; completed: number; found: number; status: string };
+  network?: { backendName: string; backendAddress: string; suggestedRange?: string };
+}
 export type SetupControl = (body: Record<string, unknown>) => unknown;
 
 /** Only the chosen address's actual host interface can supply a network hint. */
@@ -66,35 +72,134 @@ export async function enterComputerCredentials(terminal: TerminalPrompts, contro
   control({ operation: "setup-auth", scopeId: "default", revision, username, ...credentials, remember });
 }
 
-/** Browser controls discovery/selection/approval. Only this terminal supplies secrets. */
-export async function followBrowserSetup(terminal: TerminalPrompts, control: SetupControl, {
-  pause = () => new Promise<void>(resolve => setTimeout(resolve, 2000)), defaultUsername,
-}: { pause?: () => Promise<void>; defaultUsername?: string } = {}): Promise<void> {
-  const heartbeat = () => control({ operation: "setup-terminal", scopeId: "default" }) as TerminalSetupView;
-  let view = heartbeat();
-  if (view.phase === "done") { control({ operation: "setup-terminal", scopeId: "default", connected: false }); return; }
-  terminal.print("Keep this terminal open. In the browser, choose Search network, select computers and confirm their identities. Computer sign-in will appear here.");
-  const timer = setInterval(() => { try { heartbeat(); } catch { /* The next foreground operation reports loss. */ } }, 5000);
-  let previous = "";
+export interface TerminalSetupResult { completed: boolean; view: TerminalSetupView }
+const quit = (value: string): boolean => /^(?:q|quit)$/i.test(value.trim());
+
+async function chooseComputers(terminal: TerminalPrompts, view: TerminalSetupView): Promise<string[] | undefined> {
+  const computers = view.computers ?? [], selected = new Set(view.selected ?? []);
+  let filter = "";
+  for (;;) {
+    const shown = computers.map((computer, index) => ({ computer, number: index + 1 }))
+      .filter(({ computer }) => `${computer.host} ${computer.name}`.toLowerCase().includes(filter.toLowerCase()));
+    terminal.print(`\n${selected.size} selected · ${shown.length} matching computers`);
+    for (const { computer, number } of shown.slice(0, 25))
+      terminal.print(`${number}. [${selected.has(computer.id) ? "x" : " "}] ${computer.name === computer.host ? computer.host : `${computer.name} · ${computer.host}`}`);
+    if (shown.length > 25) terminal.print("Showing the first 25 matches. Use /name or /IP to narrow the list.");
+    const answer = (await terminal.ask(`Computers [${selected.size ? "done" : "all"}] — numbers toggle, /text filters, all, none, done or q: `)).trim();
+    if (quit(answer)) return undefined;
+    if (answer.startsWith("/")) { filter = answer.slice(1).trim(); continue; }
+    if (answer.toLowerCase() === "none") { selected.clear(); continue; }
+    if (answer.toLowerCase() === "all" || !answer && !selected.size) {
+      for (const { computer } of shown) selected.add(computer.id);
+    } else if (answer && answer.toLowerCase() !== "done") {
+      const numbers: number[] = []; let valid = true;
+      for (const part of answer.split(",")) {
+        const match = /^(\d+)(?:\s*-\s*(\d+))?$/.exec(part.trim());
+        if (!match) { valid = false; break; }
+        const from = Number(match[1]), to = Number(match[2] ?? match[1]);
+        if (from < 1 || to < from || to > computers.length) { valid = false; break; }
+        for (let number = from; number <= to; number++) numbers.push(number);
+      }
+      if (!valid || !numbers.length) { terminal.print("Enter listed numbers such as 1,3-5, or press Enter to use the default."); continue; }
+      for (const number of new Set(numbers)) { const id = computers[number - 1]!.id; if (selected.has(id)) selected.delete(id); else selected.add(id); }
+      continue;
+    }
+    if (!selected.size) { terminal.print("Choose at least one computer, or type q to stop."); continue; }
+    terminal.print(`Selected: ${computers.filter(row => selected.has(row.id)).map(row => row.name).join(", ")}`);
+    if (await yesNo(terminal, `Selection complete — use these ${selected.size} computers? [yes]: `, true)) return [...selected];
+  }
+}
+
+/** All onboarding decisions happen here; the caller prints the dashboard only after completion. */
+export async function runTerminalSetup(terminal: TerminalPrompts, control: SetupControl, {
+  pause = () => new Promise<void>(resolve => setTimeout(resolve, 1000)), defaultUsername,
+}: { pause?: () => Promise<void>; defaultUsername?: string } = {}): Promise<TerminalSetupResult> {
+  const read = () => control({ operation: "setup-status", scopeId: "default" }) as TerminalSetupView;
+  const heartbeat = () => control({ operation: "setup-terminal", scopeId: "default" });
+  const action = (view: TerminalSetupView, name: string, fields: Record<string, unknown> = {}) =>
+    control({ operation: "setup-action", scopeId: "default", revision: view.revision, action: name, ...fields }) as TerminalSetupView;
+  let view = read(), inspectedHere = false;
+  const stopped = (): TerminalSetupResult => { terminal.print("Setup paused. Run the same installer command to continue."); return { completed: false, view }; };
+  async function startSearch(): Promise<boolean> {
+    terminal.print("\nStep 1 — Find computers. Press Enter to accept the suggested values.");
+    if (view.network) terminal.print(`Searching from ${view.network.backendName} (${view.network.backendAddress}).`);
+    const suggested = view.scan?.range ?? view.network?.suggestedRange ?? "";
+    for (;;) {
+      const answer = (await terminal.ask(`Network to search${suggested ? ` [${suggested}]` : ""}: `)).trim();
+      if (quit(answer)) return false;
+      const range = answer || suggested;
+      if (!range) { terminal.print("Enter a private IP or network, for example 192.168.1.0/24."); continue; }
+      const portAnswer = (await terminal.ask(`SSH port [${view.scan?.port ?? 22}]: `)).trim();
+      if (quit(portAnswer)) return false;
+      const port = Number(portAnswer || view.scan?.port || 22);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) { terminal.print("Use an SSH port from 1 to 65535."); continue; }
+      try { view = action(view, "scan", { range, port }); return true; }
+      catch { view = read(); terminal.print("Search could not start. Use a private IP or IPv4 /23–/32 network (up to 512 addresses), and check that another setup is not running."); }
+    }
+  }
+  heartbeat();
+  const timer = setInterval(() => { try { heartbeat(); } catch { /* Foreground operations report connection loss. */ } }, 5000);
+  terminal.print("GridLens setup — finish these steps here. The dashboard address appears when your fleet is saved.");
   try {
     for (;;) {
-      view = heartbeat();
       if (view.phase === "done") {
-        terminal.print(`Fleet saved: ${view.savedHosts ?? 0} hosts on ${view.inspectedPcs ?? 0} inspected computers. Return to the browser to view the results.`);
-        return;
-      }
-      if (view.phase !== previous) {
-        previous = view.phase;
-        if (view.phase === "review") terminal.print("Sign-in received. In the browser, choose Inspect + automatic IP or Inspect only. Full rewards/GPU monitoring has its own approval.");
-        if (["scan", "select", "identities"].includes(view.phase)) terminal.print("Waiting for your browser setup choices…");
-      }
-      if (view.phase === "credentials") {
-        terminal.print("Sign in to the selected computers. Passwords and key files stay in this terminal.");
-        await enterComputerCredentials(terminal, control, view.revision, defaultUsername);
+        terminal.print(`\n${view.savedHosts ?? 0} hosts saved · ${view.inspectedPcs ?? 0} computers inspected.`);
+        for (const detail of view.exclusions ?? []) terminal.print(`Attention: ${detail}`);
+        if (inspectedHere && (view.savedHosts ?? 0) > 0 && !(view.exclusions?.length)) return { completed: true, view };
+        const hasHosts = (view.savedHosts ?? 0) > 0;
+        const answer = (await terminal.ask(hasHosts && !inspectedHere
+          ? "Saved fleet [1]: 1 Finish, 2 Add computers, q Stop: "
+          : `Result [1]: 1 ${hasHosts ? "Finish" : "Search again"}, 2 ${hasHosts ? "Try again" : "Stop"}, q Stop: `)).trim() || "1";
+        if (quit(answer) || !hasHosts && answer === "2") return stopped();
+        if (hasHosts && answer === "1") return { completed: true, view };
+        if (answer !== (hasHosts ? "2" : "1")) { terminal.print("Choose 1, 2 or q."); continue; }
+        inspectedHere = false; if (!await startSearch()) return stopped();
+      } else if (view.phase === "scan" || view.phase === "select" && !view.computers?.length) {
+        if (view.scan && ["complete", "failed", "cancelled"].includes(view.scan.status)) {
+          terminal.print(view.scan.status === "complete" ? "No computers offering SSH were found." : "Search did not complete.");
+          if (!await yesNo(terminal, "Search again? [yes]: ", true)) return stopped();
+        }
+        if (!await startSearch()) return stopped();
+      } else if (view.phase === "scanning") {
+        let cancelled = false, lastPercent = -10;
+        const cancel = () => { cancelled = true; };
+        process.on("SIGINT", cancel);
+        terminal.print("Searching… Ctrl+C cancels this search.");
+        try {
+          while (view.phase === "scanning") {
+            if (cancelled) { try { view = action(view, "cancel-scan"); } catch { view = read(); } return stopped(); }
+            const scan = view.scan;
+            if (scan && Math.floor(100 * scan.completed / Math.max(scan.total, 1)) >= lastPercent + 10) {
+              lastPercent = Math.floor(100 * scan.completed / Math.max(scan.total, 1));
+              terminal.print(`${scan.completed}/${scan.total} addresses checked · ${scan.found} computers found`);
+            }
+            await pause(); view = read();
+          }
+        } finally { process.off("SIGINT", cancel); }
+      } else if (view.phase === "select") {
+        const selected = await chooseComputers(terminal, view); if (!selected) return stopped();
+        view = action(view, "select", { selected });
+      } else if (view.phase === "identities") {
+        terminal.print("\nStep 2 — Confirm new computer identities. Saved matching identities are already accepted.");
+        for (const computer of view.computers ?? []) if (view.selected?.includes(computer.id) && !view.trusted?.includes(computer.id))
+          terminal.print(`${computer.name} · ${computer.host}\nSSH fingerprint: ${computer.fingerprint}`);
+        if (!await yesNo(terminal, "Trust these new computer identities? [no]: ", false)) return stopped();
+        view = action(view, "trust");
+      } else if (view.phase === "credentials") {
+        terminal.print("\nStep 3 — Sign in to the selected computers.");
+        await enterComputerCredentials(terminal, control, view.revision, defaultUsername); view = read();
+      } else if (view.phase === "review") {
+        terminal.print("\nStep 4 — Choose monitoring.\n1. Inspect + automatic IP (recommended)\n2. Inspect only");
+        const choice = (await terminal.ask("Monitoring [1]: ")).trim() || "1";
+        if (quit(choice)) return stopped();
+        if (!["1", "2"].includes(choice)) { terminal.print("Choose 1 or 2."); continue; }
+        terminal.print("Full monitoring also reads node rewards and GPU statistics. It does not claim or transfer funds.");
+        const fullMonitoring = await yesNo(terminal, "Enable full rewards and GPU monitoring? [no]: ", false);
+        view = action(view, "inspect", { automaticIp: choice === "1", fullMonitoring });
       } else if (view.phase === "inspecting") {
-        terminal.print("Inspecting the approved computers. Existing workloads keep running.");
-        control({ operation: "setup-inspect", scopeId: "default" });
-      } else await pause();
+        terminal.print("Inspecting and saving verified hosts…");
+        view = control({ operation: "setup-inspect", scopeId: "default" }) as TerminalSetupView; inspectedHere = true;
+      } else throw new InstallerError("The saved setup step is unsupported. Saved data was retained.");
     }
   } finally {
     clearInterval(timer);

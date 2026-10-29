@@ -7,7 +7,7 @@ async function connectPage(page: Page): Promise<void> {
   await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
 }
 
-test("installed Fleet exposes Search network above the table on a phone", async ({ page }) => {
+test("installed Fleet exposes Manage computers above the table on a phone", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.route("http://127.0.0.1:4174/", async route => {
     const response = await route.fetch();
@@ -15,12 +15,50 @@ test("installed Fleet exposes Search network above the table on a phone", async 
   });
   await page.route("**/api/shared/**", route => route.fulfill({ status: 401, json: {} }));
   await page.goto("/");
-  const search = page.getByRole("link", { name: "Search network", exact: true });
+  const search = page.getByRole("link", { name: "Manage computers", exact: true });
   await expect(search).toBeVisible(); await expect(search).toHaveAttribute("href", "/setup");
   const action = await search.boundingBox(), table = await page.locator(".fleet-table-wrap").boundingBox();
   expect(action!.height).toBeGreaterThanOrEqual(44); expect(action!.y + action!.height).toBeLessThanOrEqual(table!.y);
   expect(action!.x + action!.width).toBeLessThanOrEqual(390);
   await search.focus(); await expect(search).toBeFocused();
+});
+
+for (const width of [1280, 390]) test(`terminal setup is read-only in the browser through every phase at ${width}px`, async ({ page }) => {
+  await page.clock.install(); await page.setViewportSize({ width, height: 900 });
+  let phase = "scan", revision = 1;
+  const requests: string[] = [];
+  await page.route("**/setup", async route => route.fulfill({ contentType: "text/html", body:
+    (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-private-network" content="1"><meta name="gridlens-setup-mode" content="terminal"></head>') }));
+  await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  await page.route("**/api/shared/**", async route => {
+    expect(route.request().method()).toBe("GET");
+    const path = new URL(route.request().url()).pathname; requests.push(path);
+    if (path.endsWith("/status")) { await route.fulfill({ json: { role: "operator", serverId: "synthetic" } }); return; }
+    if (path.endsWith("/monitoring")) { await route.fulfill({ json: { pcs: [] } }); return; }
+    expect(path).toBe("/api/shared/setup");
+    await route.fulfill({ json: { revision, phase, computers: [], selected: [], trusted: [], automaticIp: true, fullMonitoring: false,
+      exclusions: phase === "done" ? ["Synthetic incomplete host excluded"] : [], savedHosts: phase === "done" ? 3 : 0,
+      inspectedPcs: phase === "done" ? 2 : 0, monitoringStatus: "Automatic IP approved.", terminalConnected: true,
+      network: { backendName: "fixture-backend", backendAddress: "192.168.42.10", suggestedRange: "192.168.42.0/24",
+        verifiedAtMs: Date.now(), releaseTag: "modern-v0.1.0-dev.6" } } });
+  });
+  await page.goto("/setup");
+  for (const next of ["scan", "scanning", "select", "identities", "credentials", "review", "inspecting"]) {
+    phase = next; revision++; await page.clock.fastForward(3100);
+    await expect(page.getByRole("heading", { name: "Finish setup in the terminal" })).toBeVisible();
+    await expect(page.locator("#network-search")).toBeHidden();
+    await expect(page.locator("#step input, #step button")).toHaveCount(0);
+    await expect(page.locator("#login")).toBeHidden();
+    await expect(page.locator("#step code")).toHaveText("bash <(curl -fsSL https://github.com/MachoDrone/gridlens-typescript/releases/download/modern-v0.1.0-dev.6/modern-start.sh) --vpn-web");
+    await expect(page.locator("#step-description")).toContainText("Complete setup in one terminal");
+  }
+  phase = "done"; revision++; await page.clock.fastForward(3100);
+  await expect(page.getByRole("heading", { name: "Fleet ready" })).toBeVisible();
+  await expect(page.locator("#step-description")).toHaveText("3 hosts saved · 2 computers inspected");
+  await expect(page.locator("#step summary")).toContainText("1 exclusions or incomplete checks");
+  await expect(page.locator("#step").getByRole("link", { name: "Open Fleet" })).toHaveAttribute("href", "/");
+  expect(requests.every(path => !/setup-action|login|pair|devices/.test(path))).toBe(true);
+  const bounds = await page.locator("main").boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
 });
 
 for (const width of [1280, 390, 320]) test(`browser search, cancel, recovery and complete setup at ${width}px`, async ({ page }) => {

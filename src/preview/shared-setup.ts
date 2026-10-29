@@ -6,6 +6,7 @@ interface SetupView { revision: number; phase: string; computers: SetupComputer[
   network?: { backendName: string; backendAddress: string; suggestedRange?: string; verifiedAtMs: number; releaseTag?: string }; terminalConnected?: boolean }
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const privateNetwork = document.querySelector<HTMLMetaElement>('meta[name="gridlens-private-network"]')?.content === "1";
+const terminalSetup = document.querySelector<HTMLMetaElement>('meta[name="gridlens-setup-mode"]')?.content === "terminal";
 let current: SetupView | undefined;
 let selected = new Set<string>();
 let filtering = "";
@@ -46,6 +47,7 @@ function button(label: string, action: () => void, primary = false): HTMLButtonE
   if (primary) node.className = "primary"; node.addEventListener("click", action); return node;
 }
 async function act(action: string, fields: Record<string, unknown> = {}): Promise<void> {
+  if (terminalSetup) return;
   if (actionPending || !current) return;
   actionPending = true; actionRevision++; renderSearch(current);
   try {
@@ -60,6 +62,7 @@ async function act(action: string, fields: Record<string, unknown> = {}): Promis
   } finally { actionPending = false; if (current) renderSearch(current); }
 }
 function renderSearch(view: SetupView): void {
+  if (terminalSetup) { el("network-search").hidden = true; return; }
   const updateText = (id: string, value: string) => { const node = el(id); if (node.textContent !== value) node.textContent = value; };
   const visible = ["scan", "scanning", "select", "done"].includes(view.phase), searching = view.phase === "scanning";
   el("network-search").hidden = !visible;
@@ -102,7 +105,36 @@ el("network-search-form").addEventListener("submit", event => {
   event.preventDefault(); void act("scan", { range: el<HTMLInputElement>("network-range").value.trim(), port: Number(el<HTMLInputElement>("ssh-port").value) });
 });
 el("cancel-search").addEventListener("click", () => { void act("cancel-scan"); });
+function renderTerminalSetup(view: SetupView): void {
+  current = view; el("network-search").hidden = true; el("login").hidden = true; el("setup").hidden = false;
+  const signature = JSON.stringify({ phase: view.phase, savedHosts: view.savedHosts, inspectedPcs: view.inspectedPcs,
+    monitoringStatus: view.monitoringStatus, exclusions: view.exclusions, network: view.network });
+  if (signature === lastSignature) return;
+  lastSignature = signature;
+  const done = view.phase === "done", step = el("step"), backend = view.network?.backendName ?? "the backend computer";
+  el("step-title").textContent = done ? "Fleet ready" : "Finish setup in the terminal";
+  el("step-description").textContent = done ? `${view.savedHosts} hosts saved · ${view.inspectedPcs} computers inspected`
+    : `Complete setup in one terminal on ${backend}. Open Fleet after the terminal says setup is complete.`;
+  step.replaceChildren();
+  if (done) {
+    step.append(text("p", view.monitoringStatus, "success"));
+    if (view.exclusions.length) {
+      const details = document.createElement("details"); details.append(text("summary", `Inspection details · ${view.exclusions.length} exclusions or incomplete checks`));
+      for (const exclusion of view.exclusions) details.append(text("p", exclusion, "pending"));
+      step.append(details);
+    }
+  }
+  step.append(text("p", done ? `To add or change computers, run setup again on ${backend}.`
+    : "The terminal handles search, computer selection, sign-in and monitoring choices together. This page shows the result."));
+  const tag = view.network?.releaseTag;
+  if (tag && /^modern-v\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(tag)) {
+    const command = text("p", ""); command.append(text("code", `bash <(curl -fsSL https://github.com/MachoDrone/gridlens-typescript/releases/download/${tag}/modern-start.sh) --vpn-web`));
+    step.append(command);
+  } else step.append(text("p", "Run the latest GridLens installer on the backend computer with --vpn-web.", "muted"));
+  const link = document.createElement("a"); link.href = "/"; link.textContent = "Open Fleet"; step.append(link);
+}
 function render(view: SetupView): void {
+  if (terminalSetup) { renderTerminalSetup(view); return; }
   const sameSelection = current?.phase === "select" && view.phase === "select";
   current = view; renderSearch(view);
   // Polls may advance the revision or terminal heartbeat while a person types.

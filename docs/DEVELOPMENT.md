@@ -5,36 +5,30 @@ source contracts, and the remaining work. See [README](../README.md) for startup
 [HOSTING_HANDOFF](HOSTING_HANDOFF.md) for platform integration and
 [UX_CONSISTENCY](UX_CONSISTENCY.md) for phone/laptop acceptance.
 
-The new installed [shared backend composition](SHARED_BACKEND.md) adds durable
-provider checkpoints, a SQLite owner, HTTPS pairing and terminal-backed setup.
-It is separate from the preview behavior documented below. See the
-[modern installer](MODERN_INSTALL.md) for its runtime isolation and recovery,
-candidate build commands and completed isolated Docker acceptance. Published
-0.1.0-dev.1 remains immutable. The pending dev.2 installer candidate adds numbered
-private-address selection, a private-TLS Enter default, local port probes and
-effective-endpoint recovery with a persistent pending-port intent. Targeted tests
-and real Docker repair checks pass; the new release's public entry points,
-physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
-separate. Endpoint repair did not enable new fleet monitoring.
+The installed [shared backend composition](SHARED_BACKEND.md) adds durable
+provider checkpoints, a SQLite owner, HTTPS pairing and terminal setup. It is
+separate from the preview behavior documented below. See the
+[modern installer](MODERN_INSTALL.md) for runtime isolation, recovery and build
+commands. Earlier published releases remain immutable; physical reboot, GPU
+recorder lifecycle and physical-phone acceptance have separate evidence.
 
-Published dev.3 includes those installer fixes plus explicitly chosen
-`--vpn-web` access: a separate private HTTP browser gateway shares the existing
-owner and cache, while the HTTPS address remains available for Android. Browser
-sign-in uses a single-use fragment link, including links for another browser.
-No VPN changes or duplicate collection are introduced. Local LAN traffic uses
-HTTP in this opt-in mode; it requires the operator's trusted existing network.
-The dev.4 candidate replaces its browser sign-in links with a permanent ordinary
-address. A dedicated server-side grant is bound to the selected fleet's current
-roster and survives restart without expiring browser sessions. Its revocation is
-durable and cannot be reversed by rerunning setup. Native HTTPS pairing remains
-independent. Network access grants operator use of this private browser endpoint.
+The explicitly selected `--vpn-web` address uses the existing private LAN/VPN
+without browser codes or sign-in expiry. A dedicated server-side grant follows
+the configured fleet's current roster, survives restart, and remains revocable.
+Rerunning setup cannot revive revoked access. Anyone who can reach this private
+HTTP address can operate that fleet; the LAN leg is unencrypted. Native Android's
+HTTPS pairing stays separate. No VPN changes or duplicate collection are added.
 
-Dev.5 adds browser-owned bounded discovery, verified network hints and a guided
-installer terminal session. Browser scan actions return immediately and poll
-persisted progress; cancellation fences late results and owner shutdown cancels
-scan work before state closes. Credentials and inspection stay in the existing
-terminal/owner boundary. The Fleet search entry is visible above the table only
-for installed shared backends; developer-preview data sources are unchanged.
+The dev.6 update makes onboarding a single terminal wizard. It uses verified
+network suggestions, bounded discovery, one numbered computer list with filters
+and selection counts, new-identity review, credential entry, monitoring choices
+and inspection. Only completed setup prints the browser address. Existing fleets
+default to Finish and can explicitly add computers; empty or failed results offer
+retry. Browser Manage computers is a read-only status/installer-command page.
+Search cancellation still fences late results, and owner shutdown cancels scan
+work before state closes. Existing browser setup APIs remain compatible, but the
+deployed UI does not require their interactive flow. Developer-preview sources
+are unchanged.
 
 ## Toolchain and commands
 

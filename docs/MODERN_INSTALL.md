@@ -3,9 +3,9 @@
 The modern backend is separate from the loopback developer preview and the legacy
 installer. Its TypeScript terminal coordinator manages a single collection owner
 and an unprivileged HTTPS gateway on a chosen PC, which may also run Nosana. This
-source revision implements development update **0.1.0-dev.5**. Published dev.4
-provides direct private-network browser access. This update adds browser-owned
-network search and a continuous terminal handoff for credentials and inspection;
+source revision implements development update **0.1.0-dev.6**. Published dev.4
+provides direct private-network browser access. This update completes all setup
+in one terminal before handing the saved fleet to the browser;
 earlier published releases remain immutable.
 The source `scripts/modern-start.sh` intentionally refuses to run until the release
 builder supplies a tested executable checksum and pinned GitHub release tag.
@@ -30,7 +30,8 @@ access upgrades an older owner through the matched image/state recovery process,
 then replaces only a verified owned browser gateway, retaining its saved port.
 Changed isolation or an attempted downgrade is refused.
 
-Setup prints **OPEN GRIDLENS** followed by the ordinary dashboard address. Open
+After the terminal wizard completes, setup prints **OPEN GRIDLENS** followed by
+the ordinary dashboard address. Open
 or bookmark that same address on any PC or phone on the existing private network
 or VPN. There is no browser code, pairing step, cookie requirement or sign-in
 expiry in this mode. `--connect` prints the same address. Old `/connect` links
@@ -45,36 +46,43 @@ monitoring approvals and terminal-only SSH/password entry remain required.
 Native Android's separate HTTPS pairing, device revocation and exact roster
 authorization are unchanged. HTTPS browser access also retains its pairing flow.
 
-### Search and add computers
+### Complete setup in the terminal
 
-Open **Search network** above the Fleet table. Search runs on the chosen backend
-PC over its existing LAN/VPN, regardless of which browser or phone opened the page.
-The installer supplies the backend's name/address and a suggestion only from the
-actual assigned host interface. A container bridge or browser address is not used
-to guess the LAN. Edit the private IP/network if needed and choose **Search
-network**. SSH defaults to port 22; another port is available under the search
-options. The existing single-IP or IPv4 /23–/32 limit remains 512 addresses, with
-eight probes at once and the same per-probe timeout.
+Run the installer on the chosen backend PC and finish its numbered steps there.
+There is no required switch to the browser during onboarding. Press Enter to use
+the default shown in brackets, or type another choice.
 
-The browser shows progress and found counts while a background search runs. Cancel,
-retry and rescan are available. Search cannot change saved telemetry membership,
-grant SSH access or replace a changed saved identity. Filter the one computer list
-by partial IP/name, select the computers, choose **Selection complete**, then review
-only new SSH identities. Empty searches give a retry path.
+1. **Find computers.** Accept or edit the suggested private network and SSH port
+   (default 22). Suggestions come only from the actual assigned host interface;
+   a container bridge or viewing device is not used to guess the LAN. The terminal
+   shows search progress and found counts. Existing limits remain one private IP
+   or IPv4 /23–/32, up to 512 addresses, eight probes at once and the same timeout.
+2. **Choose computers.** Use the one numbered list. Numbers or ranges toggle
+   selections; `/name` or `/IP` filters the list without losing selections. The
+   terminal shows a prominent selected count and confirms **Selection complete**.
+   Confirm new SSH identities once; saved matching identities skip that review.
+3. **Sign in.** Enter the computer username and password or SSH key, optional
+   sudo credentials, and the encrypted-credential retention choice in the same
+   terminal. Passwords and key files are never entered in the browser.
+4. **Choose monitoring and save.** **Inspect + automatic IP** is the recommended
+   default. **Inspect only** is also available. Full rewards/GPU monitoring needs
+   a separate explicit approval and defaults to **No**. The terminal performs
+   inspection and reports saved-host/computer counts and any exclusions.
 
-Keep the installer terminal open while using the browser. Once computers and
-identities are selected, that terminal asks for the computer username and password
-or SSH key, optional sudo credentials, and encrypted credential retention. These
-values are never requested in the web page. The browser shows whether the setup
-terminal is connected and provides the matching installer command if reconnection
-is needed. After sign-in, choose **Inspect + automatic IP** or **Inspect only** in
-the browser; full rewards/GPU monitoring still has a separate checkbox. The waiting
-terminal performs the approved inspection and the browser shows saved-host counts
-and exclusions. A completed setup returns the terminal to its shell. Later scans
-can add computers without overwriting existing coverage.
+An existing saved fleet defaults to **Finish**; choose **Add computers** to extend
+it. Empty or failed searches and incomplete inspection results offer retry or stop
+choices. `q` at the offered prompts pauses setup so the same command can resume;
+Ctrl+C during search cancels that search. Saved identities, fleet membership and
+permissions remain. Discovery alone never grants SSH access or changes telemetry
+membership. Only completed setup prints the browser address. Then open Fleet to
+view the saved hosts.
 
-`--connect` prints the permanent private address and exits; `--no-setup` skips the
-guided terminal session for automation. `--ssh-sign-in` reconnects that session.
+The browser's **Manage computers** page shows status and the installer command for
+adding or changing computers. It does not ask you to select computers, sign in or
+approve inspection there. Native Android's existing HTTPS workflow is separate.
+
+`--connect` prints the permanent private address and exits; `--no-setup` explicitly
+skips the wizard for automation. `--ssh-sign-in` enters the terminal setup wizard.
 
 ### HTTPS access
 
@@ -142,9 +150,11 @@ The generated leaf certificate lasts one year; renewal and trust
 rotation require an explicit identity-preserving certificate workflow and remain
 an operational follow-up before a long-lived release.
 
-The terminal creates the initial empty `default` fleet and prints a short-lived
-operator connection code. Use it in the HTTPS browser setup. Computer selection,
-identity review and monitoring approval remain separate from data-cache reads.
+The terminal creates the initial empty `default` fleet and completes onboarding
+before its HTTPS browser handoff. HTTPS pairing retains its short-lived operator
+connection code; this is separate from the no-code private-VPN browser address.
+Computer selection, identity review and monitoring approval occur in the terminal
+and remain separate from data-cache reads.
 
 Additional coordinator actions reuse the same installed instance:
 
@@ -155,11 +165,10 @@ Additional coordinator actions reuse the same installed instance:
 ```
 
 Use only an explicitly chosen network range. Scanning occurs on the backend PC.
-Select computers and approve new SSH identities in browser setup, then use the
-waiting installer terminal for a key file/passphrase or computer password.
-Computer sudo passwords are also entered in that terminal when needed. Keep the
-terminal open while browser approval and inspection complete; after fleet coverage
-changes it prints a new operator connection code for the new roster revision.
+Select computers, confirm new SSH identities, enter credentials and approve
+inspection in the same terminal. Computer sudo passwords also stay there. After
+fleet coverage changes, private-VPN browser access keeps its ordinary address;
+separately paired HTTPS viewers need authorization for the new roster revision.
 Only the owner receives credentials, through a private control socket and Docker
 stdin. Keys and passwords never become process arguments or gateway inputs.
 Remembered credentials stay in the owner's encrypted credential volume.
@@ -313,12 +322,12 @@ the explicitly selected replacement port. Five protected volume checkpoints were
 verified first. The new GridLens owner/gateway were briefly stopped for that
 checkpoint; the owner was restarted before endpoint repair and retained through
 the repair itself. Existing Nosana Podman workloads and legacy GridLens resources
-were unchanged. This repair did not enable new fleet monitoring, and the tested
-recovery changes still await a new development release.
+were unchanged. This repair did not enable new fleet monitoring. The endpoint
+recovery changes were included in later development releases.
 
 No physical PC reboot or NVIDIA/GPU recorder lifecycle test was performed.
-Physical VPN/phone acceptance and the eventual published dev.2 setup/upgrade
-entry points remain separate checks.
+Physical VPN/phone acceptance and exact published setup/upgrade entry points
+remain separate checks; release notes record the checks performed for each update.
 
 ### Run isolated Docker acceptance
 
