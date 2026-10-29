@@ -126,7 +126,9 @@ test("unowned same-name Docker resources and daemon errors never become adoption
 });
 test("launcher and Docker context keep private inputs out and secret collection on terminal",()=>{
   const launcher=readFileSync(new URL("../scripts/modern-start.sh",import.meta.url),"utf8");assert.match(launcher,/\/dev\/tty/);assert.match(launcher,/sha256sum --check/);assert.ok(!launcher.includes("apt install"));
-  const terminal=readFileSync(new URL("../src/installer/terminal.ts",import.meta.url),"utf8");assert.match(terminal,/setup-auth/);assert.match(terminal,/setRawMode\(true\)/);
+  // The behavioral setup-session tests cover credential delivery through control;
+  // it need not remain implemented in this specific terminal source file.
+  const terminal=readFileSync(new URL("../src/installer/terminal.ts",import.meta.url),"utf8");assert.match(terminal,/setRawMode\(true\)/);
   const dockerignore=readFileSync(new URL("../Dockerfile.shared.dockerignore",import.meta.url),"utf8");assert.ok(dockerignore.startsWith("**\n"));assert.ok(!dockerignore.includes("!evidence"));
 });
 

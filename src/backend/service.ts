@@ -8,16 +8,17 @@ import type { PrivateState } from "./access.ts";
 import { SharedHttpError } from "./ipc.ts";
 import { createObservationStore } from "./observations.ts";
 import { createSetup } from "./setup.ts";
+import type { scanComputers } from "./ssh.ts";
 import type { CredentialVault } from "./credential-vault.ts";
 import type { PcPermission } from "./pc-monitor.ts";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
-  now = Date.now, requestHistory, providerWaits = () => [], vault,
+  now = Date.now, requestHistory, providerWaits = () => [], vault, scan,
 }: { now?: () => number; requestHistory?: (context: FleetContext, addresses: string[], refresh: boolean) => Promise<void>;
-  providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault } = {}) {
+  providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers } = {}) {
   const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
-  const setup = createSetup(state, access, observations, now, vault ? { vault } : {});
+  const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}) });
   async function read(body: Record<string, unknown>): Promise<unknown> {
     try {
       if (body.operation === "pair") {

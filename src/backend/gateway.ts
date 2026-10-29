@@ -122,7 +122,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         if (request.method !== "POST" || !postOperations[route] || url.search) throw new SharedHttpError(405);
         const input = await readJson(request);
         const allowed: Record<string, string[]> = { pair: ["version", "code", "deviceName"], login: ["version", "code", "deviceName"],
-          "pair-code": [], revoke: ["deviceId"], "setup-action": ["revision", "action", "selected", "automaticIp", "fullMonitoring"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"] };
+          "pair-code": [], revoke: ["deviceId"], "setup-action": ["revision", "action", "selected", "automaticIp", "fullMonitoring", "range", "port"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"] };
         if (Object.keys(input).some(key => !allowed[route]!.includes(key))) throw new SharedHttpError(400);
         const result = await call<Record<string, unknown>>({ ...input, operation: postOperations[route], token });
         if (route === "login") {

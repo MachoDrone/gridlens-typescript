@@ -29,6 +29,13 @@ roster and survives restart without expiring browser sessions. Its revocation is
 durable and cannot be reversed by rerunning setup. Native HTTPS pairing remains
 independent. Network access grants operator use of this private browser endpoint.
 
+Dev.5 adds browser-owned bounded discovery, verified network hints and a guided
+installer terminal session. Browser scan actions return immediately and poll
+persisted progress; cancellation fences late results and owner shutdown cancels
+scan work before state closes. Credentials and inspection stay in the existing
+terminal/owner boundary. The Fleet search entry is visible above the table only
+for installed shared backends; developer-preview data sources are unchanged.
+
 ## Toolchain and commands
 
 Use Node **24.14.1**, npm **11.11.0**, TypeScript **7.0.2**, Node declarations

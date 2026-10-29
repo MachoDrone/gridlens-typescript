@@ -55,9 +55,10 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     finally { clearTimeout(timeout); controller = undefined; if (!document.hidden) timer = setTimeout(() => { void refresh(); }, 30_000); }
   }
   if (enabled) {
-    const link = document.createElement("a"); link.href = "/setup"; link.textContent = "Shared cache · setup and connected devices";
-    const marker = document.createElement("p"); marker.className = "sample-notice"; marker.append(link);
-    document.querySelector("#preview-tools")?.before(marker);
+    const link = document.createElement("a"); link.href = "/setup"; link.textContent = "Search network"; link.className = "shared-search-link";
+    const marker = document.createElement("nav"); marker.id = "shared-setup-actions"; marker.className = "shared-setup-actions"; marker.setAttribute("aria-label", "Computer setup");
+    const description = document.createElement("span"); description.textContent = "Find computers and add their Nosana hosts.";
+    marker.append(link, description); document.querySelector(".fleet-title-row")?.after(marker);
     document.addEventListener("visibilitychange", () => { if (document.hidden) { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); }
       else { void refresh(); pumpHistory(); } });
     window.addEventListener("pagehide", () => { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); });

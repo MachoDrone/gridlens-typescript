@@ -161,6 +161,10 @@ h1 { font-size: 18px; line-height: 22px; margin: 0; color: var(--nosana-green); 
 .preview-tag { color: var(--amber); margin-left: 6px; }
 .sample-notice { margin: 8px 0; font-size: 11px; color: var(--muted); }
 .sample-notice strong { color: var(--amber); font-weight: 500; }
+.shared-setup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 12px; font-size: 12px; color: var(--muted); }
+.shared-search-link { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 14px; border: 1px solid #30a75d; border-radius: 6px; background: #18783e; color: white; font-size: 14px; font-weight: 650; text-decoration: none; }
+.shared-search-link:hover { background: #1d8b49; }
+.shared-search-link:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
 .input-error { color: var(--local-source); font-size: 12px; overflow-wrap: anywhere; }
 #local-source-note { color: var(--local-source); }
 .fleet-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; font-size: 11px; line-height: 16px; min-height: 22px; color: var(--muted); }

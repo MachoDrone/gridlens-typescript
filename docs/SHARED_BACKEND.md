@@ -71,17 +71,22 @@ Reruns cannot revive a revoked grant. No certificate installation is required fo
 that HTTP browser address. Native Android pairing remains HTTPS and keeps its
 existing device-level access rules.
 
-`/connect` accepts a connection code and device name. `/setup` offers a single
-computer checkbox list, partial-IP/name search, persistent selections, counts and
-**Selection complete**. The terminal scans only the explicitly chosen private
-network, from the backend PC. The page explains that location and does not suggest
-unverified routes or change VPN configuration. SSH responses alone are not Nosana
-identities.
+In HTTPS pairing mode `/connect` accepts a connection code and device name; the
+private-network browser mode opens directly. `/setup` starts an explicitly chosen
+private-network scan from the backend owner, acknowledges immediately and exposes
+bounded progress/cancel/retry actions. The single computer checkbox list retains
+partial-IP/name filtering, selections, counts and **Selection complete**. The page
+explains the scan location; suggested networks come only from verified host
+interface metadata supplied by the local installer. It does not change VPN
+configuration. SSH responses alone are not Nosana identities.
 
 Selected new SSH fingerprints appear once for confirmation. Saved matching keys
 skip that review; changed keys stay blocked across scans and restarts. Key files,
 passphrases, computer passwords and optional sudo input belong to the controlling
-terminal. The browser never receives those secrets. Remembered credentials use
+terminal, which stays open while browser choices progress. A short-lived terminal
+presence indicator is display-only and does not grant access; it is unrelated to
+browser sign-in or private-network access. The browser never receives those
+secrets. Remembered credentials use
 authenticated encryption in a separate owner-only volume; a party controlling
 that volume and its key can still decrypt them.
 

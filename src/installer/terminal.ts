@@ -10,6 +10,8 @@ import { checked, inspectOwned, localDockerRunner, resourceName } from "./docker
 import type { DockerRunner } from "./docker.ts";
 import { browserConnectionText, privateBrowserConnectionText, verifyPrivateWeb } from "./browser-connection.ts";
 import { ensureVpnWeb, readVpnWebEndpoint } from "./vpn-web.ts";
+import { followBrowserSetup, verifiedSetupNetwork } from "./setup-session.ts";
+import type { SetupControl } from "./setup-session.ts";
 import { InstallerError, releaseURL, verifyArtifact, verifyRelease } from "./release.ts";
 import type { ReleaseArtifact } from "./release.ts";
 import { assertLocalDockerForSelection, chooseDashboardPort, choosePrivateEndpoint, discoverPrivateEndpoints, dockerNetworkExclusions, probeBindPort } from "./network-selection.ts";
@@ -225,44 +227,32 @@ function printSavedConnection(terminal: TerminalPrompts, coordinator: Coordinato
     terminal.print(privateBrowserConnectionText(web.origin));
   } else terminal.print(browserConnectionText(config.origin, coordinator.operatorCode(instance), config.active.sequence >= 3));
 }
+function setupControl(runner: DockerRunner, instance: string): SetupControl {
+  return body => JSON.parse(body.operation === "setup-inspect"
+    ? checked(runner,["exec",resourceName(instance,"owner"),"node","scripts/shared-control.ts","setup-inspect","default"])
+    : checked(runner,["exec","-i",resourceName(instance,"owner"),"node","scripts/shared-control.ts","json"],JSON.stringify(body)));
+}
+function publishSetupNetwork(runner: DockerRunner, config: InstallationConfig): void {
+  // Local interface information must never be presented as a remote Docker host's network.
+  try { assertLocalDockerForSelection(runner); } catch { return; }
+  const interfaces=networkInterfaces();
+  if(!discoverPrivateEndpoints(interfaces,dockerNetworkExclusions(runner)).choices.some(choice=>choice.address===config.bindAddress))return;
+  const context=verifiedSetupNetwork(config.bindAddress,config.active.version,interfaces);
+  if(context)setupControl(runner,config.instance)({operation:"setup-network-context",scopeId:"default",...context});
+}
 export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts):Promise<void>{
-  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing VPN.\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect | --ssh-sign-in | --scan RANGE]\n--vpn-web adds browser access without certificate installation on your private LAN/existing VPN; local LAN traffic uses HTTP. Optional --web-port PORT. Existing HTTPS remains available for Android.\nAll secrets are entered in the controlling terminal. No host Node or Python is required.");return;}
+  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing VPN.\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect | --ssh-sign-in | --scan RANGE]\n--vpn-web adds browser access on your private LAN/existing VPN; local LAN traffic uses HTTP. Optional --web-port PORT. Existing HTTPS remains available for Android.\nSetup stays open for browser-led network search and terminal-only computer sign-in. --connect prints the saved address and exits; --no-setup also skips the guided setup session.\nAll secrets are entered in the controlling terminal. No host Node or Python is required.");return;}
   if(args.includes("--version")){console.log("gridlens-modern-coordinator 1 / Node "+process.versions.node);return;}
   process.umask(0o077);
   const terminal=suppliedTerminal??controllingTerminal(),runner=localDockerRunner();
   try{
     const instance=option(args,"--instance")??"default";resourceName(instance,"owner");
     if(args.includes("--ssh-sign-in")){
-      terminal.print("Sign in to the computers selected in browser setup. Credentials go only to the backend owner, never the browser.");
-      const username=await terminal.ask("Computer username: ");
-      const kind=await terminal.ask("Use an SSH key or password? [key/password]: ");
-      let credentials:Record<string,string>;
-      if(kind==="key"){
-        const file=await terminal.ask("SSH private-key file path: ");
-        const privateKey=readFileSync(file.startsWith("~/")?join(homedir(),file.slice(2)):file,"utf8");
-        if(privateKey.length>1024*1024)throw new InstallerError("SSH key file is too large.");
-        const passphrase=await terminal.secret("Key passphrase (empty if none): ");credentials={privateKey,passphrase};
-      }else if(kind==="password")credentials={password:await terminal.secret("Computer password: ")};
-      else throw new InstallerError("Choose key or password in the terminal.");
-      const sudo=await terminal.ask("Do the selected computers require sudo for Docker inspection? [yes/no]: ");
-      if(sudo==="yes")credentials.sudoPassword=await terminal.secret("Computer sudo password (empty only when its sudo policy needs none): ");
-      else if(sudo!=="no")throw new InstallerError("Choose yes or no for computer sudo in the terminal.");
-      const remember=(await terminal.ask("Remember encrypted credentials for approved automatic monitoring? [yes/no]: "))==="yes";
-      const result=checked(runner,["exec","-i",resourceName(instance,"owner"),"node","scripts/shared-control.ts","json"],JSON.stringify({operation:"setup-auth",scopeId:"default",username,...credentials,remember}));
-      terminal.print(result);
-      terminal.print("Return to the browser to choose Inspect + automatic IP or Inspect only, with separate full-monitoring approval. Waiting for that selection…");
-      for(;;){
-        const status=JSON.parse(checked(runner,["exec",resourceName(instance,"owner"),"node","scripts/shared-control.ts","setup-status","default"])) as {phase?:string};
-        if(status.phase==="inspecting"){
-          terminal.print("Inspecting the selected computers. Keep this terminal open.");
-          terminal.print(checked(runner,["exec",resourceName(instance,"owner"),"node","scripts/shared-control.ts","setup-inspect","default"]));
-          terminal.print("Fleet coverage saved. Open GridLens:");
-          printSavedConnection(terminal,new Coordinator(runner),runner,instance);break;
-        }
-        if(status.phase!=="review")throw new InstallerError("Setup phase changed. Review the browser status before signing in again.");
-        await new Promise(resolve=>setTimeout(resolve,1000));
-      }
-      return;
+      const coordinator=new Coordinator(runner),config=savedConfiguration(coordinator,runner,instance);
+      if(config.active.sequence<5)throw new InstallerError("Run the current installer with --vpn-web first to update browser-led setup.");
+      publishSetupNetwork(runner,config);
+      printSavedConnection(terminal,coordinator,runner,instance);
+      await followBrowserSetup(terminal,setupControl(runner,instance));return;
     }
     if(args.includes("--scan")){
       const range=option(args,"--scan")!;
@@ -284,7 +274,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     }
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
     const previous=coordinator.configuration(instance,release.imageId);
-    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<4?"upgrade":"setup";
+    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<5?"upgrade":"setup";
     if(!previous){
       terminal.print("Scanning and monitoring run on this chosen backend PC. Run this terminal on that PC, including through an interactive SSH login. Setup does not change VPN, DNS or host networking.");
       assertLocalDockerForSelection(runner);
@@ -308,10 +298,13 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       terminal.print("Browser access is ready on your private LAN/existing VPN.");
       terminal.print(privateBrowserConnectionText(web.origin));
       terminal.print(`Android HTTPS remains available: ${result.config.origin}`);
+      publishSetupNetwork(runner,result.config);
+      if(!args.includes("--no-setup"))await followBrowserSetup(terminal,setupControl(runner,instance));
       return;
     }
     terminal.print(`Dashboard: ${result.config.origin}\nServer TLS certificate SHA-256 (Android pin): ${result.config.certificateSha256}`);
     await offerPublicCertificateExport(terminal,instance,result.certificate,{existingTrusted:certificate!==undefined});
     terminal.print(browserConnectionText(result.config.origin,coordinator.operatorCode(instance),result.config.active.sequence>=3));
+    if(result.config.active.sequence>=5){publishSetupNetwork(runner,result.config);if(!args.includes("--no-setup"))await followBrowserSetup(terminal,setupControl(runner,instance));}
   }finally{terminal.close();}
 }

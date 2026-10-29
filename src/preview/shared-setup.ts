@@ -1,7 +1,9 @@
 // This separate setup entry point has no privileged browser bridge or secret inputs.
 interface SetupComputer { id: string; host: string; port: number; name: string; fingerprint: string }
 interface SetupView { revision: number; phase: string; computers: SetupComputer[]; selected: string[]; trusted: string[]; automaticIp: boolean;
-  fullMonitoring: boolean; exclusions: string[]; savedHosts: number; inspectedPcs: number; monitoringStatus: string }
+  fullMonitoring: boolean; exclusions: string[]; savedHosts: number; inspectedPcs: number; monitoringStatus: string;
+  scan?: { range: string; port: number; total: number; completed: number; found: number; status: "running" | "complete" | "cancelled" | "failed" };
+  network?: { backendName: string; backendAddress: string; suggestedRange?: string; verifiedAtMs: number; releaseTag?: string }; terminalConnected?: boolean }
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
 const privateNetwork = document.querySelector<HTMLMetaElement>('meta[name="gridlens-private-network"]')?.content === "1";
 let current: SetupView | undefined;
@@ -12,6 +14,11 @@ let signingIn = false;
 let refreshing = false;
 let connected = false;
 let signInRevision = 0;
+let actionPending = false;
+let actionRevision = 0;
+let rangeTouched = false;
+let portTouched = false;
+let searchInitialized = false;
 const message = (text: string, kind = "pending") => { const node = el("message"); node.textContent = text; node.className = kind; };
 class RequestError extends Error {
   readonly status: number;
@@ -39,27 +46,88 @@ function button(label: string, action: () => void, primary = false): HTMLButtonE
   if (primary) node.className = "primary"; node.addEventListener("click", action); return node;
 }
 async function act(action: string, fields: Record<string, unknown> = {}): Promise<void> {
-  try { const next = await api<SetupView>("setup-action", { action, revision: current?.revision, ...fields }); render(next); message("Setup choice saved.", "success"); }
-  catch (error) { message(error instanceof Error ? error.message : "Setup failed.", "failure"); }
+  if (actionPending || !current) return;
+  actionPending = true; actionRevision++; renderSearch(current);
+  try {
+    const next = await api<SetupView>("setup-action", { action, revision: current.revision, ...fields }); render(next);
+    message(action === "scan" ? "Network search started on the backend computer." : action === "cancel-scan" ? "Network search cancelled." : "Setup choice saved.", action === "scan" ? "pending" : "success");
+  } catch (error) {
+    message(error instanceof RequestError && error.status === 400 && action === "scan"
+      ? "Check the private IP or IPv4 /23–/32 network and SSH port (1–65535), then search again."
+      : error instanceof RequestError && error.status === 409 ? "Setup changed in another window. Showing the latest state; try again."
+        : error instanceof Error ? error.message : "Setup failed.", "failure");
+    if (error instanceof RequestError && error.status === 409) { actionPending = false; await refresh(); }
+  } finally { actionPending = false; if (current) renderSearch(current); }
 }
+function renderSearch(view: SetupView): void {
+  const updateText = (id: string, value: string) => { const node = el(id); if (node.textContent !== value) node.textContent = value; };
+  const visible = ["scan", "scanning", "select", "done"].includes(view.phase), searching = view.phase === "scanning";
+  el("network-search").hidden = !visible;
+  const range = el<HTMLInputElement>("network-range"), port = el<HTMLInputElement>("ssh-port");
+  if (!rangeTouched && (!searchInitialized || !range.value)) range.value = view.scan?.range ?? view.network?.suggestedRange ?? "";
+  if (!portTouched && !searchInitialized) port.value = String(view.scan?.port ?? 22);
+  searchInitialized = true;
+  range.disabled = searching || actionPending; port.disabled = searching || actionPending;
+  el<HTMLButtonElement>("search-network").disabled = searching || actionPending;
+  const cancel = el<HTMLButtonElement>("cancel-search"); cancel.hidden = !searching; cancel.disabled = actionPending;
+  updateText("search-location", view.network
+    ? `Search runs on ${view.network.backendName} (${view.network.backendAddress}), over that computer's existing network or VPN—not on this browser or phone.`
+    : "Search runs on the backend computer over its existing network or VPN—not on this browser or phone.");
+  updateText("network-suggestion", view.network?.suggestedRange
+    ? `Suggested network: ${view.network.suggestedRange}, from the backend computer's settings checked ${new Date(view.network.verifiedAtMs).toLocaleString()}. You can choose another private range.`
+    : "No network suggestion has been verified. Enter the private address or network you want this backend to search.");
+  const scan = view.scan, progress = el<HTMLProgressElement>("scan-progress"), status = el("scan-status");
+  progress.hidden = !searching;
+  if (scan) {
+    progress.max = Math.max(1, scan.total); progress.value = Math.min(scan.completed, progress.max);
+    const counts = `${scan.completed} of ${scan.total} addresses checked · ${scan.found} computers found`;
+    updateText("scan-status", searching ? counts : scan.status === "failed" ? "Search could not finish. Check the range and connection, then search again."
+      : scan.status === "cancelled" ? `Search cancelled · ${counts}` : scan.found === 0
+        ? "Search complete. No SSH computers found. Check the network or SSH port, then search again." : `Search complete · ${scan.found} computers found.`);
+    status.className = scan.status === "failed" ? "failure" : searching || scan.status === "cancelled" || scan.found === 0 ? "pending" : "success";
+  } else { updateText("scan-status", searching ? "Searching for SSH computers…" : ""); status.className = "pending"; progress.removeAttribute("value"); }
+  const searchExclusions = view.phase === "done" ? [] : view.exclusions;
+  const exclusions = el("scan-exclusions"), signature = JSON.stringify(searchExclusions);
+  if (exclusions.dataset.signature !== signature) {
+    exclusions.dataset.signature = signature; exclusions.replaceChildren();
+    if (searchExclusions.length) {
+      const details = document.createElement("details"); details.append(text("summary", `Search details · ${searchExclusions.length} exclusions or incomplete checks`));
+      for (const value of searchExclusions) details.append(text("p", value, "pending")); exclusions.append(details);
+    }
+  }
+}
+el("network-range").addEventListener("input", () => { rangeTouched = true; });
+el("ssh-port").addEventListener("input", () => { portTouched = true; });
+el("network-search-form").addEventListener("submit", event => {
+  event.preventDefault(); void act("scan", { range: el<HTMLInputElement>("network-range").value.trim(), port: Number(el<HTMLInputElement>("ssh-port").value) });
+});
+el("cancel-search").addEventListener("click", () => { void act("cancel-scan"); });
 function render(view: SetupView): void {
-  if (JSON.stringify(view) === lastSignature) return;
   const sameSelection = current?.phase === "select" && view.phase === "select";
-  current = view; lastSignature = JSON.stringify(view);
+  current = view; renderSearch(view);
+  // Polls may advance the revision or terminal heartbeat while a person types.
+  // Rebuild a step only when its visible content changes, preserving input/focus.
+  const signature = JSON.stringify({ phase: view.phase, computers: view.computers, selected: view.selected, trusted: view.trusted,
+    automaticIp: view.automaticIp, fullMonitoring: view.fullMonitoring, exclusions: view.exclusions, savedHosts: view.savedHosts,
+    inspectedPcs: view.inspectedPcs, monitoringStatus: view.monitoringStatus, terminalConnected: view.phase === "credentials" ? view.terminalConnected : undefined,
+    reconnect: view.phase === "credentials" ? view.network?.releaseTag : undefined });
+  if (signature === lastSignature) return;
+  lastSignature = signature;
   if (!sameSelection) selected = new Set(view.selected);
   el("login").hidden = true; el("setup").hidden = false;
   const step = el("step"); step.replaceChildren();
   const title = el("step-title"), description = el("step-description");
   if (view.phase === "scan" || view.phase === "scanning") {
     title.textContent = "Search from the backend computer";
-    description.textContent = "The terminal scans the private network you choose, from the backend computer over its existing network or VPN. GridLens does not change VPN settings or guess a reachable network.";
-    step.append(text("p", view.phase === "scanning" ? "Searching for SSH services…" : "In the setup terminal, enter a private IP or network to start the scan.", "pending"));
+    description.textContent = "Choose the private network above and select Search network. GridLens finds computers offering SSH; finding a computer does not yet verify a Nosana host.";
+    step.append(text("p", view.phase === "scanning" ? "Search is running. Results will appear here when it finishes." : "Choose computers from the results, then confirm their SSH identities once.", "pending"));
   } else if (view.phase === "select") {
     title.textContent = "Choose computers once"; description.textContent = "Filter by part of an IP address or name. Your selections remain selected when the filter changes.";
     const label = text("label", "Find a computer", "field"); const input = document.createElement("input"); input.type = "search";
     input.value = filtering; input.placeholder = "Name or partial IP"; label.append(input); step.append(label);
     const count = text("p", "", "count"); count.setAttribute("aria-live", "polite"); step.append(count);
     const list = text("div", "", "results"); step.append(list);
+    if (!view.computers.length) step.append(text("p", "No computers to select. Change the network or SSH port above and search again.", "pending"));
     const complete = button("Selection complete", () => { void act("select", { selected: [...selected] }); }, true);
     const repaintCount = () => { const matches = view.computers.filter(matchesFilter).length; count.textContent = `${selected.size} selected · ${matches} matching computers`; complete.disabled = selected.size === 0; };
     const matchesFilter = (computer: SetupComputer) => `${computer.name} ${computer.host}`.toLowerCase().includes(filtering.trim().toLowerCase());
@@ -82,7 +150,12 @@ function render(view: SetupView): void {
     step.append(button("Confirm these new identities", () => { void act("trust"); }, true));
   } else if (view.phase === "credentials") {
     title.textContent = "Sign in using the terminal"; description.textContent = "Return to the setup terminal to choose your SSH key or computer password. Key files, passphrases, passwords and sudo input stay out of this browser.";
-    step.append(text("p", "Waiting for terminal sign-in…", "pending"));
+    step.append(text("p", view.terminalConnected ? "The setup terminal is connected and ready for computer sign-in. Enter the requested details there."
+      : `The setup terminal is not connected. On ${view.network?.backendName ?? "the backend computer"}, run the updated GridLens installer with --vpn-web and keep that terminal open. It will guide computer sign-in.`, "pending"));
+    if (!view.terminalConnected && view.network?.releaseTag && /^modern-v\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(view.network.releaseTag)) {
+      const command = text("p", ""); command.append(text("code", `bash <(curl -fsSL https://github.com/MachoDrone/gridlens-typescript/releases/download/${view.network.releaseTag}/modern-start.sh) --vpn-web`));
+      step.append(command);
+    }
   } else if (view.phase === "review") {
     title.textContent = "Inspect selected computers"; description.textContent = "Every verified Nosana host found on the chosen computers will be saved automatically. Incomplete checks stay visible in the results.";
     const full = document.createElement("input"); full.type = "checkbox";
@@ -153,24 +226,24 @@ el("new-code").addEventListener("click", () => { void api<{ code: string; expire
   })
   .catch(() => message("Connection code could not be created.", "failure")); });
 async function refresh(): Promise<void> {
-  if (signingIn || refreshing) return;
+  if (signingIn || refreshing || actionPending) return;
   refreshing = true;
-  const revision = signInRevision;
+  const revision = signInRevision, action = actionRevision;
   try {
     const status = await api<{ role: string; serverId: string }>("status");
-    if (revision !== signInRevision) return;
+    if (revision !== signInRevision || action !== actionRevision) return;
     connected = true; el("login").hidden = true;
     if (status.role === "operator") {
       const view = await api<SetupView>("setup");
-      if (revision !== signInRevision) return;
+      if (revision !== signInRevision || action !== actionRevision) return;
       render(view); if (!privateNetwork && el("devices").hidden) await devices(); if (el("monitoring").hidden) await monitoring();
     }
-    else { el("setup").hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
+    else { el("setup").hidden = true; el("network-search").hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
   } catch (error) {
-    if (revision !== signInRevision) return;
+    if (revision !== signInRevision || action !== actionRevision) return;
     if (error instanceof RequestError && [401, 403].includes(error.status)) connected = false;
     el("login").hidden = privateNetwork;
-    for (const id of ["setup", "devices", "monitoring"]) el(id).hidden = true;
+    for (const id of ["setup", "network-search", "devices", "monitoring"]) el(id).hidden = true;
     lastSignature = "";
     message(error instanceof RequestError && [401, 403].includes(error.status)
       ? privateNetwork ? "Private-network access is disabled. Contact the backend operator." : "Open the sign-in link shown by GridLens setup, or enter its connection code below."

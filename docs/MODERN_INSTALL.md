@@ -3,10 +3,10 @@
 The modern backend is separate from the loopback developer preview and the legacy
 installer. Its TypeScript terminal coordinator manages a single collection owner
 and an unprivileged HTTPS gateway on a chosen PC, which may also run Nosana. This
-source revision prepares the next development installer candidate, **0.1.0-dev.4**.
-Published **0.1.0-dev.3** includes the address-selection, TLS-default and
-endpoint-recovery changes. The private-network access change below is the dev.4
-candidate; earlier published releases remain immutable.
+source revision implements development update **0.1.0-dev.5**. Published dev.4
+provides direct private-network browser access. This update adds browser-owned
+network search and a continuous terminal handoff for credentials and inspection;
+earlier published releases remain immutable.
 The source `scripts/modern-start.sh` intentionally refuses to run until the release
 builder supplies a tested executable checksum and pinned GitHub release tag.
 
@@ -44,6 +44,37 @@ re-pairing browsers. Reruns retain it and cannot revive a revoked grant. Explici
 monitoring approvals and terminal-only SSH/password entry remain required.
 Native Android's separate HTTPS pairing, device revocation and exact roster
 authorization are unchanged. HTTPS browser access also retains its pairing flow.
+
+### Search and add computers
+
+Open **Search network** above the Fleet table. Search runs on the chosen backend
+PC over its existing LAN/VPN, regardless of which browser or phone opened the page.
+The installer supplies the backend's name/address and a suggestion only from the
+actual assigned host interface. A container bridge or browser address is not used
+to guess the LAN. Edit the private IP/network if needed and choose **Search
+network**. SSH defaults to port 22; another port is available under the search
+options. The existing single-IP or IPv4 /23–/32 limit remains 512 addresses, with
+eight probes at once and the same per-probe timeout.
+
+The browser shows progress and found counts while a background search runs. Cancel,
+retry and rescan are available. Search cannot change saved telemetry membership,
+grant SSH access or replace a changed saved identity. Filter the one computer list
+by partial IP/name, select the computers, choose **Selection complete**, then review
+only new SSH identities. Empty searches give a retry path.
+
+Keep the installer terminal open while using the browser. Once computers and
+identities are selected, that terminal asks for the computer username and password
+or SSH key, optional sudo credentials, and encrypted credential retention. These
+values are never requested in the web page. The browser shows whether the setup
+terminal is connected and provides the matching installer command if reconnection
+is needed. After sign-in, choose **Inspect + automatic IP** or **Inspect only** in
+the browser; full rewards/GPU monitoring still has a separate checkbox. The waiting
+terminal performs the approved inspection and the browser shows saved-host counts
+and exclusions. A completed setup returns the terminal to its shell. Later scans
+can add computers without overwriting existing coverage.
+
+`--connect` prints the permanent private address and exits; `--no-setup` skips the
+guided terminal session for automation. `--ssh-sign-in` reconnects that session.
 
 ### HTTPS access
 
@@ -124,8 +155,8 @@ Additional coordinator actions reuse the same installed instance:
 ```
 
 Use only an explicitly chosen network range. Scanning occurs on the backend PC.
-Select computers and approve new SSH identities in browser setup, then use
-`--ssh-sign-in` in the terminal for a key file/passphrase or computer password.
+Select computers and approve new SSH identities in browser setup, then use the
+waiting installer terminal for a key file/passphrase or computer password.
 Computer sudo passwords are also entered in that terminal when needed. Keep the
 terminal open while browser approval and inspection complete; after fleet coverage
 changes it prints a new operator connection code for the new roster revision.

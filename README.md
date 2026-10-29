@@ -14,10 +14,12 @@ collection, authenticated HTTPS, browser setup and optional Android pairing.
 Its [modern Docker installer](docs/MODERN_INSTALL.md) is separate from the legacy
 installer and this developer preview. Isolated Docker acceptance passed on an
 authorized Nosana host, including HTTPS, cache sharing and recovery. Development
-release **0.1.0-dev.3** is published, including private-address choices, installer
-recovery and opt-in browser access over an existing LAN/VPN (`--vpn-web`). The
-pending **0.1.0-dev.4** candidate removes browser pairing and expiring links in
-that mode: open the ordinary dashboard address. Anyone who can reach that private
+release **0.1.0-dev.4** provides private-address choices, installer recovery and
+direct browser access over an existing LAN/VPN (`--vpn-web`): open the ordinary
+dashboard address. The **0.1.0-dev.5** update adds a prominent browser **Search
+network** action with progress, cancellation, retry and computer selection. The
+installer stays open to handle computer credentials and approved inspection.
+Anyone who can reach that private
 address has access to its configured fleet. HTTP LAN traffic is unencrypted;
 the existing HTTPS endpoint and Android pairing remain available separately.
 Physical reboot, GPU recorder lifecycle and physical-phone acceptance remain

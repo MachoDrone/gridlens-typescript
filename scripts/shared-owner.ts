@@ -13,17 +13,18 @@ export async function startSharedOwner(environment: Readonly<Record<string, stri
   let vault: ReturnType<typeof openCredentialVault> | undefined;
   let collector: ReturnType<typeof createSharedCollector> | undefined;
   let monitor: ReturnType<typeof createPcMonitor> | undefined;
+  let service: ReturnType<typeof createSharedService> | undefined;
   const sockets: Server[] = [];
   let stopping: Promise<void> | undefined;
   const close = (): Promise<void> => stopping ??= (async () => {
     // Stop admission before closing the ledger; cleanup preserves the original startup error.
-    await Promise.allSettled([collector?.stop(), monitor?.stop()]);
+    await Promise.allSettled([collector?.stop(), monitor?.stop(), service?.setup.close()]);
     await Promise.all(sockets.map(server => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); })));
     try { await state.close(); } finally { vault?.close(); }
   })();
   try {
     vault = openCredentialVault(environment.GRIDLENS_CREDENTIAL_DIR ?? "/credentials");
-    const service = createSharedService(state, { vault, requestHistory: (...args) => collector!.requestHistory(...args),
+    service = createSharedService(state, { vault, requestHistory: (...args) => collector!.requestHistory(...args),
       providerWaits: () => [...collector!.providerWaits(), ...monitor!.providerWaits()] });
     collector = createSharedCollector({ state, contexts: service.access.contexts,
       onError: () => console.error("A shared collection cycle could not complete; dated cache retained.") });

@@ -33,23 +33,48 @@ export function scanAddresses(range: string): string[] {
   if (addresses.some(value => !privateIp(value))) throw new Error("Scanning requires an explicit private network.");
   return addresses;
 }
-export function probeComputer(host: string, port = 22): Promise<Computer | null> {
+export function probeComputer(host: string, port = 22, signal?: AbortSignal): Promise<Computer | null> {
   if (!isIP(host) || !privateIp(host) || !Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid SSH scan target.");
+  if (signal?.aborted) return Promise.resolve(null);
   return new Promise(resolve => {
-    const client = new Client(); let result: Computer | null = null;
-    const timer = setTimeout(() => { client.destroy(); resolve(result); }, 4000);
-    client.on("error", () => {}); client.on("close", () => { clearTimeout(timer); resolve(result); });
+    const client = new Client(); let result: Computer | null = null, settled = false;
+    const finish = (value: Computer | null): void => {
+      if (settled) return; settled = true; clearTimeout(timer); signal?.removeEventListener("abort", abort); resolve(value);
+    };
+    const abort = (): void => { finish(null); client.destroy(); };
+    const timer = setTimeout(() => { finish(result); client.destroy(); }, 4000);
+    signal?.addEventListener("abort", abort, { once: true });
+    client.on("error", () => {}); client.on("close", () => finish(result));
     client.connect({ host, port, username: "gridlens-identity-probe", readyTimeout: 3500,
       hostVerifier(key: Buffer) { result = { id: pcId(key), host, port, name: host, fingerprint: fingerprint(key), hostKey: key.toString("base64") }; return false; } });
   });
 }
-export async function scanComputers(range: string, port = 22): Promise<Computer[]> {
+export interface ScanProgress { total: number; completed: number; found: number }
+export interface ScanOptions {
+  signal?: AbortSignal;
+  onProgress?: (progress: ScanProgress) => void;
+  /** Injected only by isolated tests; browser requests cannot select a probe. */
+  probe?: typeof probeComputer;
+}
+export async function scanComputers(range: string, port = 22, options: ScanOptions = {}): Promise<Computer[]> {
+  if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error("Invalid SSH scan port.");
   const remaining = scanAddresses(range), found: Computer[] = [];
-  await Promise.all(Array.from({ length: Math.min(8, remaining.length) }, async () => {
-    while (remaining.length) { const host = remaining.shift()!; const result = await probeComputer(host, port); if (result) found.push(result); }
-  }));
-  const ids = new Set<string>();
-  return found.filter(row => { if (ids.has(row.id)) return false; ids.add(row.id); return true; }).sort((a, b) => a.host.localeCompare(b.host, undefined, { numeric: true }));
+  const controller = new AbortController();
+  const signal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+  const total = remaining.length, ids = new Set<string>(); let completed = 0;
+  signal.throwIfAborted(); options.onProgress?.({ total, completed, found: 0 });
+  const workers = Array.from({ length: Math.min(8, remaining.length) }, async () => {
+    while (remaining.length) {
+      signal.throwIfAborted(); const host = remaining.shift()!;
+      const result = await (options.probe ?? probeComputer)(host, port, signal);
+      signal.throwIfAborted();
+      if (result && !ids.has(result.id)) { ids.add(result.id); found.push(result); }
+      completed++; options.onProgress?.({ total, completed, found: found.length });
+    }
+  });
+  try { await Promise.all(workers); }
+  catch (error) { controller.abort(); await Promise.allSettled(workers); throw error; }
+  return found.sort((a, b) => a.host.localeCompare(b.host, undefined, { numeric: true }));
 }
 export async function withSsh<T>(computer: Computer, credential: SshCredential, work: (run: SshRun) => Promise<T>): Promise<T> {
   const client = new Client(), expected = Buffer.from(computer.hostKey, "base64");
