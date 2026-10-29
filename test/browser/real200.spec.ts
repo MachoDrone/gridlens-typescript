@@ -124,9 +124,12 @@ test("Real200 renders its 200 supplied addresses and routes every data feed to o
   await expect(page.locator("#input-error")).toBeHidden();
   expect(await addresses(page)).toEqual(real200Hosts);
   expect(await page.locator('#scenario > option[value="real200"]').textContent()).toBe("Real200");
-  expect(await page.locator('#fleet-rows td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"])').allTextContents()).toEqual(Array(200 * 23).fill("—"));
+  expect(await page.locator('#fleet-rows td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"]):not([data-col="ip"])').allTextContents()).toEqual(Array(200 * 22).fill("—"));
+  await expect(page.locator('#fleet-rows td[data-col="ip"]')).toHaveText(Array(200).fill("•"));
+  await expect(page.locator('#fleet-rows td[data-col="ip"].unknown')).toHaveCount(200);
   await expect(page.locator('.job-summary-link')).toHaveText(Array(200).fill("—"));
-  await expect(page.locator('.job-summary-state')).toHaveText(Array(200).fill("Unknown"));
+  await expect(page.locator('.job-summary-state')).toHaveCount(0);
+  await expect(page.locator('.jobs-cell[aria-label="Jobs: unknown"]')).toHaveCount(200);
   await expect(page.locator('.job-history-row')).toHaveCount(0);
   expect(await page.locator('#fleet-rows td[data-col="api"]').allTextContents()).toEqual(Array(200).fill("Populating.."));
   const unknownStates = page.locator('#fleet-rows td[data-col="state"][data-state="unknown"][data-state-current="false"]');

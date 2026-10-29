@@ -102,7 +102,9 @@ test("on-demand drawers preserve compact rows, lifecycle/result, cache and focus
     }
   }
   expect(await hostRow(page).evaluate(element => element.getBoundingClientRect().height)).toBe(34);
-  await expect(hostRow(page).locator(".job-summary-state")).toHaveText("Completed · seen");
+  await expect(hostRow(page).locator(".job-summary-state")).toHaveCount(0);
+  await expect(hostRow(page).locator(".jobs-cell")).not.toContainText(/\b(?:Completed|seen|Unknown|Sample)\b/);
+  await expect(hostRow(page).locator(".jobs-cell")).toHaveAttribute("aria-label", /Lifecycle: Completed\. Last observed job; current activity is not confirmed\. Checked/);
   await page.locator("#queued-duration-layout-toggle").click();
   await expect(panel(page).locator(":scope > td")).toHaveAttribute("colspan", "28");
   await page.locator("#queued-duration-layout-toggle").click();
@@ -278,12 +280,15 @@ test("current assignment stays the compact summary and historical results do not
   } }));
   await page.goto("/");
   await expect(hostRow(page).locator(".job-summary-link")).toHaveAttribute("href", `https://explore.nosana.com/jobs/${currentAddress}`);
-  await expect(hostRow(page).locator(".job-summary-state")).toHaveText("Running");
+  await expect(hostRow(page).locator(".job-summary-state")).toHaveCount(0);
+  await expect(hostRow(page).locator(".jobs-cell")).not.toContainText(/\b(?:Running|seen)\b/);
+  await expect(hostRow(page).locator(".jobs-cell")).toHaveAttribute("aria-label", /Lifecycle: Running\. Current verified assignment\. Checked/);
   const state = await hostRow(page).locator('td[data-col="state"]').getAttribute("data-state");
   const duration = await hostRow(page).locator('td[data-col="duration"]').getAttribute("data-job-address");
   await open(page);
   await expect(hostRow(page).locator(".job-summary-link")).toHaveAttribute("href", `https://explore.nosana.com/jobs/${currentAddress}`);
-  await expect(hostRow(page).locator(".job-summary-state")).toHaveText("Running");
+  await expect(hostRow(page).locator(".jobs-cell")).not.toContainText(/\b(?:Running|seen)\b/);
+  await expect(hostRow(page).locator(".jobs-cell")).toHaveAttribute("aria-label", /Current verified assignment/);
   const running = panel(page).locator(`.job-history-table tbody > tr[data-job="${currentAddress}"]`);
   await expect(running.locator(".job-history-status-label")).toHaveText("RUNNING");
   await expect(running.locator(".job-history-status")).toHaveAttribute("data-current", "true");
@@ -335,6 +340,10 @@ test("historical running and unknown results stay explicit without inventing cur
   await page.goto("/");
   await open(page);
   const item = (index: number) => panel(page).locator(`.job-history-table tbody > tr[data-job="${jobAddress(index)}"]`);
+  await expect(hostRow(page).locator(".job-summary-state")).toHaveCount(0);
+  await expect(hostRow(page).locator(".jobs-cell")).not.toContainText(/\b(?:Running|seen)\b/);
+  await expect(hostRow(page).locator(".jobs-cell")).toHaveAttribute("aria-label", /Lifecycle: Running\. Last observed job; current activity is not confirmed\. Checked/);
+  await expect(hostRow(page).locator(".job-summary-link")).toHaveAttribute("href", `https://explore.nosana.com/jobs/${jobAddress(0)}`);
   await expect(item(0).locator(".job-history-status-label")).toHaveText("RUNNING");
   await expect(item(0).locator(".job-history-status")).toHaveAttribute("data-current", "false");
   await expect(item(0).locator(".job-history-status-note")).toContainText("Last reported");

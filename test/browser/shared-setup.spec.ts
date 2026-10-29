@@ -8,22 +8,6 @@ async function connectPage(page: Page): Promise<void> {
   await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
 }
 
-test("installed Fleet exposes Manage computers above the table on a phone", async ({ page }) => {
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.route("http://127.0.0.1:4174/", async route => {
-    const response = await route.fetch();
-    await route.fulfill({ response, body: (await response.text()).replace("</head>", '<meta name="gridlens-shared-backend" content="1"></head>') });
-  });
-  await page.route("**/api/shared/**", route => route.fulfill({ status: 401, json: {} }));
-  await page.goto("/");
-  const search = page.getByRole("link", { name: "Manage computers", exact: true });
-  await expect(search).toBeVisible(); await expect(search).toHaveAttribute("href", "/setup");
-  const action = await search.boundingBox(), table = await page.locator(".fleet-table-wrap").boundingBox();
-  expect(action!.height).toBeGreaterThanOrEqual(44); expect(action!.y + action!.height).toBeLessThanOrEqual(table!.y);
-  expect(action!.x + action!.width).toBeLessThanOrEqual(390);
-  await search.focus(); await expect(search).toBeFocused();
-});
-
 for (const width of [1280, 390]) test(`terminal setup is read-only in the browser through every phase at ${width}px`, async ({ page }) => {
   await page.clock.install(); await page.setViewportSize({ width, height: 900 });
   let phase = "scan", revision = 1;

@@ -47,7 +47,7 @@ Reruns cannot revive a revoked gateway grant.
 
 ### Manage computers in the browser
 
-Open **Manage computers** above Fleet. Saved PCs show their host counts and
+Open **Hosts** in the left menu. Saved PCs show their host counts and
 monitoring status, with **Update sign-in** and **Remove** actions. To find PCs,
 open **Search network**, accept or edit the verified network suggestion, then
 start the search. The page identifies the backend PC doing the search.
@@ -174,7 +174,7 @@ an operational follow-up before a long-lived release.
 The installer creates the initial empty `default` fleet. Separately paired HTTPS
 access retains its short-lived operator connection code; this is independent of
 the no-code private-VPN browser address. Computer selection, sign-in and monitoring
-approval happen in browser Manage computers and remain separate from cache reads.
+approval happen in browser Hosts management and remain separate from cache reads.
 
 Additional coordinator actions reuse the same installed instance:
 

@@ -138,7 +138,7 @@ test("hardware preferences persist independently across reloads, other settings 
   await toggle(page, "nvidia").click();
   await toggle(page, "system").click();
   for (const label of ["IP", "Duration", "Market"]) {
-    await page.getByRole("button", { name: `Toggle ${label} display`, exact: true }).click();
+    await (label === "IP" ? page.locator("#ip-display-toggle") : page.getByRole("button", { name: `Toggle ${label} display`, exact: true })).click();
   }
   await page.getByRole("button", { name: "Sort by CPU", exact: true }).click();
   await page.reload();
@@ -146,7 +146,7 @@ test("hardware preferences persist independently across reloads, other settings 
   await expect(toggle(page, "nvidia")).toHaveAttribute("data-mode", "expanded");
   await expect(toggle(page, "cpu")).toHaveAttribute("data-mode", "compact");
   await expect(toggle(page, "system")).toHaveAttribute("data-mode", "expanded");
-  await expect(page.getByRole("button", { name: "Toggle IP display", exact: true })).toHaveAttribute("data-mode", "full");
+  await expect(page.getByRole("button", { name: /^Toggle IP display/ })).toHaveAttribute("data-mode", "full");
   await expect(page.getByRole("button", { name: "Toggle Duration display", exact: true })).toHaveAttribute("data-mode", "text");
   await expect(page.getByRole("button", { name: "Toggle Market display", exact: true })).toHaveAttribute("data-mode", "compact");
   await expect(page.locator('#column-headings th[data-col="cpu"]')).toHaveAttribute("aria-sort", "ascending");

@@ -19,7 +19,7 @@ direct browser access over an existing LAN/VPN (`--vpn-web`): open the ordinary
 dashboard address. The **0.1.0-dev.8** update keeps installation short and explains
 what the PC address and web port mean, how to accept their defaults, and what to
 do next. The CLI retains meaningful colors and spacing.
-Browser **Manage computers** leads from search results to computer selection,
+The left-menu **Hosts** action opens browser PC management, leading from search results to computer selection,
 **Add Selected PCs** below the list, and sign-in using a password or SSH private-key
 file. Rewards/GPU monitoring is checked by default and can be turned off before
 submitting setup. Results clearly lead to the primary **Open Fleet** action.
@@ -33,6 +33,13 @@ by the backend owner. The existing HTTPS endpoint and
 Android pairing remain available separately.
 Physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
 separate.
+
+The dev.9 display update keeps Hosts inside the existing sidebar width, including
+its icon-only collapsed state. IP display follows Android's six views: hidden,
+both full addresses, public full, public last octet, private full, private last
+octet. Changing it redraws only IP cells and starts no requests. Compact Jobs cells
+show the job link and expansion control; lifecycle and observation times remain
+in accessible labels and expanded details.
 
 **Country** appears after System at the right edge of Fleet. It reuses the country
 reported in existing Nosana metrics, with a saved header toggle between compact
@@ -100,14 +107,14 @@ GRIDLENS_REAL200_HOSTS_FILE=/absolute/path/to/real200.json \
 npm run dev
 ```
 
-Select **Scenario → Real200**, or open
+Select **Real200** in the preview data selector, or open
 [http://127.0.0.1:4173/?scenario=real200](http://127.0.0.1:4173/?scenario=real200).
 The name does not require 200 addresses; the table shows the actual count.
 Only the selected live roster is requested. Both lists and all viewers share
 upstream caches and request budgets within that server process.
 
 **Online GPU Hosts** is an automatically maintained live scenario. Select it in
-Scenario, or open
+the preview data selector, or open
 [Online GPU Hosts](http://127.0.0.1:4173/?scenario=online-gpu-hosts).
 The preview reads the public Nosana indexer's complete queued-host and
 running-host lists as candidates, without API keys or wallet access. Candidate
@@ -116,7 +123,7 @@ The table shows only candidates with a current, successful **API Online** check
 (the existing 30-second proof window). Offline, unconfirmed and expired results
 stay outside the table; their bounded checks continue so recovered hosts can
 reappear automatically. The host count reflects the confirmed subset, and the
-notice below Scenario also shows the candidate count. Address changes require no file
+notice below the preview data selector also shows the candidate count. Address changes require no file
 preparation, rebuild or restart. The existing two host files remain independent.
 
 Explorer's queued-or-running total can include abandoned hosts with old job
@@ -151,7 +158,7 @@ rehearsal uses synthetic snapshots with the same UI and portable gateway. It
 requires no host files and makes no public-provider requests. Its access resolver
 is a local demonstration, not production authentication.
 
-The live preview's **Scenario** selector also includes isolated synthetic examples
+The live preview's data selector also includes isolated synthetic examples
 for fresh, stale, failed, missing and 200-host views. Synthetic readings never
 enter live rosters or stores.
 

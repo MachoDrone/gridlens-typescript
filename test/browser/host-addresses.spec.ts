@@ -104,10 +104,13 @@ test("the default supplied file renders eight Explorer links and leaves every ot
   for (const address of SYNTHETIC_HOST_ADDRESSES) {
     const row = page.locator(`#fleet-rows [data-host="${address}"]`);
     await expect(row.locator("td[data-col]")).toHaveCount(28);
-    expect(await row.locator('td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"])').allTextContents()).toEqual(Array(23).fill("—"));
+    expect(await row.locator('td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"]):not([data-col="ip"])').allTextContents()).toEqual(Array(22).fill("—"));
+    await expect(row.locator('td[data-col="ip"]')).toHaveText("•");
+    await expect(row.locator('td[data-col="ip"]')).toHaveClass("unknown");
     await expect(row.locator('.job-summary-link')).toHaveText("—");
     await expect(row.locator('.job-summary-link')).not.toHaveAttribute("href");
-    await expect(row.locator('.job-summary-state')).toHaveText("Unknown");
+    await expect(row.locator('.job-summary-state')).toHaveCount(0);
+    await expect(row.locator('.jobs-cell')).toHaveAttribute("aria-label", "Jobs: unknown");
     await expect(row.locator('.jobs-expand')).toHaveAttribute("aria-expanded", "false");
     await expect(row.locator('td[data-col="api"]')).toHaveText("Populating..");
     const state = row.locator('td[data-col="state"]');
@@ -169,9 +172,9 @@ test("supplied addresses stay separate from samples and refresh never reloads or
   await openPreviewTools(page);
   await expect(page.locator("#host-count")).toHaveText("8 hosts");
   await page.getByRole("button", { name: "Refresh view", exact: true }).click();
-  await page.getByRole("button", { name: "Toggle IP display", exact: true }).click();
+  await page.getByRole("button", { name: /^Toggle IP display/ }).click();
   await page.getByRole("button", { name: "Toggle Market display", exact: true }).click();
-  expect(await page.locator('#fleet-rows td[data-col="ip"]').allTextContents()).toEqual(Array(8).fill("—"));
+  expect(await page.locator('#fleet-rows td[data-col="ip"]').allTextContents()).toEqual(Array(8).fill("− / −"));
   expect(await page.locator('#fleet-rows td[data-col="market"]').allTextContents()).toEqual(Array(8).fill("—"));
   await page.getByLabel("Scenario", { exact: true }).selectOption("mixed");
   await expect(page.locator("#host-count")).toHaveText("6 hosts");
@@ -184,9 +187,12 @@ test("supplied addresses stay separate from samples and refresh never reloads or
   await expect(page.locator("#host-count")).toHaveText("8 hosts");
   expect(await addresses(page)).toEqual(SYNTHETIC_HOST_ADDRESSES);
   await expect(page.getByText("Sample data", { exact: true })).toBeHidden();
-  expect(await page.locator('#fleet-rows td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"])').allTextContents()).toEqual(Array(8 * 23).fill("—"));
+  expect(await page.locator('#fleet-rows td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"]):not([data-col="ip"])').allTextContents()).toEqual(Array(8 * 22).fill("—"));
+  await expect(page.locator('#fleet-rows td[data-col="ip"]')).toHaveText(Array(8).fill("− / −"));
+  await expect(page.locator('#fleet-rows td[data-col="ip"].unknown')).toHaveCount(8);
   await expect(page.locator('.job-summary-link')).toHaveText(Array(8).fill("—"));
-  await expect(page.locator('.job-summary-state')).toHaveText(Array(8).fill("Unknown"));
+  await expect(page.locator('.job-summary-state')).toHaveCount(0);
+  await expect(page.locator('.jobs-cell[aria-label="Jobs: unknown"]')).toHaveCount(8);
   const unknownStates = page.locator('#fleet-rows td[data-col="state"][data-state="unknown"][data-state-current="false"]');
   await expect(unknownStates.locator(".state-unknown .state-dots")).toHaveCount(8);
   await expect(unknownStates.getByRole("button", { name: /unknown/ })).toHaveCount(8);

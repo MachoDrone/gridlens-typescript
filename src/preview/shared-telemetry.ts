@@ -55,10 +55,9 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     finally { clearTimeout(timeout); controller = undefined; if (!document.hidden) timer = setTimeout(() => { void refresh(); }, 30_000); }
   }
   if (enabled) {
-    const link = document.createElement("a"); link.href = "/setup"; link.textContent = "Manage computers"; link.className = "shared-search-link";
-    const marker = document.createElement("nav"); marker.id = "shared-setup-actions"; marker.className = "shared-setup-actions"; marker.setAttribute("aria-label", "Computer setup");
-    const description = document.createElement("span"); description.textContent = "Add or change computers using the terminal setup.";
-    marker.append(link, description); document.querySelector(".fleet-title-row")?.after(marker);
+    const hostsLink = document.querySelector<HTMLAnchorElement>("#sidebar-hosts");
+    if (hostsLink) hostsLink.hidden = false;
+    document.querySelector<HTMLElement>(".scenario-controls")?.setAttribute("hidden", "");
     document.addEventListener("visibilitychange", () => { if (document.hidden) { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); }
       else { void refresh(); pumpHistory(); } });
     window.addEventListener("pagehide", () => { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); });
@@ -79,7 +78,7 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     sort(address: string, now: number) {
       const association = data?.associations.find(row => row.address === address), observation = data?.observations.find(row => row.address === address);
       const network = networkView(data?.networks.find(row => row.pcId === association?.binding.pcId) ?? observation, now);
-      return { pc: association?.name ?? "", ip: network.privateIp, rewards: rewardAtoms(rewardView(observation, now).amount) };
+      return { pc: association?.name ?? "", ip: network.privateIp ?? network.publicIp, rewards: rewardAtoms(rewardView(observation, now).amount) };
     },
     render(cell: HTMLTableCellElement, key: string, address: string, now: number, ipMode: IPDisplayMode): boolean {
       if (!enabled || !["pc", "ip", "rewards"].includes(key)) return false;
@@ -89,13 +88,16 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
       const value = key === "pc" ? association?.name ?? "—" : key === "ip" ? formatIPDisplay({ internal: network.privateIp, global: network.publicIp }, ipMode).text
         : reward.amount ? ((BigInt(reward.amount.replace(".", "")) + 500_000n) / 1_000_000n).toLocaleString() : "—";
       if (cell.textContent !== value) cell.textContent = value;
-      cell.className = value === "—" ? "unknown" : failed || key === "rewards" && !reward.current || key === "ip" && (network.privateRetained || network.publicRetained) ? "retained" : "";
+      const unknown = key === "ip" ? ipMode === "public-full" || ipMode === "ext" ? network.publicIp === null
+        : ipMode === "private-full" || ipMode === "int" ? network.privateIp === null : network.publicIp === null && network.privateIp === null
+        : value === "—";
+      cell.className = unknown ? "unknown" : failed || key === "rewards" && !reward.current || key === "ip" && (network.privateRetained || network.publicRetained) ? "retained" : "";
       cell.removeAttribute("title"); cell.removeAttribute("aria-label");
       if (key === "rewards" && reward.amount) { cell.style.color = "#0f5c2b"; cell.style.fontWeight = "400"; }
       else cell.style.removeProperty("color");
       if (key === "pc" || key === "ip") {
         const description = key === "pc" ? `${value}; verified computer association at ${association ? new Date(association.verifiedAtMs).toISOString() : "unknown"}`
-          : `Private ${network.privateIp ?? "unknown"}, public ${network.publicIp ?? "unknown"}. Public checked ${network.publicObservedAtMs ? new Date(network.publicObservedAtMs).toISOString() : "unknown"}; private checked ${network.privateObservedAtMs ? new Date(network.privateObservedAtMs).toISOString() : "unknown"}.`;
+          : `${formatIPDisplay({ internal: network.privateIp, global: network.publicIp }, ipMode).description} Public checked ${network.publicObservedAtMs ? new Date(network.publicObservedAtMs).toISOString() : "unknown"}; private checked ${network.privateObservedAtMs ? new Date(network.privateObservedAtMs).toISOString() : "unknown"}.`;
         cell.setAttribute("aria-label", description); cell.title = description;
       }
       return true;

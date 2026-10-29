@@ -1,7 +1,8 @@
 // Copyright (c) 2026 MachoDrone. MIT license; see LICENSE.
 // Saved compact and full IP display modes for the Fleet table.
 
-export type IPDisplayMode = "dot" | "full" | "ext" | "int";
+export type IPDisplayMode = "dot" | "full" | "public-full" | "ext" | "private-full" | "int";
+const IP_MODES: readonly IPDisplayMode[] = ["dot", "full", "public-full", "ext", "private-full", "int"];
 
 export interface IPAddresses {
   readonly internal: string | null;
@@ -9,30 +10,26 @@ export interface IPAddresses {
 }
 
 export function normalizeIPMode(value: unknown): IPDisplayMode {
-  return value === "dot" || value === "full" || value === "ext" || value === "int"
-    ? value : "dot";
+  return IP_MODES.find(mode => mode === value) ?? "dot";
 }
 
 export function nextIPMode(mode: IPDisplayMode): IPDisplayMode {
-  switch (mode) {
-    case "dot": return "full";
-    case "full": return "ext";
-    case "ext": return "int";
-    case "int": return "dot";
-  }
+  return IP_MODES[(IP_MODES.indexOf(mode) + 1) % IP_MODES.length]!;
 }
 
 export function ipModeLabel(mode: IPDisplayMode): string {
   switch (mode) {
     case "dot": return "hidden";
-    case "full": return "full global and internal";
-    case "ext": return "global last octet";
+    case "full": return "both full addresses";
+    case "public-full": return "external IP / NAT";
+    case "ext": return "external last octet";
+    case "private-full": return "internal IP";
     case "int": return "internal last octet";
   }
 }
 
 function compactAddress(value: string | null): string {
-  if (value === null) return "—";
+  if (value === null) return "−";
   const parts = value.split(".");
   const isIPv4 = parts.length === 4 && parts.every(part =>
     /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
@@ -51,13 +48,11 @@ export function formatIPDisplay(addresses: IPAddresses, mode: IPDisplayMode): {
 } {
   const internal = addresses.internal?.trim() || null;
   const global = addresses.global?.trim() || null;
-  if (mode === "dot") {
-    return internal !== null || global !== null
-      ? { text: "•", description: "IP addresses hidden." }
-      : { text: "—", description: "IP addresses not reported." };
-  }
-  const description = `Global: ${global ?? "not reported"}. Internal: ${internal ?? "not reported"}.`;
+  if (mode === "dot") return { text: "•", description: "IP addresses hidden." };
+  const description = `External/public: ${global ?? "not reported"}. Internal/private: ${internal ?? "not reported"}.`;
+  if (mode === "public-full") return { text: global ?? "−", description };
+  if (mode === "private-full") return { text: internal ?? "−", description };
   if (mode === "ext") return { text: compactAddress(global), description };
   if (mode === "int") return { text: compactAddress(internal), description };
-  return { text: [global, internal].filter(value => value !== null).join(" / ") || "—", description };
+  return { text: `${global ?? "−"} / ${internal ?? "−"}`, description };
 }

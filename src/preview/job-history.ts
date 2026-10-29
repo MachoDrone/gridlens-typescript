@@ -271,16 +271,13 @@ export function createJobHistoryView(options: Options) {
       link.className = "job-summary-link";
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      const status = document.createElement("span");
-      status.className = "job-summary-state";
-      cell.append(link, status);
+      cell.append(link);
     }
     const isExpanded = expanded.has(address);
     setText(toggleButton, isExpanded ? "▾" : "▸");
     toggleButton.setAttribute("aria-expanded", String(isExpanded));
     toggleButton.setAttribute("aria-label", `${isExpanded ? "Hide" : "Show"} recent jobs for ${address}`);
     const link = cell.querySelector<HTMLAnchorElement>(".job-summary-link")!;
-    const status = cell.querySelector<HTMLElement>(".job-summary-state")!;
     const reading = options.live() ? summary(address) : null;
     const id = reading?.job.address ?? sampleId ?? null;
     setText(link, id ? id.slice(0, 5) : "—");
@@ -292,11 +289,11 @@ export function createJobHistoryView(options: Options) {
       link.removeAttribute("aria-label");
     }
     const conflicting = reading !== null && historyStatus(reading.job, reading.current).label === "CONFLICT";
-    const label = reading ? `${conflicting ? "Conflict" : stateLabel(reading.job.state)}${reading.current ? "" : " · seen"}` : sampleId ? "Sample" : "Unknown";
-    setText(status, label);
-    status.dataset.current = String(reading?.current === true);
-    status.dataset.unknown = String(id === null);
-    cell.setAttribute("aria-label", reading ? `Job ${reading.job.address}. ${label}. Checked ${utc(reading.job.checkedAtMs)}.` : sampleId ? `Synthetic job ${sampleId}` : "Jobs: unknown");
+    const evidence = conflicting ? "Conflicting job evidence" : reading?.current
+      ? "Current verified assignment" : "Last observed job; current activity is not confirmed";
+    cell.setAttribute("aria-label", reading
+      ? `Job ${reading.job.address}. Lifecycle: ${stateLabel(reading.job.state)}. ${evidence}. Checked ${utc(reading.job.checkedAtMs)}.`
+      : sampleId ? `Synthetic job ${sampleId}` : "Jobs: unknown");
     const row = rows.get(address);
     if (row) toggleButton.setAttribute("aria-controls", row.id);
     else toggleButton.removeAttribute("aria-controls");

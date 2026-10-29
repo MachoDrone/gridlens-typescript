@@ -128,13 +128,13 @@ test("Market freshness is independent and display changes never renew its source
 test("Market preference persists separately from other displays and supports empty scenarios", async ({ page }) => {
   const toggle = page.getByRole("button", { name: "Toggle Market display", exact: true });
   await toggle.click();
-  await page.getByRole("button", { name: "Toggle IP display", exact: true }).click();
+  await page.getByRole("button", { name: /^Toggle IP display/ }).click();
   await page.getByRole("button", { name: "Toggle Duration display", exact: true }).click();
   await page.getByRole("button", { name: "Sort by Market", exact: true }).click();
   await page.reload();
   await openPreviewTools(page);
   await expect(toggle).toHaveAttribute("data-mode", "compact");
-  await expect(page.getByRole("button", { name: "Toggle IP display", exact: true })).toHaveAttribute("data-mode", "full");
+  await expect(page.getByRole("button", { name: /^Toggle IP display/ })).toHaveAttribute("data-mode", "full");
   await expect(page.getByRole("button", { name: "Toggle Duration display", exact: true })).toHaveAttribute("data-mode", "text");
   await expect(page.locator('#column-headings th[data-col="market"]')).toHaveAttribute("aria-sort", "ascending");
   expect(await page.evaluate(key => localStorage.getItem(key), marketPreferenceKey)).toBe("compact");
@@ -287,12 +287,12 @@ test("Duration System mode respects reduced motion without hiding measured progr
 test("Duration mode persists separately from IP mode and sorting, including empty scenarios", async ({ page }) => {
   await scenario(page, "durations");
   await page.getByRole("button", { name: "Toggle Duration display", exact: true }).click();
-  await page.getByRole("button", { name: "Toggle IP display", exact: true }).click();
+  await page.getByRole("button", { name: /^Toggle IP display/ }).click();
   await page.getByRole("button", { name: "Sort by Duration", exact: true }).click();
   await page.reload();
   await openPreviewTools(page);
   await expect(page.getByRole("button", { name: "Toggle Duration display", exact: true })).toHaveAttribute("data-mode", "text");
-  await expect(page.getByRole("button", { name: "Toggle IP display", exact: true })).toHaveAttribute("data-mode", "full");
+  await expect(page.getByRole("button", { name: /^Toggle IP display/ })).toHaveAttribute("data-mode", "full");
   await expect(page.locator('#column-headings th[data-col="duration"]')).toHaveAttribute("aria-sort", "ascending");
   expect(await page.evaluate(key => localStorage.getItem(key), durationPreferenceKey)).toBe("text");
   await scenario(page, "durations");
@@ -324,8 +324,8 @@ test("invalid or denied Duration storage leaves a working bar/text control", asy
   await expect(durationCell(page, 1)).toHaveText("2m / 10m");
 });
 
-test("IP toggle matches the reference cycle with dotted compact octets", async ({ page }) => {
-  const toggle = page.getByRole("button", { name: "Toggle IP display", exact: true });
+test("IP toggle matches Android's six modes with dotted compact octets and both missing slots", async ({ page }) => {
+  const toggle = page.getByRole("button", { name: /^Toggle IP display/ });
   const firstIP = page.locator('#fleet-rows [data-host="sample-host-1-1"] td[data-col="ip"]');
   const noGlobal = page.locator('#fleet-rows [data-pc="sample-03"] td[data-col="ip"]');
   await expect(toggle).toHaveAttribute("data-mode", "dot");
@@ -334,12 +334,20 @@ test("IP toggle matches the reference cycle with dotted compact octets", async (
   await toggle.click();
   await expect(toggle).toHaveAttribute("data-mode", "full");
   await expect(firstIP).toHaveText("198.51.100.200 / 192.0.2.10");
-  await expect(noGlobal).toHaveText("192.0.2.12");
+  await expect(noGlobal).toHaveText("− / 192.0.2.12");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("data-mode", "public-full");
+  await expect(firstIP).toHaveText("198.51.100.200");
+  await expect(noGlobal).toHaveText("−");
   await toggle.click();
   await expect(toggle).toHaveAttribute("data-mode", "ext");
   await expect(firstIP).toHaveText(".200");
-  await expect(noGlobal).toHaveText("—");
-  await expect(noGlobal).toHaveAttribute("aria-label", /Global: not reported/);
+  await expect(noGlobal).toHaveText("−");
+  await expect(noGlobal).toHaveAttribute("aria-label", /External\/public: not reported/);
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("data-mode", "private-full");
+  await expect(firstIP).toHaveText("192.0.2.10");
+  await expect(noGlobal).toHaveText("192.0.2.12");
   await toggle.click();
   await expect(toggle).toHaveAttribute("data-mode", "int");
   await expect(firstIP).toHaveText(".10");
@@ -356,12 +364,14 @@ test("keyboard IP toggles preserve full-address sorting and observation times", 
     Object.fromEntries(rows.map(row => [row.getAttribute("data-host"), row.getAttribute("data-observed-at")])));
   const original = await timestamps();
   const sort = page.getByRole("button", { name: "Sort by IP", exact: true });
-  const toggle = page.getByRole("button", { name: "Toggle IP display", exact: true });
+  const toggle = page.getByRole("button", { name: /^Toggle IP display/ });
   await sort.click();
   await toggle.focus();
   await page.keyboard.press("Enter");
   await expect(toggle).toBeFocused();
   await expect(toggle).toHaveAttribute("data-mode", "full");
+  await page.keyboard.press("Space");
+  await expect(toggle).toHaveAttribute("data-mode", "public-full");
   await page.keyboard.press("Space");
   await expect(toggle).toHaveAttribute("data-mode", "ext");
   expect(await visiblePCs(page)).toEqual(defaultPCs);
@@ -372,18 +382,21 @@ test("keyboard IP toggles preserve full-address sorting and observation times", 
   await expect(toggle).toHaveAttribute("data-mode", "ext");
   await toggle.focus();
   await page.keyboard.press("Enter");
+  await expect(toggle).toHaveAttribute("data-mode", "private-full");
+  await expect(page.locator('#fleet-rows td[data-col="ip"]').first()).toHaveText("192.0.2.13");
+  await page.keyboard.press("Enter");
   await expect(page.locator('#fleet-rows td[data-col="ip"]').first()).toHaveText(".13");
   expect(await visiblePCs(page)).toEqual(descendingPCs);
   expect(await timestamps()).toEqual(original);
 });
 
 test("IP display choice survives refresh, scenario changes and reload independently of sorting", async ({ page }) => {
-  const toggle = page.getByRole("button", { name: "Toggle IP display", exact: true });
-  for (let i = 0; i < 3; i++) await toggle.click();
+  const toggle = page.getByRole("button", { name: /^Toggle IP display/ });
+  for (let i = 0; i < 5; i++) await toggle.click();
   await expect(toggle).toHaveAttribute("data-mode", "int");
   await scenario(page, "fresh");
   const missingInternal = page.locator('#fleet-rows [data-pc="sample-05"] td[data-col="ip"]');
-  await expect(missingInternal).toHaveText("—");
+  await expect(missingInternal).toHaveText("−");
   await expect(missingInternal).toHaveAttribute("title", /Internal.*not reported/i);
   await page.getByRole("button", { name: "Refresh view", exact: true }).click();
   await page.getByRole("button", { name: "Advance 30s", exact: true }).click();
@@ -403,7 +416,7 @@ test("IP display choice survives refresh, scenario changes and reload independen
 });
 
 test("invalid and unavailable IP preference storage fall back without disabling the toggle", async ({ page }) => {
-  const toggle = page.getByRole("button", { name: "Toggle IP display", exact: true });
+  const toggle = page.getByRole("button", { name: /^Toggle IP display/ });
   await page.evaluate(key => localStorage.setItem(key, "bad-mode"), ipPreferenceKey);
   await page.reload();
   await openPreviewTools(page);
@@ -417,19 +430,61 @@ test("invalid and unavailable IP preference storage fall back without disabling 
   await expect(toggle).toHaveAttribute("data-mode", "full");
   await expect(page.locator('#fleet-rows td[data-col="ip"]').first()).toHaveText("198.51.100.200 / 192.0.2.10");
   await toggle.click();
+  await expect(toggle).toHaveAttribute("data-mode", "public-full");
+  await toggle.click();
   await expect(toggle).toHaveAttribute("data-mode", "ext");
   await page.getByRole("button", { name: "Refresh view", exact: true }).click();
   await expect(toggle).toHaveAttribute("data-mode", "ext");
 });
 
+test("all six IP preferences reload and IP-only toggles retain row nodes without requests", async ({ page }) => {
+  const modes = ["dot", "full", "public-full", "ext", "private-full", "int"];
+  const labels = ["hidden", "both full addresses", "external IP / NAT", "external last octet", "internal IP", "internal last octet"];
+  const values = ["•", "198.51.100.200 / 192.0.2.10", "198.51.100.200", ".200", "192.0.2.10", ".10"];
+  const requests: string[] = [];
+  page.on("request", request => requests.push(request.url()));
+  await page.waitForLoadState("networkidle");
+  const before = requests.length;
+  const cycle = await page.evaluate(() => {
+    const toggle = document.getElementById("ip-display-toggle")!, rows = [...document.querySelectorAll("#fleet-rows tr[data-host]")];
+    const jobs = rows.map(row => row.querySelector('td[data-col="latestJob"]')!.firstChild);
+    const frames = [];
+    for (let step = 0; step < 6; step++) {
+      (toggle as HTMLButtonElement).click();
+      frames.push({ mode: toggle.dataset.mode, label: toggle.getAttribute("aria-label"), title: toggle.title,
+        saved: localStorage.getItem("gridlens.preview.ip-mode.v1"),
+        rowsPreserved: rows.every((row, index) => row === document.querySelectorAll("#fleet-rows tr[data-host]")[index]),
+        jobsPreserved: rows.every((row, index) => row.querySelector('td[data-col="latestJob"]')!.firstChild === jobs[index]) });
+    }
+    return frames;
+  });
+  await page.waitForTimeout(100);
+  expect(requests.length).toBe(before);
+  for (const [index, frame] of cycle.entries()) {
+    const at = (index + 1) % 6;
+    expect(frame.mode).toBe(modes[at]); expect(frame.saved).toBe(modes[at]);
+    expect(frame.title).toBe(`IP display: ${labels[at]}; next: ${labels[(at + 1) % 6]}.`);
+    expect(frame.label).toBe(`Toggle IP display. ${frame.title}`);
+    expect(frame.rowsPreserved).toBe(true); expect(frame.jobsPreserved).toBe(true);
+  }
+  for (const [index, mode] of modes.entries()) {
+    await page.evaluate(({ key, mode }) => localStorage.setItem(key, mode), { key: ipPreferenceKey, mode });
+    await page.reload();
+    await expect(page.locator("#ip-display-toggle")).toHaveAttribute("data-mode", mode);
+    await expect(page.locator('#fleet-rows [data-host="sample-host-1-1"] td[data-col="ip"]')).toHaveText(values[index]!);
+  }
+});
+
 test.describe("touch display controls", () => {
   test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
   test("the header toggle is reachable on a narrow touch viewport and does not sort", async ({ page }) => {
-    const toggle = page.getByRole("button", { name: "Toggle IP display", exact: true });
+    const toggle = page.getByRole("button", { name: /^Toggle IP display/ });
     await toggle.tap();
     await expect(toggle).toHaveAttribute("data-mode", "full");
     await expect(page.locator('#column-headings th[data-col="pc"]')).toHaveAttribute("aria-sort", "ascending");
     await expect(page.locator('#column-headings th[data-col="ip"]')).toHaveAttribute("aria-sort", "none");
+    await toggle.tap();
+    await expect(toggle).toHaveAttribute("data-mode", "public-full");
     await toggle.tap();
     await expect(page.locator('#fleet-rows td[data-col="ip"]').first()).toHaveText(".200");
     await expectFleetDocumentFlow(page);

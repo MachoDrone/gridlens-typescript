@@ -31,7 +31,7 @@ test("Ready output provides one plain URL and browser PC management without anot
   const t = terminal(); cliSection(t, "GridLens installation"); printBrowserReady(t, "http://192.168.42.2:8790");
   assert.deepEqual(t.asked, []);
   assert.deepEqual(t.output.filter(line => line.startsWith("http")), ["http://192.168.42.2:8790/"]);
-  assert.ok(t.output.includes("Ready.")); assert.ok(t.output.includes("Open this address, then choose Manage computers to find, add or update PCs."));
+  assert.ok(t.output.includes("Ready.")); assert.ok(t.output.includes("Open this address, then choose Hosts in the left menu to find, add or update PCs."));
   assert.equal(t.output[0], ""); assert.equal(t.output[2], "");
   assert.ok(t.output.filter(line => line === "").length >= 4);
   assert.doesNotMatch(t.output.join("\n"), /keep.*terminal|computer password|selection complete|monitoring \[|five minutes|#code=/i);

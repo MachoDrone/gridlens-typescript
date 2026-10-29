@@ -91,7 +91,7 @@ const COLUMNS = [
   ["stakedNos", "Staked NOS", "Toggle between a dull-green checkmark / red lowercase x and the actual / required NOS amounts. A current checkmark means exact vault NOS meets the current market’s displayed NOS target, including verified 0 / 0; x means it is below that target. Amount view rounds to whole NOS and uses bright green or red for the actual amount. Exact amounts drive sorting and comparison. This does not establish full market eligibility. Amounts still releasing during unstaking remain included; details distinguish duration-weighted xNOS. Shared public RPC checks every 30 minutes; readings expire after 35 minutes. Failed or expired comparisons stay gray; an unknown comparison is a dash."],
   ["status", "Status", "Reported Nosana classification. ONBOARDED is displayed as COMMUNITY (yellow C); REJECTED as red R; PREMIUM as green P. Details preserve the raw response. This does not establish container health or current job activity."],
   ["pc", "PC", "The sample PC that owns this host. Select a PC cell for the row’s observation details."],
-  ["ip", "IP", "Toggle between hidden (•), full global / internal addresses, global last octet and internal last octet. Compact IPv4 values include the leading dot, such as .102. IPv6 stays complete. Sorting always uses the full internal address. These are documentation-only sample addresses, not links or reachable PCs."],
+  ["ip", "IP", "Cycle hidden (•), both full addresses, external IP / NAT, external last octet, internal IP and internal last octet. Public appears before private; a missing address keeps its position as −. Compact IPv4 values include the leading dot, such as .102; IPv6 stays complete. Sorting uses full addresses, preferring private then public. Toggling changes only IP presentation and starts no requests. Installed readings keep their original source times; preview addresses are documentation-only samples."],
   ["hostAddress", "Host Address", "A supplied public Nosana host address. Toggle between the first five characters (default) and the full address. Both views link to the same full address in Nosana Explorer, and sorting always uses the full address. Supplied addresses do not establish current host status or any measurements."],
   ["sol", "SOL", "Confirmed SOL balance from public mainnet RPC, checked best effort every 30 seconds while visible. Three decimals are rounded down for display; exact lamports and provenance are in details and drive sorting. Failed or 60-second-old readings remain gray. Missing accounts remain unknown; verified zero remains zero."],
   ["api", "API", "Last confirmed API result from Node Info, separate from State. Online stays green and Offline stays red. Bold means within its checking window; regular weight means stale or unconfirmed. Online uses a 30-second window. Offline stays bold until its recorded retry is overdue, including an eight-second request allowance. Details preserve original check times and the retry deadline. Amber Populating.. means no confirmed result is available yet. State OTHER can still be API Online. Timeouts and inconclusive checks do not overwrite the last confirmed result. This does not establish whether the PC or workload is running."],
@@ -100,7 +100,7 @@ const COLUMNS = [
   ["duration", "Duration", "Toggle between a compact elapsed/limit bar and time text. Supplied hosts use the assigned Nosana job’s reported start and timeout, with a local one-second clock. After failed or expired reads, the last verified start keeps counting as a darker estimate until superseded. Bounded bars keep their animation preference; elapsed more than five minutes above the last reported limit is red, dimmer when stale. This display grace does not extend the reported limit or change elapsed time. Amber Populating.. means no useful timing yet; a dash with No running assignment in details means current confirmed absence. Expired or failed absence, or newer running evidence, returns to Populating.. without restoring an old counter. When API Offline is currently confirmed and timing is unknown, a dash means timing unavailable; Offline alone does not establish that a job stopped. Known job timings refresh independently of State every 120 seconds while visible; pending discovery follows the permitted retry deadline. Local display validity is 180 seconds. The indexer supplies no indexing-freshness timestamp."],
   ["nodeRuntime", "Node run time", "Node process run time requires its own observation. It cannot be inferred from inventory freshness."],
   ["dailyUptime", "Daily uptime %", "The last completed provider day, with independently verified coverage. No uptime source is connected."],
-  ["latestJob", "Jobs", "The current verified assignment, otherwise the most recently observed job (marked seen). Expand a host to read up to ten recent indexed jobs. Lifecycle and execution result are separate: Completed does not mean Succeeded. History is loaded on expansion when missing or over five minutes old, through shared request limits. Page and job check times describe our reads, not indexing freshness. History stays in memory and never establishes State or host health. Show all expands the selected roster; Hide all cancels unneeded history work. Explorer links are optional navigation. Online GPU Hosts reads cached history only."],
+  ["latestJob", "Jobs", "The current verified assignment, otherwise the most recently observed job. Expand a host to read up to ten recent indexed jobs. Lifecycle and execution result are separate: Completed does not mean Succeeded. History is loaded on expansion when missing or over five minutes old, through shared request limits. Page and job check times describe our reads, not indexing freshness. History stays in memory and never establishes State or host health. Show all expands the selected roster; Hide all cancels unneeded history work. Explorer links are optional navigation. Online GPU Hosts reads cached history only."],
   ["ram", "RAM", "Reported RAM in GB from Nosana metrics. The compact cell rounds to a whole GB; sorting preserves the reported number. This is not current memory usage."],
   ["disk", "Disk", "Reported disk GB from Nosana metrics. This does not establish current free space or usage."],
   ["dl", "DL", "Reported download Mbps from Node Info info.network.download_mbps. This is saved network data, not a speed test triggered by this page. An all-zero default triplet is unknown."],
@@ -203,6 +203,7 @@ try {
 } catch {
   // Browsers that deny storage can still sort for the current page session.
 }
+const ipDisplaySources = new WeakMap<HTMLTableCellElement, IPAddresses>();
 let ipMode: IPDisplayMode = "dot";
 try {
   ipMode = normalizeIPMode(localStorage.getItem(IP_MODE_PREFERENCE_KEY));
@@ -522,7 +523,8 @@ for (const [key, label] of COLUMNS) {
       } catch {
         // Display changes are still retained in memory for this page session.
       }
-      render();
+      if (key === "ip") renderIPDisplayOnly();
+      else render();
     });
     heading.append(toggle);
   }
@@ -1969,10 +1971,7 @@ function renderRow({ pcView: pc, runtime, host, addresses, durationInput, durati
         break;
       }
       case "ip": {
-        const display = formatIPDisplay(addresses, ipMode);
-        cell.textContent = display.text;
-        cell.title = brief(display.description.replace(". Internal:", "; Internal:"));
-        cell.setAttribute("aria-label", display.description);
+        renderIPCell(cell, addresses);
         break;
       }
       case "duration":
@@ -2069,6 +2068,39 @@ function renderRow({ pcView: pc, runtime, host, addresses, durationInput, durati
   return row;
 }
 
+function renderIPCell(cell: HTMLTableCellElement, addresses: IPAddresses): void {
+  ipDisplaySources.set(cell, addresses);
+  const display = formatIPDisplay(addresses, ipMode);
+  setText(cell, display.text);
+  cell.title = brief(display.description);
+  cell.setAttribute("aria-label", display.description);
+  const unknown = ipMode === "public-full" || ipMode === "ext" ? !addresses.global
+    : ipMode === "private-full" || ipMode === "int" ? !addresses.internal : !addresses.global && !addresses.internal;
+  cell.classList.toggle("unknown", unknown);
+}
+
+/** Display changes must not revisit job history, sorting or collection scheduling. */
+function renderIPDisplayOnly(): void {
+  renderIPDisplaySetting();
+  const at = liveNow();
+  for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>("tr[data-host]")) {
+    const cell = row.querySelector<HTMLTableCellElement>('td[data-col="ip"]');
+    if (!cell) continue;
+    if (row.dataset.source === "supplied" && sharedTelemetry.render(cell, "ip", row.dataset.host!, at, ipMode)) continue;
+    const addresses = ipDisplaySources.get(cell);
+    if (addresses) renderIPCell(cell, addresses);
+  }
+}
+
+function renderIPDisplaySetting(): void {
+  const status = `IP display: ${ipModeLabel(ipMode)}; next: ${ipModeLabel(nextIPMode(ipMode))}.`;
+  const toggle = element("ip-display-toggle");
+  toggle.title = status;
+  toggle.dataset.mode = ipMode;
+  toggle.setAttribute("aria-label", `Toggle IP display. ${status}`);
+  setText(element("ip-mode-status"), status);
+}
+
 function renderDisplaySettings(): void {
   for (const heading of element("column-headings").querySelectorAll("th[data-col]")) {
     const direction = heading.getAttribute("data-col") === activeSort.column
@@ -2078,10 +2110,7 @@ function renderDisplaySettings(): void {
   renderQueuedDurationHeader();
   const sortLabel = COLUMNS.find(([key]) => key === activeSort.column)?.[1] ?? "PC";
   setText(element("sort-status"), `${sortLabel} · ${activeSort.direction === "asc" ? "ascending" : "descending"}`);
-  const ipDisplayStatus = `IP display: ${ipModeLabel(ipMode)}; next: ${ipModeLabel(nextIPMode(ipMode))}.`;
-  element("ip-display-toggle").title = ipDisplayStatus;
-  element("ip-display-toggle").dataset.mode = ipMode;
-  setText(element("ip-mode-status"), ipDisplayStatus);
+  renderIPDisplaySetting();
   const hostAddressStatus = `Host Address display: ${hostAddressMode === "compact" ? "first five characters" : "full address"}; next: ${hostAddressMode === "compact" ? "full address" : "first five characters"}.`;
   element("hostAddress-display-toggle").title = hostAddressStatus;
   element("hostAddress-display-toggle").dataset.mode = hostAddressMode;
@@ -2487,6 +2516,8 @@ function renderSupplied(): void {
       cell.dataset.col = key;
       if (sharedTelemetry.render(cell, key, address, nodeProjectionTime, ipMode)) {
         // The production adapter renders only verified shared PC observations.
+      } else if (key === "ip") {
+        renderIPCell(cell, { internal: null, global: null });
       } else if (key === "hostAddress") {
         const link = cell.querySelector<HTMLAnchorElement>(".host-address") ?? document.createElement("a");
         link.className = "host-address";
@@ -2657,7 +2688,7 @@ function render(): void {
           pc: pc.pcId, gpuIndex: null, containerName: host.name,
           pcView: pc, runtime, host, addresses, durationInput, duration, market, hardware,
           values: {
-            pc: pc.pcId, ip: addresses.internal,
+            pc: pc.pcId, ip: addresses.internal ?? addresses.global,
             duration: duration.elapsedSeconds,
             latestJob: durationInput?.displayedJobId ?? null,
             queued: duration.kind === "queue" ? durationInput?.activity?.queuePosition ?? null : null,

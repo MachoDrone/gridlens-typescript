@@ -4,9 +4,9 @@ import { formatIPDisplay, ipModeLabel, nextIPMode, normalizeIPMode } from "../sr
 import type { IPAddresses, IPDisplayMode } from "../src/fleet/ip-display.ts";
 
 const addresses: IPAddresses = Object.freeze({ internal: "10.42.0.11", global: "192.0.2.53" });
-const modes: readonly IPDisplayMode[] = ["dot", "full", "ext", "int"];
+const modes: readonly IPDisplayMode[] = ["dot", "full", "public-full", "ext", "private-full", "int"];
 
-test("IP display starts hidden and repeats the four-mode cycle", () => {
+test("IP display matches Android's six-mode cycle while preserving old preference meanings", () => {
   let mode = normalizeIPMode(null);
   for (let cycle = 0; cycle < 3; cycle++) {
     for (const expected of modes) {
@@ -25,13 +25,13 @@ test("only current IP display preferences are accepted", () => {
 });
 
 test("mode labels identify the selected family and compact representation", () => {
-  assert.deepEqual(modes.map(ipModeLabel), ["hidden", "full global and internal", "global last octet", "internal last octet"]);
+  assert.deepEqual(modes.map(ipModeLabel), ["hidden", "both full addresses", "external IP / NAT", "external last octet", "internal IP", "internal last octet"]);
 });
 
 test("full mode shows global before internal and compact modes retain a leading dot", () => {
-  assert.deepEqual(modes.map(mode => formatIPDisplay(addresses, mode).text), ["•", "192.0.2.53 / 10.42.0.11", ".53", ".11"]);
-  for (const mode of ["full", "ext", "int"] as const) {
-    assert.equal(formatIPDisplay(addresses, mode).description, "Global: 192.0.2.53. Internal: 10.42.0.11.");
+  assert.deepEqual(modes.map(mode => formatIPDisplay(addresses, mode).text), ["•", "192.0.2.53 / 10.42.0.11", "192.0.2.53", ".53", "10.42.0.11", ".11"]);
+  for (const mode of modes.filter(mode => mode !== "dot")) {
+    assert.equal(formatIPDisplay(addresses, mode).description, "External/public: 192.0.2.53. Internal/private: 10.42.0.11.");
   }
 });
 
@@ -44,19 +44,21 @@ test("compact IPv4 retains zero and 255 octets with their leading dots", () => {
 test("a missing address never falls back to the other family", () => {
   const internalOnly = { internal: addresses.internal, global: null };
   const globalOnly = { internal: null, global: addresses.global };
-  assert.equal(formatIPDisplay(internalOnly, "ext").text, "—");
-  assert.equal(formatIPDisplay(globalOnly, "int").text, "—");
-  assert.equal(formatIPDisplay(internalOnly, "full").text, addresses.internal);
-  assert.equal(formatIPDisplay(globalOnly, "full").text, addresses.global);
-  assert.equal(formatIPDisplay(internalOnly, "full").description, "Global: not reported. Internal: 10.42.0.11.");
-  assert.equal(formatIPDisplay(globalOnly, "full").description, "Global: 192.0.2.53. Internal: not reported.");
+  assert.equal(formatIPDisplay(internalOnly, "ext").text, "−");
+  assert.equal(formatIPDisplay(internalOnly, "public-full").text, "−");
+  assert.equal(formatIPDisplay(globalOnly, "int").text, "−");
+  assert.equal(formatIPDisplay(globalOnly, "private-full").text, "−");
+  assert.equal(formatIPDisplay(internalOnly, "full").text, `− / ${addresses.internal}`);
+  assert.equal(formatIPDisplay(globalOnly, "full").text, `${addresses.global} / −`);
+  assert.equal(formatIPDisplay(internalOnly, "full").description, "External/public: not reported. Internal/private: 10.42.0.11.");
+  assert.equal(formatIPDisplay(globalOnly, "full").description, "External/public: 192.0.2.53. Internal/private: not reported.");
 });
 
 test("missing or blank addresses stay unknown in every mode", () => {
   for (const missing of [{ internal: null, global: null }, { internal: " \t", global: "\n" }]) {
-    for (const mode of modes) assert.equal(formatIPDisplay(missing, mode).text, "—");
-    assert.equal(formatIPDisplay(missing, "dot").description, "IP addresses not reported.");
-    assert.equal(formatIPDisplay(missing, "full").description, "Global: not reported. Internal: not reported.");
+    assert.deepEqual(modes.map(mode => formatIPDisplay(missing, mode).text), ["•", "− / −", "−", "−", "−", "−"]);
+    assert.equal(formatIPDisplay(missing, "dot").description, "IP addresses hidden.");
+    assert.equal(formatIPDisplay(missing, "full").description, "External/public: not reported. Internal/private: not reported.");
   }
 });
 

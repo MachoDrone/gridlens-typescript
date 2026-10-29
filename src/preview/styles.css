@@ -58,6 +58,14 @@ button:hover, select:hover { background: #222; }
 .sidebar-item { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 40px; padding: 8px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; font-size: 14px; }
 .sidebar-item svg { flex: 0 0 20px; }
 .sidebar-item:disabled { opacity: 1; color: #747474; background: transparent; }
+/* Hosts fits the existing navigation width; its intrinsic size must not enlarge
+   the panel measured from the established menu/header contents. */
+.sidebar-hosts { contain: inline-size; min-width: 0; max-width: calc(var(--sidebar-width) - 17px); min-height: 44px; gap: 8px; border: 1px solid #30a75d; background: #18783e; color: white; font-weight: 600; text-decoration: none; }
+.sidebar-hosts[hidden] { display: none; }
+.sidebar-hosts:hover { background: #1d8b49; }
+.sidebar-hosts .sidebar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+:root[data-sidebar="collapsed"] .sidebar-hosts { justify-content: center; padding-inline: 0; gap: 0; }
+:root[data-sidebar="collapsed"] .sidebar-hosts .sidebar-label { display: none; }
 .sidebar-footer { margin-top: auto; width: 100%; min-width: 0; padding: 16px 4px 4px; font-size: 11px; color: #929292; white-space: normal; }
 .sidebar-links { display: flex; flex-direction: column; gap: 2px; }
 .sidebar-link { display: block; min-width: 0; }
@@ -69,6 +77,8 @@ button:hover, select:hover { background: #222; }
 @media (max-width: 760px) {
   :root:not([data-sidebar="expanded"]) { --sidebar-width: min(56px, var(--sidebar-available-width)); }
   :root:not([data-sidebar="expanded"]) .sidebar-label { opacity: 0; visibility: hidden; }
+  :root:not([data-sidebar="expanded"]) .sidebar-hosts { justify-content: center; padding-inline: 0; gap: 0; }
+  :root:not([data-sidebar="expanded"]) .sidebar-hosts .sidebar-label { display: none; }
 }
 /* Compact navigation applies to an actually small layout, not the visual window
    exposed by a pinch. Pinched content keeps its original CSS dimensions. */
@@ -79,6 +89,7 @@ button:hover, select:hover { background: #222; }
 :root[data-compact-viewport="true"] .sidebar-navigation { width: 100%; }
 :root[data-compact-viewport="true"] .sidebar-item { flex-direction: column; gap: 4px; padding-inline: 0; }
 :root[data-compact-viewport="true"] .sidebar-item .sidebar-label { white-space: normal; overflow-wrap: anywhere; }
+:root[data-compact-viewport="true"] .sidebar-hosts { max-width: 100%; }
 :root[data-compact-viewport="true"] .sidebar-footer { padding-inline: 0; }
 :root[data-compact-viewport="true"] .sidebar-links a { display: block; padding-inline: 0; min-width: 24px; }
 :root[data-compact-viewport="true"] .sidebar-external { display: none; }
@@ -161,10 +172,6 @@ h1 { font-size: 18px; line-height: 22px; margin: 0; color: var(--nosana-green); 
 .preview-tag { color: var(--amber); margin-left: 6px; }
 .sample-notice { margin: 8px 0; font-size: 11px; color: var(--muted); }
 .sample-notice strong { color: var(--amber); font-weight: 500; }
-.shared-setup-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 8px 0 12px; font-size: 12px; color: var(--muted); }
-.shared-search-link { display: inline-flex; align-items: center; justify-content: center; min-height: 44px; padding: 8px 14px; border: 1px solid #30a75d; border-radius: 6px; background: #18783e; color: white; font-size: 14px; font-weight: 650; text-decoration: none; }
-.shared-search-link:hover { background: #1d8b49; }
-.shared-search-link:focus-visible { outline: 3px solid var(--blue); outline-offset: 3px; }
 .input-error { color: var(--local-source); font-size: 12px; overflow-wrap: anywhere; }
 #local-source-note { color: var(--local-source); }
 .fleet-status { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 16px; font-size: 11px; line-height: 16px; min-height: 22px; color: var(--muted); }
@@ -348,6 +355,7 @@ td[data-col="queued-duration"] .duration-value { min-width: 30px; }
 .fleet-table .empty-message { height: 68px; text-align: left; white-space: normal; max-width: 280px; padding: 14px 10px; color: var(--text); }
 .empty-content { display: block; max-width: min(560px, calc(100vw - 48px)); }
 .sample-controls, .scenario-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 16px; font-size: 12px; }
+.scenario-controls[hidden], .scenario-controls:has(select[hidden]) { display: none; }
 .sample-controls label, .scenario-controls label { color: var(--muted); }
 .sample-controls select, .sample-controls button, .scenario-controls select { min-height: 36px; padding: 8px 12px; }
 .sample-controls select, .scenario-controls select { color: var(--green); border-color: #386a46; max-width: 100%; }
@@ -470,8 +478,8 @@ td[data-col="queued-duration"][data-stacked="true"] .queued-duration-source butt
 .queued-duration-details:focus-visible { outline-offset: -2px; }
 
 /* Jobs alone adds requested right-side expansion controls; parent rows stay compact. */
-/* Reserve the longest reported summary (Completed · seen), including phone controls,
-   so transitions from Unknown or Running never shift later columns. */
+/* Keep the established compact Jobs column width through address availability
+   changes so later columns do not shift. */
 .fleet-table th[data-col="latestJob"], .fleet-table td.jobs-cell { width: 180px; min-width: 180px; max-width: 180px; }
 .job-history-actions { position: absolute; top: 3px; left: 0; right: 0; display: flex; justify-content: center; gap: 4px; }
 .job-history-actions button { min-height: 24px; padding: 2px 4px; font-size: 9px; color: var(--blue); }
@@ -480,9 +488,6 @@ td[data-col="queued-duration"][data-stacked="true"] .queued-duration-source butt
 .jobs-expand { min-height: 28px; width: 25px; padding: 0; margin-right: 3px; border: 0; background: transparent; color: var(--blue); font-size: 14px; vertical-align: middle; }
 .job-summary-link { display: inline-flex; align-items: center; min-height: 24px; min-width: 24px; color: var(--blue); text-underline-offset: 3px; }
 .job-summary-link:not([href]) { color: var(--amber); text-decoration: none; }
-.job-summary-state { margin-left: 6px; font-size: 9px; color: var(--muted); }
-.job-summary-state[data-current="true"] { color: var(--green); }
-.job-summary-state[data-unknown="true"] { color: var(--amber); }
 .fleet-table > tbody > .job-history-row > td { height: auto; padding: 16px 12px 12px; text-align: left; white-space: normal; background: #111; border-bottom-color: #303030; }
 /* A drawer fills the established Fleet width without contributing its own
    percentage table to the outer table's intrinsic width calculation. */

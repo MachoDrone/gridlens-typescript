@@ -158,9 +158,11 @@ test("selected Nosana fields follow compact reference formatting without inventi
       else if (key === "latestJob") {
         await expect(column.locator(".job-summary-link")).toHaveText("—");
         await expect(column.locator(".job-summary-link")).not.toHaveAttribute("href");
-        await expect(column.locator(".job-summary-state")).toHaveText("Unknown");
+        await expect(column.locator(".job-summary-state")).toHaveCount(0);
+        await expect(column).toHaveAttribute("aria-label", "Jobs: unknown");
         await expect(column.locator(".jobs-expand")).toHaveAttribute("aria-expanded", "false");
       }
+      else if (key === "ip") { await expect(column).toHaveText("•"); await expect(column).toHaveClass(/unknown/); }
       else if (!selectedColumns.has(key)) await expect(column).toHaveText("—");
     }
     expect(await row.evaluate(element => element.getBoundingClientRect().height)).toBe(34);
@@ -234,7 +236,8 @@ test("rendering, synthetic scenarios and elapsed time cause no background metada
   await openPreviewTools(page);
   await expect(cell(page, "status")).toHaveText("P");
   for (const label of ["IP", "Duration", "Market", "NVIDIA", "CPU", "System", "Country"]) {
-    await page.getByRole("button", { name: `Toggle ${label} display`, exact: true }).click();
+    if (label === "IP") await page.locator("#ip-display-toggle").click();
+    else await page.getByRole("button", { name: `Toggle ${label} display`, exact: true }).click();
   }
   await page.getByRole("button", { name: "Sort by Status", exact: true }).click();
   await page.getByLabel("Scenario", { exact: true }).selectOption("mixed");

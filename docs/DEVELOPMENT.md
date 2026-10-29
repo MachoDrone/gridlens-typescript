@@ -29,7 +29,7 @@ defaults; `NO_COLOR` keeps the same text meanings without ANSI color. Brief
 explanations identify the reachable PC address, the port number after the colon
 in the URL, and the next browser action. They add no installation questions.
 
-Manage computers combines saved PCs and bounded discovery, selection, password or
+The left-menu Hosts action opens PC management with saved PCs and bounded discovery, selection, password or
 SSH-key sign-in, saved-sign-in reuse/update, explicit removal/restore and a final
 per-PC report. A completed search tells users to select PCs and choose **Add
 Selected PCs** below the computer list. This advances to sign-in. Private-key files
@@ -397,7 +397,9 @@ see [HOSTING_HANDOFF](HOSTING_HANDOFF.md).
 
 Jobs replaces the unconnected Latest Job placeholder without adding a data
 column. Its collapsed summary uses the existing independently validated current
-assignment, otherwise the most recent observed job with a historical label.
+assignment, otherwise the most recent observed job. Compact cells show only the
+job identifier and expansion control; lifecycle and current/last-observed evidence
+remain in accessible labels and expanded history details.
 Historical records never feed State, API or Duration. The expanded table follows
 Explorer's Address / Host / Started / Duration / Price / GPU / Status layout,
 with a uniform dark surface, readable sans-serif text, relative starts and
@@ -514,8 +516,20 @@ The sidebar expands by reserving space beside Fleet and collapses to a 56px rail
 it never dims the table or suspends refresh. The Fleet header stays one line and
 prioritizes the connection indicator. Its Connected/Data Unreachable result means
 browser-to-Fleet reachability, not host health or source freshness. The local
-connection check makes no provider requests. Scenario stays below the table;
+connection check makes no provider requests. Installed backends show a green Hosts
+link with a computer icon inside the existing menu width; collapse keeps the icon
+and accessible name. The old above-table setup banner and terminal-only helper
+text are removed. The visible Scenario label is removed; the preview selector
+retains its accessible name, and installed snapshots hide that selector entirely.
 Tools & diagnostics starts closed and contains the other preview controls.
+
+IP display follows Android's six-mode cycle: hidden, both full addresses, full
+public address, public last octet, full private address, private last octet.
+Existing saved modes keep their meaning. Combined mode preserves both positions
+with a minus sign for missing readings; IPv6 is never shortened to an invented
+IPv4 octet. IP toggles redraw only their cells/header, retain original source
+times and full-address sorting, and do not revisit job/history requests. Missing
+or retained styling is based on source data rather than the display placeholder.
 
 Phone and laptop retain the same actions and meanings. At normal scale and while
 zoomed out, navigation follows the visible viewport, and table headings stay

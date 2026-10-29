@@ -230,7 +230,7 @@ export function printBrowserReady(terminal: TerminalPrompts, origin: string): vo
   terminal.print(cliText(terminal, "success", "Ready."));
   terminal.print(cliText(terminal, "action", `${origin}/`));
   terminal.print("");
-  terminal.print("Open this address, then choose Manage computers to find, add or update PCs.");
+  terminal.print("Open this address, then choose Hosts in the left menu to find, add or update PCs.");
   terminal.print(cliText(terminal, "muted", "Use your existing VPN when away."));
   terminal.print("");
 }
@@ -295,7 +295,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     }
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
     const previous=coordinator.configuration(instance,release.imageId);
-    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<8?"upgrade":"setup";
+    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<9?"upgrade":"setup";
     if(!previous){
       assertLocalDockerForSelection(runner);
       const selected=await choosePrivateEndpoint(terminal,discoverPrivateEndpoints(networkInterfaces(),dockerNetworkExclusions(runner)));
