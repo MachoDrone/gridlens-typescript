@@ -7,8 +7,12 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     const publicOrigin = process.env.GRIDLENS_PUBLIC_ORIGIN;
     const transport = process.env.GRIDLENS_TRANSPORT ?? "https";
+    const privateNetworkAuthFile = process.env.GRIDLENS_VPN_AUTH_FILE;
     if (!publicOrigin || transport !== "https" && transport !== "vpn-http") throw new Error("Set the canonical origin and supported transport.");
+    if (privateNetworkAuthFile !== undefined && (transport !== "vpn-http" || privateNetworkAuthFile !== "/vpn-auth/browser.json"))
+      throw new Error("Set the owned private-network grant path.");
     const { server, integration } = await startSharedGateway({ publicOrigin, transport,
+      ...(privateNetworkAuthFile === undefined ? {} : { privateNetworkAuthFile }),
       socketPath: process.env.GRIDLENS_SOCKET ?? "/ipc/read.sock", certPath: process.env.GRIDLENS_TLS_CERT ?? "/tls/server.crt",
       keyPath: process.env.GRIDLENS_TLS_KEY ?? "/tls/server.key", directory: resolve("dist"),
       host: process.env.GRIDLENS_HOST ?? "0.0.0.0", port: Number(process.env.GRIDLENS_PORT ?? 8443) });

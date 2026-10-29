@@ -95,6 +95,16 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
   }
   async function control(body: Record<string, unknown>): Promise<unknown> {
     if (body.operation === "status") return { version: 1, serverId: access.serverId, contexts: access.contexts() };
+    if (body.operation === "register-vpn-web" || body.operation === "revoke-vpn-web") {
+      if (typeof body.scopeId !== "string") throw new SharedHttpError(400);
+      try {
+        if (body.operation === "register-vpn-web") return access.registerGateway(body.scopeId, body.token);
+        access.revokeGateway(body.scopeId); return { revoked: true };
+      } catch (error) {
+        if (error instanceof AccessError) throw new SharedHttpError(error.kind === "invalid" ? 400 : 403);
+        throw error;
+      }
+    }
     if (body.operation === "create-fleet") {
       if (typeof body.scopeId !== "string" || !Array.isArray(body.addresses)) throw new SharedHttpError(400);
       return access.setFleet(body.scopeId, body.addresses as string[]);

@@ -1,6 +1,6 @@
 import { originFor, validateInstallation } from "./config.ts";
 import type { InstallationConfig } from "./config.ts";
-import { checked, inspectOwned, labels, mount, PRODUCT, PRODUCT_LABEL, resourceName, restrictions } from "./docker.ts";
+import { checked, ensureVolume, inspectOwned, labels, mount, PRODUCT, PRODUCT_LABEL, resourceName, restrictions } from "./docker.ts";
 import type { DockerRunner } from "./docker.ts";
 import { InstallerError } from "./release.ts";
 import type { ModernRelease } from "./release.ts";
@@ -8,7 +8,7 @@ import type { ModernRelease } from "./release.ts";
 const ROLE_LABEL = "io.gridlens.role", VERSION_LABEL = "io.gridlens.version";
 type Metadata = Record<string, unknown>;
 type Image = { Id: string; Config: { Labels: Record<string, string>; Env?: string[]; Entrypoint?: string[] | null } };
-export interface VpnWebEndpoint { origin: string; port: number; imageId: string }
+export interface VpnWebEndpoint { origin: string; port: number; imageId: string; privateNetwork?: boolean }
 const object = (value: unknown): Metadata => value && typeof value === "object" && !Array.isArray(value) ? value as Metadata : {};
 const empty = (value: unknown): boolean => value === undefined || value === null || Array.isArray(value) && value.length === 0;
 const equal = (left: unknown, right: unknown): boolean => JSON.stringify(left) === JSON.stringify(right);
@@ -46,8 +46,9 @@ function dependencies(runner: DockerRunner, config: InstallationConfig): string 
     })) fail("The saved collection owner must be running with its existing read socket before browser access is added.");
   return network.Id;
 }
-function environment(runtime: Image, origin: string): string[] {
+function environment(runtime: Image, origin: string, privateNetwork = false): string[] {
   const overrides = new Map([["GRIDLENS_SOCKET", "/ipc/read.sock"], ["GRIDLENS_PUBLIC_ORIGIN", origin], ["GRIDLENS_TRANSPORT", "vpn-http"]]);
+  if(privateNetwork)overrides.set("GRIDLENS_VPN_AUTH_FILE","/vpn-auth/browser.json");
   return [...(runtime.Config.Env ?? []).filter(entry => !overrides.has(entry.split("=", 1)[0]!)),
     ...[...overrides].map(([name, value]) => `${name}=${value}`)].sort();
 }
@@ -63,6 +64,9 @@ function endpoint(config: InstallationConfig, container: Metadata, runtime: Imag
   if (String(port) !== rawPort || port === config.port) fail("The browser gateway port is invalid or conflicts with the HTTPS endpoint.");
   const origin = originFor(config.bindAddress, port).replace(/^https:/, "http:");
   const mounts = container.Mounts, security = host.SecurityOpt;
+  const privateNetwork=Array.isArray(cfg.Env)&&cfg.Env.includes("GRIDLENS_VPN_AUTH_FILE=/vpn-auth/browser.json");
+  const expectedMounts=[{name:resourceName(config.instance,"read-ipc"),target:"/ipc"},
+    ...(privateNetwork?[{name:resourceName(config.instance,"vpn-auth"),target:"/vpn-auth"}]:[])];
   if (cfg.User !== "1000:1000" || host.ReadonlyRootfs !== true || host.Privileged !== false
     || host.NetworkMode !== resourceName(config.instance, "network") || ![undefined, ""].includes(host.PidMode as undefined | string)
     || ![undefined, "", "private"].includes(host.IpcMode as undefined | string) || host.UTSMode === "host"
@@ -70,12 +74,13 @@ function endpoint(config: InstallationConfig, container: Metadata, runtime: Imag
     || !empty(host.Devices) || !empty(host.DeviceRequests) || host.PublishAllPorts === true
     || !Array.isArray(security) || !security.some(value => value === "no-new-privileges" || value === "no-new-privileges:true")
     || object(host.RestartPolicy).Name !== "unless-stopped" || host.PidsLimit !== 128
-    || !Array.isArray(mounts) || mounts.length !== 1 || object(mounts[0]).Type !== "volume"
-    || object(mounts[0]).Name !== resourceName(config.instance, "read-ipc") || object(mounts[0]).Destination !== "/ipc" || object(mounts[0]).RW !== false
+    || !Array.isArray(mounts) || mounts.length !== expectedMounts.length || expectedMounts.some(want=>!mounts.some(value=>{
+      const got=object(value);return got.Type==="volume"&&got.Name===want.name&&got.Destination===want.target&&got.RW===false;
+    }))
     || !equal(cfg.Cmd, ["node", "scripts/shared-gateway.ts"]) || !equal(cfg.Entrypoint ?? null, runtime.Config.Entrypoint ?? null)
-    || !Array.isArray(cfg.Env) || cfg.Env.some(value => typeof value !== "string") || !equal([...cfg.Env].sort(), environment(runtime, origin)))
+    || !Array.isArray(cfg.Env) || cfg.Env.some(value => typeof value !== "string") || !equal([...cfg.Env].sort(), environment(runtime, origin,privateNetwork)))
     fail("An existing browser gateway has changed isolation, mounts, command or origin; it was left unchanged.");
-  return { origin, port, imageId: runtime.Id };
+  return { origin, port, imageId: runtime.Id, ...(privateNetwork?{privateNetwork:true}:{}) };
 }
 function effective(config: InstallationConfig, container: Metadata, networkId: string, saved: VpnWebEndpoint): void {
   const settings = object(container.NetworkSettings), networks = object(settings.Networks), network = object(networks[resourceName(config.instance, "network")]);
@@ -94,31 +99,63 @@ export function readVpnWebEndpoint(runner: DockerRunner, config: InstallationCon
   configuration(config);
   const runtime = image(runner, existing.Image, object(object(existing.Config).Labels)[VERSION_LABEL]);
   const saved = endpoint(config, existing, runtime), networkId = dependencies(runner, config);
+  if(saved.privateNetwork&&!inspectOwned(runner,"volume",resourceName(config.instance,"vpn-auth"),config.instance))fail("The saved browser authorization volume is unavailable.");
   effective(config, existing, networkId, saved); return saved;
+}
+
+function provisionAuthorization(runner: DockerRunner, config: InstallationConfig, runtime: Image): void {
+  const {instance}=config, volume=resourceName(instance,"vpn-auth"), owner=resourceName(instance,"owner");
+  ensureVolume(runner,volume,instance);
+  const raw=checked(runner,["run","--rm","-i",...labels(instance),...restrictions,"--network","none","--user","0:0",
+    "--cap-add","CHOWN","--cap-add","FOWNER","--cap-add","DAC_OVERRIDE",...mount(volume,"/vpn-auth"),
+    runtime.Id,"node","src/installer/container-init.ts","vpn-web-auth"],"{}");
+  let authorization: {version?:unknown;token?:unknown};
+  try { authorization=JSON.parse(raw); } catch { fail("The saved browser authorization could not be validated."); }
+  if(authorization?.version!==1||typeof authorization.token!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(authorization.token))
+    fail("The saved browser authorization could not be validated.");
+  const status=JSON.parse(checked(runner,["exec",owner,"node","scripts/shared-control.ts","status"])) as {contexts?:{scopeId?:unknown}[]};
+  if(!Array.isArray(status.contexts))fail("The owner did not return its authorized fleet list.");
+  if(!status.contexts.some(context=>context.scopeId==="default"))checked(runner,["exec",owner,"node","scripts/shared-control.ts","create-fleet","default"]);
+  checked(runner,["exec","-i",owner,"node","scripts/shared-control.ts","json"],JSON.stringify({operation:"register-vpn-web",scopeId:"default",token:authorization.token}));
 }
 
 /** The caller has already verified the signed release. Only this optional web
  * sibling may be created/started; HTTPS identity, owner and volumes are untouched. */
-export function ensureVpnWeb(runner: DockerRunner, config: InstallationConfig, release: ModernRelease, port?: number): VpnWebEndpoint {
+export function ensureVpnWeb(runner: DockerRunner, config: InstallationConfig, release: ModernRelease, port?: number,
+  {upgrade=false}:{upgrade?:boolean}={}): VpnWebEndpoint {
   configuration(config);
   const runtime = image(runner, release.imageId, release.version), networkId = dependencies(runner, config);
   const name = resourceName(config.instance, "vpn-web");
   let existing = inspectOwned(runner, "container", name, config.instance);
+  let selectedPort=port??config.port+1;
   if (existing) {
-    if (existing.Image !== release.imageId) fail("The saved browser gateway uses a different release. It was preserved; browser-gateway upgrades require an explicit update.");
-    const saved = endpoint(config, existing, runtime);
+    const previousRuntime=image(runner,existing.Image,object(object(existing.Config).Labels)[VERSION_LABEL]);
+    const saved = endpoint(config, existing, previousRuntime);
+    if(object(existing.State).Running===true)effective(config,existing,networkId,saved);
     if (port !== undefined && port !== saved.port) fail("The browser gateway keeps its saved port on rerun; the requested port change was not applied.");
-    if (object(existing.State).Running !== true) checked(runner, ["start", name]);
-  } else {
-    const selectedPort = port ?? config.port + 1;
-    const origin = originFor(config.bindAddress, selectedPort).replace(/^https:/, "http:");
-    if (selectedPort === config.port) fail("Choose a browser port different from the existing HTTPS port.");
+    if(upgrade&&release.sequence<config.active.sequence&&existing.Image!==release.imageId)
+      fail("The selected browser release is older than the installed runtime. The saved browser gateway was retained.");
+    if((existing.Image!==release.imageId||!saved.privateNetwork)&&!upgrade)fail("The saved browser gateway uses a different release or access mode. It was preserved; use the explicit browser update.");
+    selectedPort=saved.port;
+  }
+  const origin = originFor(config.bindAddress, selectedPort).replace(/^https:/, "http:");
+  if (selectedPort === config.port) fail("Choose a browser port different from the existing HTTPS port.");
+  // Registration is idempotent and refuses revoked grants before any gateway replacement.
+  provisionAuthorization(runner,config,runtime);
+  if(existing&&(existing.Image!==release.imageId||!endpoint(config,existing,image(runner,existing.Image,object(object(existing.Config).Labels)[VERSION_LABEL])).privateNetwork)) {
+    if(object(existing.State).Running===true)checked(runner,["stop","--time","30",name]);
+    checked(runner,["rm",name]);existing=undefined;
+  }
+  if(existing) {
+    if(object(existing.State).Running!==true)checked(runner,["start",name]);
+  }else {
     const bind = config.bindAddress.includes(":") ? `[${config.bindAddress}]` : config.bindAddress;
     checked(runner, ["run", "--detach", "--name", name, "--restart", "unless-stopped", ...restrictions,
       "--user", "1000:1000", ...labels(config.instance), "--label", `${ROLE_LABEL}=vpn-web`,
       "--network", resourceName(config.instance, "network"), ...mount(resourceName(config.instance, "read-ipc"), "/ipc", true),
+      ...mount(resourceName(config.instance,"vpn-auth"),"/vpn-auth",true),
       "--publish", `${bind}:${selectedPort}:8443/tcp`, "--env", "GRIDLENS_SOCKET=/ipc/read.sock",
-      "--env", `GRIDLENS_PUBLIC_ORIGIN=${origin}`, "--env", "GRIDLENS_TRANSPORT=vpn-http",
+      "--env", `GRIDLENS_PUBLIC_ORIGIN=${origin}`, "--env", "GRIDLENS_TRANSPORT=vpn-http", "--env", "GRIDLENS_VPN_AUTH_FILE=/vpn-auth/browser.json",
       runtime.Id, "node", "scripts/shared-gateway.ts"]);
   }
   existing = inspectOwned(runner, "container", name, config.instance);

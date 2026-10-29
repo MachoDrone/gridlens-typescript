@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { browserConnectionText } from "../src/installer/browser-connection.ts";
+import { browserConnectionText, privateBrowserConnectionText } from "../src/installer/browser-connection.ts";
 
 const now = 1_800_000_000_000;
 const code = "Abc123_-XYZ9";
 const raw = JSON.stringify({ version: 1, code, expiresAtMs: now + 300_000, serverId: "not-for-human-output" });
+test("private-network browser entry is a permanent ordinary address without pairing data", () => {
+  const text = privateBrowserConnectionText("http://192.168.42.10:2342");
+  assert.equal(text.split("\n")[0], "OPEN GRIDLENS: http://192.168.42.10:2342/");
+  assert.doesNotMatch(text, /#|\?|code|minute|expire|sign.in/i);
+  for (const origin of ["http://8.8.8.8:2342", "http://192.168.42.10:2342/path", "http://user@192.168.42.10:2342", "https://192.168.42.10:2342"])
+    assert.throws(() => privateBrowserConnectionText(origin));
+});
 test("browser handoff uses the exact saved endpoint and keeps the code in a fragment", () => {
   for (const origin of ["http://192.168.42.10:2342", "https://192.168.42.10:2341", "http://[fd42::10]:2342"]) {
     const result = browserConnectionText(origin, raw, true, now);

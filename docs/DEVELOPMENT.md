@@ -17,12 +17,17 @@ and real Docker repair checks pass; the new release's public entry points,
 physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
 separate. Endpoint repair did not enable new fleet monitoring.
 
-The pending dev.3 candidate includes those installer fixes plus explicitly chosen
+Published dev.3 includes those installer fixes plus explicitly chosen
 `--vpn-web` access: a separate private HTTP browser gateway shares the existing
 owner and cache, while the HTTPS address remains available for Android. Browser
 sign-in uses a single-use fragment link, including links for another browser.
 No VPN changes or duplicate collection are introduced. Local LAN traffic uses
 HTTP in this opt-in mode; it requires the operator's trusted existing network.
+The dev.4 candidate replaces its browser sign-in links with a permanent ordinary
+address. A dedicated server-side grant is bound to the selected fleet's current
+roster and survives restart without expiring browser sessions. Its revocation is
+durable and cannot be reversed by rerunning setup. Native HTTPS pairing remains
+independent. Network access grants operator use of this private browser endpoint.
 
 ## Toolchain and commands
 

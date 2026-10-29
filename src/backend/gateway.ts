@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import type { FleetContext, FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
 import type { FleetSource } from "../server/snapshot-source.ts";
@@ -34,11 +34,18 @@ export function requestToken(request: IncomingMessage, transport: GatewayTranspo
   return cookies.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(cookies[0]!.slice(prefix.length)) ? cookies[0]!.slice(prefix.length) : null;
 }
 export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, setupScript: Buffer,
-  { transport = "https" }: { transport?: GatewayTransport } = {}): FleetIntegration {
+  { transport = "https", privateNetworkToken }: { transport?: GatewayTransport; privateNetworkToken?: string } = {}): FleetIntegration {
   if (transport !== "https" && transport !== "vpn-http") throw new Error("Unsupported gateway transport.");
+  if (privateNetworkToken !== undefined && (transport !== "vpn-http" || !/^[A-Za-z0-9_-]{43}$/.test(privateNetworkToken)))
+    throw new Error("Private-network access requires its configured HTTP gateway grant.");
+  const privateNetwork = privateNetworkToken !== undefined;
+  const tokenFor = (request: IncomingMessage): string | null => privateNetworkToken ?? requestToken(request, transport);
+  if (privateNetwork) setupHtml = Buffer.from(setupHtml.toString("utf8")
+    .replace("</head>", '<meta name="gridlens-private-network" content="1"></head>')
+    .replace('<section id="login">', '<section id="login" hidden>'));
   const call = <T>(body: unknown, signal?: AbortSignal) => ownerCall<T>(socketPath, body, signal);
   const makeSource = (request: IncomingMessage): FleetSource => {
-    const token = requestToken(request, transport);
+    const token = tokenFor(request);
     return {
       async read<K extends FleetResource>(resource: K, context: FleetContext, signal: AbortSignal): Promise<FleetSnapshots[K]> {
         if (resource === "job-history") {
@@ -71,7 +78,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     source: { async read() { throw new Error("Request-bound shared access required."); } }, sourceForRequest: makeSource,
     async resolveAccess(request, signal) {
       try {
-        const context = await call<FleetContext>({ operation: "resolve", token: requestToken(request, transport) }, signal);
+        const context = await call<FleetContext>({ operation: "resolve", token: tokenFor(request) }, signal);
         if (request.headers["x-gridlens-scope"] !== undefined && request.headers["x-gridlens-scope"] !== context.scopeId
           || request.headers["x-gridlens-roster-revision"] !== undefined && request.headers["x-gridlens-roster-revision"] !== context.rosterRevision) return null;
         return context;
@@ -79,14 +86,19 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     },
     async handleRequest(request, response) {
       const url = new URL(request.url ?? "/", "https://gateway.invalid");
+      if (privateNetwork && url.pathname === "/connect" && (request.method === "GET" || request.method === "HEAD")) {
+        // An explicit empty fragment prevents an old sign-in fragment being inherited.
+        response.writeHead(302, { Location: "/#", "Content-Length": 0 }); response.end(); return true;
+      }
       if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
-        const token = requestToken(request, transport);
+        const token = tokenFor(request);
         let authorized = false;
         if (token) {
           try { await call({ operation: "resolve", token }); authorized = true; }
           catch (error) { if (!(error instanceof SharedHttpError && [401, 403, 409].includes(error.status))) throw error; }
         }
         if (!authorized) {
+          if (privateNetwork) { sendJson(response, 403, { error: "Private-network access is disabled. Contact the backend operator." }); return true; }
           response.writeHead(302, { Location: "/connect", "Content-Length": 0 }); response.end(); return true;
         }
       }
@@ -100,7 +112,8 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
       }
       if (!url.pathname.startsWith("/api/shared/")) return false;
       try {
-        const token = requestToken(request, transport), route = url.pathname.slice("/api/shared/".length);
+        const token = tokenFor(request), route = url.pathname.slice("/api/shared/".length);
+        if (privateNetwork && ["pair", "login", "pair-code", "devices", "revoke"].includes(route)) throw new SharedHttpError(404);
         const getOperations: Record<string, string> = { status: "status", capabilities: "status", observations: "observations", devices: "devices", setup: "setup", monitoring: "monitoring" };
         const postOperations: Record<string, string> = { pair: "pair", login: "pair", "pair-code": "pair-code", revoke: "revoke", "setup-action": "setup-action", "gpu-history": "gpu-history", "monitoring-action": "monitoring-action" };
         if (request.method === "GET" && getOperations[route] && !url.search) {
@@ -123,15 +136,31 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
   };
 }
 export async function startSharedGateway(options: { socketPath: string; certPath?: string; keyPath?: string; publicOrigin: string;
-  directory: string; host?: string; port?: number; transport?: GatewayTransport }) {
+  directory: string; host?: string; port?: number; transport?: GatewayTransport; privateNetworkAuthFile?: string; privateNetworkToken?: string }) {
   const transport = options.transport ?? "https";
   validateGatewayOrigin(options.publicOrigin, transport);
+  if ((options.privateNetworkAuthFile !== undefined || options.privateNetworkToken !== undefined) && transport !== "vpn-http")
+    throw new Error("Private-network access is available only on its explicit HTTP gateway.");
+  if (options.privateNetworkAuthFile !== undefined && options.privateNetworkToken !== undefined) throw new Error("Configure only one private-network grant source.");
+  let privateNetworkToken = options.privateNetworkToken;
+  if (options.privateNetworkAuthFile !== undefined) {
+    const file = await open(options.privateNetworkAuthFile, "r");
+    try {
+      const stat = await file.stat();
+      if (!stat.isFile() || stat.size > 1024) throw new Error("Invalid private-network grant file.");
+      const value = JSON.parse(await file.readFile("utf8")) as { version?: unknown; token?: unknown };
+      if (value?.version !== 1 || typeof value.token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.token))
+        throw new Error("Invalid private-network grant file.");
+      privateNetworkToken = value.token;
+    } finally { await file.close(); }
+  }
   if (transport === "https" && (!options.certPath || !options.keyPath)) throw new Error("HTTPS requires its saved certificate and key.");
   const [html, script, tls] = await Promise.all([
     readFile(join(options.directory, "shared-setup.html")), readFile(join(options.directory, "preview/shared-setup.js")),
     transport === "https" ? Promise.all([readFile(options.certPath!), readFile(options.keyPath!)]).then(([cert, key]) => ({ cert, key })) : undefined,
   ]);
-  const integration = createGatewayIntegration(options.socketPath, html, script, { transport });
+  const integration = createGatewayIntegration(options.socketPath, html, script, { transport,
+    ...(privateNetworkToken === undefined ? {} : { privateNetworkToken }) });
   const server: FleetServerOptions = { integration, directory: options.directory, host: options.host ?? "0.0.0.0",
     port: options.port ?? 8443, publicOrigin: options.publicOrigin, ...(tls ? { tls } : {}), accessCheckIntervalMs: 1000 };
   return { server: await startFleetServer(server), integration };

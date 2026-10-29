@@ -8,7 +8,7 @@ import { Coordinator } from "./coordinator.ts";
 import { verifyGateway } from "./health.ts";
 import { checked, inspectOwned, localDockerRunner, resourceName } from "./docker.ts";
 import type { DockerRunner } from "./docker.ts";
-import { browserConnectionText, verifyPrivateWeb } from "./browser-connection.ts";
+import { browserConnectionText, privateBrowserConnectionText, verifyPrivateWeb } from "./browser-connection.ts";
 import { ensureVpnWeb, readVpnWebEndpoint } from "./vpn-web.ts";
 import { InstallerError, releaseURL, verifyArtifact, verifyRelease } from "./release.ts";
 import type { ReleaseArtifact } from "./release.ts";
@@ -220,7 +220,10 @@ function savedConfiguration(coordinator: Coordinator, runner: DockerRunner, inst
 }
 function printSavedConnection(terminal: TerminalPrompts, coordinator: Coordinator, runner: DockerRunner, instance: string): void {
   const config = savedConfiguration(coordinator, runner, instance), web = readVpnWebEndpoint(runner, config);
-  terminal.print(browserConnectionText(web?.origin ?? config.origin, coordinator.operatorCode(instance), !!web || config.active.sequence >= 3));
+  if (web) {
+    if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
+    terminal.print(privateBrowserConnectionText(web.origin));
+  } else terminal.print(browserConnectionText(config.origin, coordinator.operatorCode(instance), config.active.sequence >= 3));
 }
 export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts):Promise<void>{
   if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing VPN.\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect | --ssh-sign-in | --scan RANGE]\n--vpn-web adds browser access without certificate installation on your private LAN/existing VPN; local LAN traffic uses HTTP. Optional --web-port PORT. Existing HTTPS remains available for Android.\nAll secrets are entered in the controlling terminal. No host Node or Python is required.");return;}
@@ -253,7 +256,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
         if(status.phase==="inspecting"){
           terminal.print("Inspecting the selected computers. Keep this terminal open.");
           terminal.print(checked(runner,["exec",resourceName(instance,"owner"),"node","scripts/shared-control.ts","setup-inspect","default"]));
-          terminal.print("Fleet coverage changed. Open this fresh sign-in link:");
+          terminal.print("Fleet coverage saved. Open GridLens:");
           printSavedConnection(terminal,new Coordinator(runner),runner,instance);break;
         }
         if(status.phase!=="review")throw new InstallerError("Setup phase changed. Review the browser status before signing in again.");
@@ -279,9 +282,9 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       const bytes=await downloadArtifact(base,release.runtime),directory=mkdtempSync(join(tmpdir(),"gridlens-modern-"));
       try{const file=join(directory,"runtime.tar");writeFileSync(file,bytes,{mode:0o600});checked(runner,["load","--input",file]);}finally{rmSync(directory,{recursive:true,force:true});}
     }
-    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")?"upgrade":"setup";
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
     const previous=coordinator.configuration(instance,release.imageId);
+    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<4?"upgrade":"setup";
     if(!previous){
       terminal.print("Scanning and monitoring run on this chosen backend PC. Run this terminal on that PC, including through an interactive SSH login. Setup does not change VPN, DNS or host networking.");
       assertLocalDockerForSelection(runner);
@@ -297,12 +300,13 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     await verifyGateway(result.config.origin,result.certificate);
     terminal.print(result.retainedNewer?"Retained the newer installed runtime; no downgrade was performed.":`Runtime ${result.config.active.version} is ready.`);
     const requestedWebPort=option(args,"--web-port");
-    const web=args.includes("--vpn-web")?ensureVpnWeb(runner,result.config,release,requestedWebPort===undefined?undefined:Number(requestedWebPort))
+    const web=args.includes("--vpn-web")?ensureVpnWeb(runner,result.config,release,requestedWebPort===undefined?undefined:Number(requestedWebPort),{upgrade:true})
       :readVpnWebEndpoint(runner,result.config);
     if(web){
-      await verifyPrivateWeb(web.origin);
-      terminal.print("Browser access is ready on your private LAN/existing VPN. No certificate installation is needed for this web address.");
-      terminal.print(browserConnectionText(web.origin,coordinator.operatorCode(instance)));
+      if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
+      await verifyPrivateWeb(web.origin,true);
+      terminal.print("Browser access is ready on your private LAN/existing VPN.");
+      terminal.print(privateBrowserConnectionText(web.origin));
       terminal.print(`Android HTTPS remains available: ${result.config.origin}`);
       return;
     }

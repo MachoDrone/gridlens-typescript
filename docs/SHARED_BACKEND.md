@@ -60,10 +60,16 @@ the existing LAN/VPN. This gateway receives only the restricted read socket and
 uses a separate HttpOnly, SameSite cookie; it does not receive TLS keys or change
 the HTTPS endpoint used by Android. Local LAN traffic is unencrypted in this
 operator-selected mode. Exact Host/Origin and fleet permissions remain enforced.
-The terminal prints a one-use browser sign-in link, and connected operators can
-create viewer links for other browsers. The code travels in the URL fragment,
-which the browser removes before submitting it once. No certificate installation
-is required for that HTTP browser address. Native Android pairing remains HTTPS.
+The dev.4 candidate changes this explicitly selected private-network browser
+address to ordinary access without pairing or time-limited links. A dedicated
+revocable server-side gateway grant authorizes only its configured fleet's current
+roster. The browser receives neither that grant's secret nor a cookie. Anyone who
+can reach the private address has operator access to that fleet; network access
+is this mode's authorization boundary. A protected gateway-only named volume
+holds the bearer, and the owner retains only its hash in the durable safety ledger.
+Reruns cannot revive a revoked grant. No certificate installation is required for
+that HTTP browser address. Native Android pairing remains HTTPS and keeps its
+existing device-level access rules.
 
 `/connect` accepts a connection code and device name. `/setup` offers a single
 computer checkbox list, partial-IP/name search, persistent selections, counts and

@@ -20,10 +20,17 @@ export function browserConnectionText(origin: string, raw: string, automatic = t
     "Use your existing VPN when away from your home/private network."].join("\n");
 }
 
-export async function verifyPrivateWeb(origin: string): Promise<void> {
+export function privateBrowserConnectionText(origin: string): string {
+  const url = new URL(origin);
+  if (url.protocol !== "http:" || url.origin !== origin || !privateAddress(url.hostname.replace(/^\[|\]$/g, "")))
+    throw new InstallerError("The private browser address is invalid.");
+  return `OPEN GRIDLENS: ${origin}/\nBookmark this address on your PC or phone. Use your existing VPN when away.\nAccess is provided by your trusted private network/VPN.`;
+}
+
+export async function verifyPrivateWeb(origin: string, privateNetwork = false): Promise<void> {
   for (let attempt = 0; attempt < 20; attempt++) {
     try {
-      const response = await fetch(`${origin}/connect`, { redirect: "error", signal: AbortSignal.timeout(1500) });
+      const response = await fetch(`${origin}${privateNetwork ? "/" : "/connect"}`, { redirect: "error", signal: AbortSignal.timeout(1500) });
       await response.body?.cancel();
       if (response.ok) return;
     } catch { /* Newly started gateways may need a moment to listen. */ }

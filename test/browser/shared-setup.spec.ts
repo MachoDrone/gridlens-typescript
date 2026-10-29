@@ -7,6 +7,36 @@ async function connectPage(page: Page): Promise<void> {
   await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
 }
 
+test("private-network setup opens without codes, cookies or device pairing and keeps denial explicit", async ({ page }) => {
+  await page.clock.install();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.route("**/setup", async route => route.fulfill({ contentType: "text/html", body:
+    (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-private-network" content="1"></head>') }));
+  await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  let denied = false; const paths: string[] = [];
+  await page.route("**/api/shared/**", async route => {
+    const path = new URL(route.request().url()).pathname; paths.push(path);
+    expect(route.request().headers().authorization).toBeUndefined(); expect(route.request().headers().cookie).toBeUndefined();
+    if (denied) { await route.fulfill({ status: 401, json: { error: "denied" } }); return; }
+    if (path.endsWith("/status")) { await route.fulfill({ json: { role: "operator", serverId: "synthetic-server" } }); return; }
+    if (path.endsWith("/monitoring")) { await route.fulfill({ json: { pcs: [] } }); return; }
+    expect(path).toBe("/api/shared/setup");
+    await route.fulfill({ json: { revision: 1, phase: "scan", computers: [], selected: [], trusted: [], automaticIp: false,
+      fullMonitoring: false, exclusions: [], savedHosts: 0, inspectedPcs: 0, monitoringStatus: "Not configured" } });
+  });
+  await page.goto("/setup#code=oldlink_1234");
+  await expect(page.getByRole("heading", { name: "Search from the backend computer" })).toBeVisible();
+  await expect(page).toHaveURL(/\/setup$/);
+  await expect(page.getByLabel("Connection code")).toBeHidden();
+  await expect(page.getByRole("button", { name: "Connect another browser" })).toBeHidden();
+  await page.clock.fastForward(600_000);
+  await expect(page.getByRole("heading", { name: "Search from the backend computer" })).toBeVisible();
+  denied = true; await page.clock.fastForward(3100);
+  await expect(page.getByRole("status")).toHaveText("Private-network access is disabled. Contact the backend operator.");
+  await expect(page.getByLabel("Connection code")).toBeHidden();
+  expect(paths.every(path => !/login|pair|devices|revoke/.test(path))).toBe(true);
+});
+
 test("one-use sign-in link connects on mobile and clears its secret before the request", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await connectPage(page);

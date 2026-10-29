@@ -3,10 +3,10 @@
 The modern backend is separate from the loopback developer preview and the legacy
 installer. Its TypeScript terminal coordinator manages a single collection owner
 and an unprivileged HTTPS gateway on a chosen PC, which may also run Nosana. This
-source revision prepares the next development installer candidate, **0.1.0-dev.3**.
-The published **0.1.0-dev.1** release remains immutable. The address-selection,
-TLS-default and endpoint-recovery changes described below have targeted tests and
-real Docker verification, but have not been published in a new release.
+source revision prepares the next development installer candidate, **0.1.0-dev.4**.
+Published **0.1.0-dev.3** includes the address-selection, TLS-default and
+endpoint-recovery changes. The private-network access change below is the dev.4
+candidate; earlier published releases remain immutable.
 The source `scripts/modern-start.sh` intentionally refuses to run until the release
 builder supplies a tested executable checksum and pinned GitHub release tag.
 
@@ -25,17 +25,25 @@ Run the release launcher with `--vpn-web` (optionally `--web-port PORT`). On an
 existing instance it retains the HTTPS address and normally uses the next port
 for the browser gateway. Reruns retain the saved browser port; occupied ports are
 reported without stopping another service. The persistent container uses
-`unless-stopped` and retains its own endpoint metadata. A different image or
-changed isolation is refused rather than silently replacing that gateway.
+`unless-stopped` and retains its own endpoint metadata. Enabling dev.4 private
+access upgrades an older owner through the matched image/state recovery process,
+then replaces only a verified owned browser gateway, retaining its saved port.
+Changed isolation or an attempted downgrade is refused.
 
-Setup prints **OPEN GRIDLENS** followed by a private one-use sign-in link. Opening
-it signs the browser in automatically, without extracting JSON, entering a code,
-or choosing a device name. The link expires after five minutes. Its code is carried
-in a URL fragment, removed from browser history before the login request, and
-never retried automatically. Bookmark the separate dashboard URL for subsequent
-visits. `--connect` produces a fresh link. Browsers without a session are directed
-to the connection page. Older HTTPS browser builds retain a clearly labeled
-manual code fallback. Native Android's existing manual HTTPS pairing is unchanged.
+Setup prints **OPEN GRIDLENS** followed by the ordinary dashboard address. Open
+or bookmark that same address on any PC or phone on the existing private network
+or VPN. There is no browser code, pairing step, cookie requirement or sign-in
+expiry in this mode. `--connect` prints the same address. Old `/connect` links
+redirect to Fleet. Anyone able to reach this private address has operator access
+to its configured fleet; network access is the browser's authorization boundary.
+
+The owner records a dedicated revocable grant for this gateway and fleet. Its
+secret is held only in a protected named volume mounted read-only by that gateway;
+the owner retains its hash. The grant follows that fleet's current roster without
+re-pairing browsers. Reruns retain it and cannot revive a revoked grant. Explicit
+monitoring approvals and terminal-only SSH/password entry remain required.
+Native Android's separate HTTPS pairing, device revocation and exact roster
+authorization are unchanged. HTTPS browser access also retains its pairing flow.
 
 ### HTTPS access
 

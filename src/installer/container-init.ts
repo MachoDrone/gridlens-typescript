@@ -1,8 +1,8 @@
 /** Fixed container-local installer operations. No request path or browser loads this module. */
 import { X509Certificate, createHash, createPrivateKey, createPublicKey, randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
-import { chmodSync, chownSync, closeSync, copyFileSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync,
-  readdirSync, renameSync, writeFileSync } from "node:fs";
+import { chmodSync, chownSync, closeSync, copyFileSync, existsSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync,
+  readdirSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { validateInstallation, originFor } from "./config.ts";
 import type { InstallationConfig } from "./config.ts";
@@ -28,6 +28,30 @@ function checkCertificate(certificate: string, privateKey: string, address: stri
   return cert;
 }
 function ownedDirectory(path: string): void { mkdirSync(path,{recursive:true,mode:0o700});chmodSync(path,0o700);chownSync(path,1000,1000); }
+/** Publish a new bearer atomically without replacing an existing gateway identity. */
+export function vpnWebAuthorization(directory = "/vpn-auth"): { version: 1; token: string } {
+  ownedDirectory(directory);
+  const path=join(directory,"browser.json");
+  if(!existsSync(path)) {
+    const temporary=join(directory,`.browser-${randomBytes(8).toString("hex")}`);
+    const fd=openSync(temporary,"wx",0o600);
+    try { writeFileSync(fd,JSON.stringify({version:1,token:randomBytes(32).toString("base64url")}));fsyncSync(fd); }
+    finally { closeSync(fd); }
+    chownSync(temporary,1000,1000);
+    try { linkSync(temporary,path); }
+    catch(error) { if(!(error instanceof Error&&"code" in error&&error.code==="EEXIST"))throw error; }
+    finally { unlinkSync(temporary); }
+    const parent=openSync(directory,"r");try{fsyncSync(parent);}finally{closeSync(parent);}
+  }
+  const saved=lstatSync(path);
+  if(!saved.isFile()||saved.size>256||(saved.mode&0o777)!==0o600||saved.uid!==1000||saved.gid!==1000)
+    throw new InstallerError("The saved browser authorization file is invalid; it was retained for recovery.");
+  let value: {version?:unknown;token?:unknown};
+  try { value=JSON.parse(readFileSync(path,"utf8")); } catch { throw new InstallerError("The saved browser authorization file could not be read; it was retained for recovery."); }
+  if(!value||value.version!==1||typeof value.token!=="string"||!/^[A-Za-z0-9_-]{43}$/.test(value.token)||Object.keys(value).some(key=>!['version','token'].includes(key)))
+    throw new InstallerError("The saved browser authorization file is invalid; it was retained for recovery.");
+  return {version:1,token:value.token};
+}
 function copyDirectory(source: string, destination: string): void {
   for(const name of readdirSync(source)) {
     const from=join(source,name),to=join(destination,name),st=lstatSync(from);
@@ -39,6 +63,7 @@ function copyDirectory(source: string, destination: string): void {
   const fd=openSync(destination,"r");try{fsyncSync(fd);}finally{closeSync(fd);}
 }
 export function containerOperation(operation: string, body: unknown): unknown {
+  if(operation==="vpn-web-auth")return vpnWebAuthorization();
   if(operation==="read")return existsSync("/config/installation.json")?validateInstallation(JSON.parse(readFileSync("/config/installation.json","utf8"))):null;
   if(operation==="save") {const config=validateInstallation(body);atomic("/config/installation.json",JSON.stringify(config));return {saved:true};}
   if(operation==="certificate")return readFileSync(existsSync("/config/ca.crt")?"/config/ca.crt":"/tls/server.crt","utf8");

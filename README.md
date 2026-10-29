@@ -14,15 +14,14 @@ collection, authenticated HTTPS, browser setup and optional Android pairing.
 Its [modern Docker installer](docs/MODERN_INSTALL.md) is separate from the legacy
 installer and this developer preview. Isolated Docker acceptance passed on an
 authorized Nosana host, including HTTPS, cache sharing and recovery. Development
-release **0.1.0-dev.1** is published and immutable. The next installer candidate
-adds a detected-private-IP menu, an Enter default for private TLS, available-port
-recommendations and safe recovery from failed gateway publication. Those fixes
-have targeted tests and real Docker verification but are not yet published.
-An additional pending **0.1.0-dev.3** candidate adds opt-in browser access over an
-existing private LAN/VPN without certificate installation (`--vpn-web`), plus a
-one-use browser sign-in link. Its HTTP LAN traffic is unencrypted; the existing
-HTTPS endpoint remains available for Android. Physical reboot, GPU recorder
-lifecycle and physical-phone acceptance remain separate.
+release **0.1.0-dev.3** is published, including private-address choices, installer
+recovery and opt-in browser access over an existing LAN/VPN (`--vpn-web`). The
+pending **0.1.0-dev.4** candidate removes browser pairing and expiring links in
+that mode: open the ordinary dashboard address. Anyone who can reach that private
+address has access to its configured fleet. HTTP LAN traffic is unencrypted;
+the existing HTTPS endpoint and Android pairing remain available separately.
+Physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
+separate.
 
 **Country** appears after System at the right edge of Fleet. It reuses the country
 reported in existing Nosana metrics, with a saved header toggle between compact

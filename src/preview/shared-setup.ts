@@ -3,6 +3,7 @@ interface SetupComputer { id: string; host: string; port: number; name: string; 
 interface SetupView { revision: number; phase: string; computers: SetupComputer[]; selected: string[]; trusted: string[]; automaticIp: boolean;
   fullMonitoring: boolean; exclusions: string[]; savedHosts: number; inspectedPcs: number; monitoringStatus: string }
 const el = <T extends HTMLElement>(id: string): T => document.getElementById(id) as T;
+const privateNetwork = document.querySelector<HTMLMetaElement>('meta[name="gridlens-private-network"]')?.content === "1";
 let current: SetupView | undefined;
 let selected = new Set<string>();
 let filtering = "";
@@ -15,7 +16,8 @@ const message = (text: string, kind = "pending") => { const node = el("message")
 class RequestError extends Error {
   readonly status: number;
   constructor(status: number) {
-    super(status === 401 || status === 403 ? "Access is unavailable. Open a new sign-in link from GridLens setup." : "The backend could not complete this request. Retry when it is available.");
+    super(status === 401 || status === 403 ? privateNetwork ? "Private-network access is disabled. Contact the backend operator."
+      : "Access is unavailable. Open a new sign-in link from GridLens setup." : "The backend could not complete this request. Retry when it is available.");
     this.status = status;
   }
 }
@@ -122,6 +124,7 @@ async function monitoring(): Promise<void> {
   }
 }
 async function signIn(code: string): Promise<void> {
+  if (privateNetwork) return;
   if (signingIn) return;
   signingIn = true; connected = false; signInRevision++;
   const submit = el<HTMLFormElement>("login-form").querySelector<HTMLButtonElement>("button[type=submit]")!;
@@ -160,23 +163,28 @@ async function refresh(): Promise<void> {
     if (status.role === "operator") {
       const view = await api<SetupView>("setup");
       if (revision !== signInRevision) return;
-      render(view); if (el("devices").hidden) await devices(); if (el("monitoring").hidden) await monitoring();
+      render(view); if (!privateNetwork && el("devices").hidden) await devices(); if (el("monitoring").hidden) await monitoring();
     }
     else { el("setup").hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
   } catch (error) {
     if (revision !== signInRevision) return;
     if (error instanceof RequestError && [401, 403].includes(error.status)) connected = false;
-    el("login").hidden = false;
+    el("login").hidden = privateNetwork;
     for (const id of ["setup", "devices", "monitoring"]) el(id).hidden = true;
     lastSignature = "";
     message(error instanceof RequestError && [401, 403].includes(error.status)
-      ? "Open the sign-in link shown by GridLens setup, or enter its connection code below."
+      ? privateNetwork ? "Private-network access is disabled. Contact the backend operator." : "Open the sign-in link shown by GridLens setup, or enter its connection code below."
       : "Backend unavailable. Check your existing network or VPN connection and try again.", "pending");
   } finally { refreshing = false; }
 }
 // Fragments never enter HTTP requests. Remove the one-use secret from browser
 // history before submitting it, and never store or retry it automatically.
 function start(): void {
+  if (privateNetwork) {
+    el("login").hidden = true; el("devices").hidden = true;
+    if (location.hash) history.replaceState(null, "", location.pathname + location.search);
+    message("Connected through your private network.", "success"); void refresh(); return;
+  }
   const fragment = location.hash;
   if (!fragment) { void refresh(); return; }
   const code = /^#code=([A-Za-z0-9_-]{12})$/.exec(fragment)?.[1];
