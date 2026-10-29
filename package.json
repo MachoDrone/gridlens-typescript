@@ -19,15 +19,25 @@
     "dev:handoff": "npm run build && node scripts/hosting-lab.ts",
     "preview": "node scripts/preview-server.ts",
     "test:browser": "npm run build && playwright test",
-    "check": "npm run typecheck && npm test && npm run test:browser"
+    "check": "npm run typecheck && npm test && npm run test:browser",
+    "shared:owner": "node scripts/shared-owner.ts",
+    "shared:gateway": "node scripts/shared-gateway.ts",
+    "shared:control": "node scripts/shared-control.ts",
+    "build:coordinator": "node scripts/build-coordinator.ts",
+    "build:modern": "node scripts/build-modern-release.ts",
+    "test:shared-docker": "node scripts/test-shared-docker.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",
     "@types/node": "24.13.6",
+    "@types/ssh2": "1.15.6",
+    "esbuild": "0.28.2",
+    "postject": "1.0.0-alpha.6",
     "typescript": "7.0.2"
   },
   "dependencies": {
     "@solana-program/token": "0.17.0",
-    "@solana/kit": "8.4.0"
+    "@solana/kit": "8.4.0",
+    "ssh2": "1.17.0"
   }
 }

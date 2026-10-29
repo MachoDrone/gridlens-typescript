@@ -230,7 +230,7 @@ for (const width of [320, 390, 1440]) {
       expect(await page.evaluate(() => window.scrollX)).toBe(0);
       if (position[0] && width < 1440) {
         expect(await page.locator(".fleet-table-wrap").evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
-        await expect(page.getByRole("button", { name: "Sort by System", exact: true })).toBeInViewport();
+        await expect(page.getByRole("button", { name: "Sort by Country", exact: true })).toBeInViewport();
       }
     }
     reachable = false;

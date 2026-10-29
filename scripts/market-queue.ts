@@ -2,6 +2,7 @@ import { createSharedRead, createRequestLimiter, throwIfAborted } from "./shared
 import { createDemandWatch } from "./demand-watch.ts";
 import { combineRetention, pruneCacheKeys } from "./online-retention.ts";
 import type { ProviderRetention } from "./online-retention.ts";
+import type { ProviderCheckpoint } from "./provider-checkpoint.ts";
 import { comparePriority, refreshPriority } from "./scheduling-priority.ts";
 import type { ActivityPriority } from "./scheduling-priority.ts";
 import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
@@ -71,17 +72,20 @@ export function normalizeMarketQueue(marketAddress: string, payload: unknown): P
 
 /** One memory-only cache per market, shared by position and State membership. */
 export function createMarketQueueProvider({ fetch: fetcher = globalThis.fetch, now = Date.now, timeoutMs = 8_000,
-  activityPriority = () => 2 }: {
+  activityPriority = () => 2, checkpoint }: {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   timeoutMs?: number;
   activityPriority?: ActivityPriority;
+  checkpoint?: ProviderCheckpoint;
 } = {}): MarketQueueProvider {
-  const cache = new Map<string, { record: MarketQueueRecord; nextAttemptAt: number }>();
-  const attempted = new Set<string>();
+  const restored = checkpoint?.read<{ cache: Map<string, { record: MarketQueueRecord; nextAttemptAt: number }>; attempted: Set<string>; pauseUntil: number }>();
+  const cache = restored?.cache ?? new Map<string, { record: MarketQueueRecord; nextAttemptAt: number }>();
+  const attempted = restored?.attempted ?? new Set<string>();
   const readMarket = createSharedRead<string, MarketQueueRecord>();
   const limited = createRequestLimiter(2);
-  let pauseUntil = 0;
+  let pauseUntil = restored?.pauseUntil ?? 0;
+  const save = (): void => checkpoint?.write({ cache, attempted, pauseUntil });
   const priority = (market: string): readonly number[] => refreshPriority(attempted.has(market),
     cache.get(market)?.record.validUntilMs ?? null, cache.get(market)?.nextAttemptAt ?? 0,
     activityPriority(market, now()), now());
@@ -92,6 +96,7 @@ export function createMarketQueueProvider({ fetch: fetcher = globalThis.fetch, n
     const date = retry && !Number.isFinite(seconds) ? Date.parse(retry) : NaN;
     const until = Number.isFinite(seconds) ? now() + seconds * 1000 : date;
     pauseUntil = Math.max(pauseUntil, now() + failureBackoffMs, Number.isFinite(until) ? until : 0);
+    save();
   }
 
   async function json(market: string, signal: AbortSignal): Promise<unknown> {
@@ -177,6 +182,7 @@ export function createMarketQueueProvider({ fetch: fetcher = globalThis.fetch, n
       }
       throwIfAborted(signal);
       cache.set(market, { record, nextAttemptAt });
+      save();
       watch.publish(market, record);
       return record;
     }, signal);
@@ -216,12 +222,13 @@ export function createMarketQueueProvider({ fetch: fetcher = globalThis.fetch, n
 }
 
 /** Join only the startup host's current reported market with its exact ordered membership. */
-export function createQueueProvider({ metadataProvider, marketQueueProvider = createMarketQueueProvider(), now = Date.now }: {
+export function createQueueProvider({ metadataProvider, marketQueueProvider = createMarketQueueProvider(), now = Date.now, checkpoint }: {
   metadataProvider: HostMetadataProvider;
   marketQueueProvider?: MarketQueueProvider;
   now?: () => number;
+  checkpoint?: ProviderCheckpoint;
 }): QueueProvider {
-  const previous = new Map<string, QueueRecord>();
+  const previous = checkpoint?.read<Map<string, QueueRecord>>() ?? new Map<string, QueueRecord>();
   function failed(address: string, marketAddress: string | null, error: string): QueueRecord {
     const old = previous.get(address);
     if (old && (marketAddress === null || old.marketAddress === marketAddress)) {
@@ -230,6 +237,7 @@ export function createQueueProvider({ metadataProvider, marketQueueProvider = cr
     const record: QueueRecord = { address, marketAddress, position: null, total: null, checkedAtMs: null,
       validUntilMs: null, sourceUpdatedAtMs: null, retained: false, error };
     previous.set(address, record);
+    checkpoint?.write(previous);
     return { ...record };
   }
   function position(address: string, marketAddress: string, market: MarketQueueRecord | null): QueueRecord {
@@ -244,6 +252,7 @@ export function createQueueProvider({ metadataProvider, marketQueueProvider = cr
       total: market.queueType === 1 ? market.queue.length : 0, checkedAtMs: market.checkedAtMs,
       validUntilMs: market.validUntilMs, sourceUpdatedAtMs: market.sourceUpdatedAtMs, retained: false, error: null };
     previous.set(address, record);
+    checkpoint?.write(previous);
     return { ...record };
   }
   const provider: QueueProvider = async (addresses, signal, onUpdate) => {

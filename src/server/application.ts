@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
-import type { IncomingMessage, Server } from "node:http";
+import { createServer as createSecureServer } from "node:https";
+import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BROWSER_ASSETS } from "./browser-assets.ts";
@@ -8,16 +9,23 @@ import { FLEET_RESOURCES, isFleetRoster, isFleetSnapshot } from "../contracts/fl
 import type { FleetContext, FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
 import type { FleetSource } from "./snapshot-source.ts";
 import { normalizeFleetSnapshot } from "./snapshot-store.ts";
+import { selectJobHistoryHosts } from "./job-history-selection.ts";
 
 /** The platform verifies its own sessions and returns only their authorized roster.
  * GridLens deliberately defines no login, token format, or trusted proxy header. */
 export interface FleetIntegration {
   resolveAccess(request: IncomingMessage, signal?: AbortSignal): Promise<FleetContext | null>;
   source: FleetSource;
+  /** Trusted production composition may bind the source to this request's verified credential. */
+  sourceForRequest?: (request: IncomingMessage) => FleetSource;
+  /** Explicit versioned setup/pairing composition, after the common Host/Origin check. */
+  handleRequest?: (request: IncomingMessage, response: ServerResponse) => Promise<boolean>;
   close?: () => Promise<void>;
   label?: string;
   /** Explicit fixture mode; the reference lab is never packaged as platform auth. */
   demonstration?: boolean;
+  /** Only the installed shared owner supplies the optional verified PC telemetry API. */
+  sharedBackend?: boolean;
 }
 
 export interface FleetServerOptions {
@@ -33,6 +41,7 @@ export interface FleetServerOptions {
   requestTimeoutMs?: number;
   /** Wire-envelope time only; access checks and source observations keep their own clocks. */
   now?: () => number;
+  tls?: { cert: Buffer; key: Buffer };
 }
 
 export class FleetConfigurationError extends Error {}
@@ -61,7 +70,7 @@ function escapeAttribute(text: string): string {
 
 /** Shared UI and data contracts, with platform access/source adapters supplied explicitly. */
 export async function startFleetServer({ integration, directory = defaultDirectory, host = "127.0.0.1", port = 4173,
-  publicOrigin, basePath = "", accessCheckIntervalMs = 30_000, requestTimeoutMs = 120_000, now = Date.now }: FleetServerOptions): Promise<Server> {
+  publicOrigin, basePath = "", accessCheckIntervalMs = 30_000, requestTimeoutMs = 120_000, now = Date.now, tls }: FleetServerOptions): Promise<Server> {
   if (!integration || typeof integration.resolveAccess !== "function" || typeof integration.source?.read !== "function") {
     throw new FleetConfigurationError("A trusted access resolver and snapshot source are required.");
   }
@@ -87,6 +96,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
     expectedOrigin = origin.origin;
   }
   const label = integration.label ?? "Shared backend snapshots";
+  if (tls && !expectedOrigin?.startsWith("https://")) throw new FleetConfigurationError("TLS requires the canonical HTTPS origin.");
   if (!label.trim() || label.length > 160 || /[\u0000-\u001f\u007f]/.test(label)) throw new FleetConfigurationError("Invalid source label.");
   const loaded = new Map<string, { body: Buffer; contentType: string }>();
   try {
@@ -100,6 +110,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
           .replace('src="/preview/main.js"', `src="${basePath}/preview/main.js"`).replace("</head>", [
           `<meta name="gridlens-api-base" content="${basePath}/api/fleet">`,
           '<meta name="gridlens-source-mode" content="snapshot">',
+          ...(integration.sharedBackend ? ['<meta name="gridlens-shared-backend" content="1">'] : []),
           `<meta name="gridlens-source-label" content="${escapeAttribute(label)}">`, "</head>",
         ].join("\n"));
         body = Buffer.from(integration.demonstration
@@ -112,7 +123,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
 
   let draining = false;
   const controllers = new Set<AbortController>();
-  const server = createServer((request, response) => {
+  const handler = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     response.setHeader("Cache-Control", "no-store");
     response.setHeader("X-Content-Type-Options", "nosniff");
     response.setHeader("Referrer-Policy", "same-origin");
@@ -131,6 +142,10 @@ export async function startFleetServer({ integration, directory = defaultDirecto
     if (request.headers.host?.toLowerCase() !== expected.host.toLowerCase()
       || request.headers.origin !== undefined && request.headers.origin !== expected.origin) {
       send(403, { error: "Unrecognized Fleet origin." }); return;
+    }
+    if (integration.handleRequest) {
+      try { if (await integration.handleRequest(request, response)) return; }
+      catch { send(502, { error: "Shared backend is unavailable." }); return; }
     }
     if (request.method !== "GET" && request.method !== "HEAD") {
       response.setHeader("Allow", "GET, HEAD"); send(405, { error: "Method not allowed." }); return;
@@ -158,7 +173,9 @@ export async function startFleetServer({ integration, directory = defaultDirecto
     if (!rosterRead && (!FLEET_RESOURCES.includes(resource) || path !== `${apiPrefix}${resource}.json`)) {
       send(404, { error: "Not found." }); return;
     }
-    if ((request.url ?? "").includes("?")) { send(400, { error: "Fleet scope comes from the verified session." }); return; }
+    if (resource !== "job-history" && (request.url ?? "").includes("?")) {
+      send(400, { error: "Fleet scope comes from the verified session." }); return;
+    }
     const controller = new AbortController();
     controllers.add(controller);
     const disconnected = (): void => { controller.abort(); };
@@ -178,6 +195,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
     }, { once: true }));
     void canceled.catch(() => {});
     const work = async (): Promise<void> => {
+      const source = integration.sourceForRequest?.(request) ?? integration.source;
       const context = await integration.resolveAccess(request, controller.signal);
       controller.signal.throwIfAborted();
       if (context === null) { send(401, { error: "An authorized Fleet session is required." }); return; }
@@ -185,9 +203,23 @@ export async function startFleetServer({ integration, directory = defaultDirecto
       const owned: FleetContext = { scopeId: context.scopeId, rosterRevision: context.rosterRevision,
         addresses: [...context.addresses] };
       if (rosterRead) { send(200, { addresses: owned.addresses, error: null, rosterRevision: owned.rosterRevision, serverTimeMs: now() }); return; }
+      let selectedAddresses = owned.addresses;
+      if (resource === "job-history") {
+        try {
+          const parameters = new URLSearchParams((request.url ?? "").split("?").slice(1).join("?"));
+          selectedAddresses = selectJobHistoryHosts(parameters, owned.addresses).addresses;
+        } catch {
+          send(400, { error: "Choose between one and 100 distinct hosts from the current Fleet roster." }); return;
+        }
+      }
+      const selected = new Set(selectedAddresses);
+      const selectSnapshot = (snapshot: FleetSnapshots[FleetResource]): FleetSnapshots[FleetResource] =>
+        resource === "job-history"
+          ? { ...snapshot, hosts: snapshot.hosts.filter(row => selected.has(row.address)) } as FleetSnapshots[FleetResource]
+          : snapshot;
       if (request.method === "HEAD") { send(200, {}); return; }
       const stream = request.headers.accept?.split(",").some(value => value.trim().split(";", 1)[0] === "application/x-ndjson") ?? false;
-      const watching = stream && watchResources.has(resource) && integration.source.watch !== undefined;
+      const watching = stream && watchResources.has(resource) && source.watch !== undefined;
       let authorizedAt = Date.now();
       let checking: Promise<boolean> | undefined;
       const stillAuthorized = (): Promise<boolean> => checking ??= Promise.resolve().then(async () => {
@@ -212,7 +244,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
       let withheld = false;
       const emit = (snapshot: FleetSnapshots[FleetResource], complete: boolean): void => {
         if (controller.signal.aborted || response.destroyed || response.writableEnded) return;
-        if (!isFleetSnapshot(resource, snapshot, owned.addresses, complete)) throw new Error("Invalid Fleet snapshot");
+        if (!isFleetSnapshot(resource, snapshot, selectedAddresses, complete)) throw new Error("Invalid Fleet snapshot");
         // Do not send data while an access recheck is overdue. A valid watch
         // replays its latest snapshot after the recheck below.
         if (Date.now() - authorizedAt >= accessCheckIntervalMs) { withheld = true; return; }
@@ -228,10 +260,23 @@ export async function startFleetServer({ integration, directory = defaultDirecto
         if (complete) response.end();
       };
       let latest: FleetSnapshots[FleetResource] | undefined;
+      const historyProgress = new Map<string, string>();
       const progress = (snapshot: FleetSnapshots[FleetResource]): void => {
         if (controller.signal.aborted) return;
         try {
-          const update = normalizeFleetSnapshot(resource, snapshot, owned.addresses, false);
+          let update = selectSnapshot(normalizeFleetSnapshot(resource, snapshot, owned.addresses, false));
+          if (resource === "job-history") {
+            // Unrelated bulk ingestion must not spend a small selection's
+            // browser frame allowance or repeatedly replay unchanged records.
+            const hosts = update.hosts.filter(row => {
+              const signature = JSON.stringify(row);
+              if (historyProgress.get(row.address) === signature) return false;
+              historyProgress.set(row.address, signature);
+              return true;
+            });
+            if (hosts.length === 0) return;
+            update = { ...update, hosts } as FleetSnapshots[FleetResource];
+          }
           latest = withheld && latest ? { ...latest, ...update, hosts: [...new Map([...latest.hosts, ...update.hosts]
             .map(record => [record.address, record])).values()] } as FleetSnapshots[FleetResource] : update;
           emit(latest, false);
@@ -244,12 +289,12 @@ export async function startFleetServer({ integration, directory = defaultDirecto
           void stillAuthorized().then(authorized => { if (authorized && latest) emit(withheld ? latest : { ...latest, hosts: [] }, false); })
             .catch(() => { controller.abort(); });
         }, accessCheckIntervalMs);
-        await integration.source.watch!(resource, owned, controller.signal, progress);
+        await source.watch!(resource, owned, controller.signal, progress);
         throw new Error("Unexpected end of Fleet watch");
       } else {
-        const raw = await integration.source.read(resource, owned, controller.signal, progress);
+        const raw = await source.read(resource, owned, controller.signal, progress);
         controller.signal.throwIfAborted();
-        const result = normalizeFleetSnapshot(resource, raw, owned.addresses);
+        const result = selectSnapshot(normalizeFleetSnapshot(resource, raw, owned.addresses));
         if (!await stillAuthorized()) return;
         if (stream) emit(result, true);
         else send(200, { ...result, serverTimeMs: now() });
@@ -258,7 +303,11 @@ export async function startFleetServer({ integration, directory = defaultDirecto
     void Promise.race([work(), canceled]).catch(() => {
       if (!controller.signal.aborted) send(502, { error: "Fleet data is unavailable." });
     }).finally(cleanup);
-  });
+  };
+  const onRequest = (request: IncomingMessage, response: ServerResponse): void => {
+    void handler(request, response).catch(() => { if (!response.headersSent) response.writeHead(500); response.end(); });
+  };
+  const server = tls ? createSecureServer({ ...tls, minVersion: "TLSv1.2" }, onRequest) : createServer(onRequest);
   const close = server.close.bind(server);
   server.close = ((callback?: (error?: Error) => void): Server => {
     draining = true;

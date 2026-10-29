@@ -3,6 +3,7 @@ import type { FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
 import { isServerTimeMs } from "./evidence-clock.ts";
 import { isOnlineRosterStatus } from "../contracts/online-hosts.ts";
 import type { OnlineRosterStatus } from "../contracts/online-hosts.ts";
+import { JOB_HISTORY_REQUEST_LIMIT } from "../fleet/job-history.ts";
 
 type Timer = unknown;
 export interface FleetTransportOptions {
@@ -33,6 +34,9 @@ export function fleetReadError(error: unknown, fallback: string): string {
 
 interface ReadOptions<R extends FleetResource> {
   addresses: readonly string[];
+  /** Explicit history selection; the server still verifies the authorized roster. */
+  hosts?: readonly string[];
+  refresh?: boolean;
   signal?: AbortSignal;
   current?: () => boolean;
   onSnapshot?: (snapshot: FleetSnapshots[R], complete: boolean, envelope: Record<string, unknown>) => void;
@@ -230,6 +234,18 @@ export function createFleetTransport(options: FleetTransportOptions = {}) {
   return {
     async read<R extends FleetResource>(resource: R, url: string, readOptions: ReadOptions<R>): Promise<FleetSnapshots[R]> {
       if (!isFleetRoster(readOptions.addresses)) throw new FleetTransportError("Fleet roster identities are invalid.");
+      if (readOptions.hosts !== undefined || readOptions.refresh !== undefined) {
+        const hosts = readOptions.hosts;
+        if (resource !== "job-history" || !hosts || !isFleetRoster(hosts) || hosts.length === 0 ||
+            hosts.length > JOB_HISTORY_REQUEST_LIMIT || hosts.length !== readOptions.addresses.length ||
+            hosts.some((address, index) => address !== readOptions.addresses[index])) {
+          throw new FleetTransportError("Job history requires a bounded selection of the expected hosts.");
+        }
+        const parameters = new URLSearchParams();
+        for (const address of hosts) parameters.append("host", address);
+        if (readOptions.refresh) parameters.set("refresh", "1");
+        url += `${url.includes("?") ? "&" : "?"}${parameters}`;
+      }
       const validSnapshot = createFleetSnapshotValidator(readOptions.addresses);
       return request(url, readOptions.signal, readOptions.current, readOptions.progressive ?? true, async (response, control) => {
         let final: FleetSnapshots[R] | undefined;

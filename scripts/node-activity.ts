@@ -2,6 +2,7 @@ import { createSharedRead, createRequestLimiter, throwIfAborted } from "./shared
 import { createDemandWatch } from "./demand-watch.ts";
 import { combineRetention, pruneCacheKeys } from "./online-retention.ts";
 import type { ProviderRetention } from "./online-retention.ts";
+import type { ProviderCheckpoint } from "./provider-checkpoint.ts";
 import { comparePriority, refreshPriority } from "./scheduling-priority.ts";
 import type { ActivityPriority } from "./scheduling-priority.ts";
 import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
@@ -72,18 +73,22 @@ export function createNodeActivityProvider({
   timeoutMs = 8_000,
   marketQueueProvider,
   activityPriority = () => 2,
+  checkpoint,
 }: {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   timeoutMs?: number;
   marketQueueProvider?: MarketQueueProvider;
   activityPriority?: ActivityPriority;
+  checkpoint?: ProviderCheckpoint;
 } = {}): NodeActivityProvider {
-  const cache = new Map<string, Membership>();
-  const assignments = new Map<string, string>();
-  const attempted = new Set<string>();
+  const restored = checkpoint?.read<{ cache: Map<string, Membership>; assignments: Map<string, string>; attempted: Set<string>; pauseUntil: Record<Service, number> }>();
+  const cache = restored?.cache ?? new Map<string, Membership>();
+  const assignments = restored?.assignments ?? new Map<string, string>();
+  const attempted = restored?.attempted ?? new Set<string>();
   const readMembership = createSharedRead<string, Membership>();
-  const pauseUntil: Record<Service, number> = { running: 0, queued: 0 };
+  const pauseUntil: Record<Service, number> = restored?.pauseUntil ?? { running: 0, queued: 0 };
+  const save = (): void => checkpoint?.write({ cache, assignments, attempted, pauseUntil });
   const limited = createRequestLimiter(2);
   const priority = (service: Service, market: string): readonly number[] => {
     const entry = cache.get(`${service}:${market}`);
@@ -97,6 +102,7 @@ export function createNodeActivityProvider({
     const date = retry && !Number.isFinite(seconds) ? Date.parse(retry) : NaN;
     const until = Number.isFinite(seconds) ? now() + seconds * 1000 : date;
     pauseUntil[service] = Math.max(pauseUntil[service], now() + failureBackoffMs, Number.isFinite(until) ? until : 0);
+    save();
   }
 
   async function json(service: Service, market: string, signal: AbortSignal): Promise<unknown> {
@@ -178,6 +184,7 @@ export function createNodeActivityProvider({
       }
       throwIfAborted(signal);
       cache.set(key, result);
+      save();
       return result;
     }, signal);
   }
@@ -310,19 +317,21 @@ export function createNodeActivityProvider({
 
 /** Reconcile each completed host before publishing it, without a fleet-wide barrier. */
 export function createReconciledNodeInfoProvider({
-  nodeInfoProvider, metadataProvider, activityProvider = createNodeActivityProvider(), now = Date.now,
+  nodeInfoProvider, metadataProvider, activityProvider = createNodeActivityProvider(), now = Date.now, checkpoint,
 }: {
   nodeInfoProvider: NodeInfoProvider;
   metadataProvider: HostMetadataProvider;
   activityProvider?: NodeActivityProvider;
   now?: () => number;
+  checkpoint?: ProviderCheckpoint;
 }): NodeInfoProvider {
-  const published = new Map<string, NodeInfoRecord>();
+  const published = checkpoint?.read<Map<string, NodeInfoRecord>>() ?? new Map<string, NodeInfoRecord>();
   function remember(record: NodeInfoRecord): void {
     const previous = published.get(record.address);
     const time = record.apiCheck?.checkedAtMs ?? record.fetchedAtMs ?? 0;
     const previousTime = previous?.apiCheck?.checkedAtMs ?? previous?.fetchedAtMs ?? 0;
     if (time >= previousTime) published.set(record.address, structuredClone(record));
+    checkpoint?.write(published);
   }
   function apiProgress(record: NodeInfoRecord, previous = published.get(record.address)): NodeInfoRecord | undefined {
     const check = record.apiCheck;

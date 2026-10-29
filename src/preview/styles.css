@@ -178,8 +178,8 @@ h1 { font-size: 18px; line-height: 22px; margin: 0; color: var(--nosana-green); 
   view-timeline-name: --fleet-table; view-timeline-axis: block;
   view-timeline-inset: calc(var(--fleet-header-height) + var(--fleet-viewport-top)) 0px;
 }
-:root[data-native-table-scroll="true"] .fleet-table th { position: relative; top: auto; }
-:root[data-native-table-scroll="true"] .fleet-table thead { position: relative; z-index: 2; }
+:root[data-native-table-scroll="true"] .fleet-table > thead th { position: relative; top: auto; }
+:root[data-native-table-scroll="true"] .fleet-table > thead { position: relative; z-index: 2; }
 /* Contracting native pinches expose the full table. At release, the canvas fits
    the chosen visual width and the native horizontal scroller owns sideways
    motion; page scrolling keeps its full content height at every zoom level. */
@@ -197,7 +197,7 @@ h1 { font-size: 18px; line-height: 22px; margin: 0; color: var(--nosana-green); 
 :root[data-native-overview-scroll="true"] .fleet-table-wrap { view-timeline-inset: var(--fleet-header-height) 0px; }
 /* This is structural pinning, so reduced-motion preferences must not unpin the
    controls. State and Duration retain their independent animation preferences. */
-:root[data-native-table-scroll="true"]:not([data-page-magnified="true"]):not([data-scroll-column-headers="true"]) .fleet-table thead {
+:root[data-native-table-scroll="true"]:not([data-page-magnified="true"]):not([data-scroll-column-headers="true"]) .fleet-table > thead {
   animation: fleet-column-pin linear both !important;
   animation-timeline: --fleet-table !important;
   animation-range: exit-crossing 0% exit-crossing calc(100% - var(--fleet-table-heading-height) - var(--fleet-table-bottom-space)) !important;
@@ -464,3 +464,76 @@ td[data-col="queued-duration"][data-stacked="true"] .queued-duration-source butt
   padding: 0; border: 0; border-radius: 0; background: transparent;
 }
 .queued-duration-details:focus-visible { outline-offset: -2px; }
+
+/* Jobs alone adds requested right-side expansion controls; parent rows stay compact. */
+/* Reserve the longest reported summary (Completed · seen), including phone controls,
+   so transitions from Unknown or Running never shift later columns. */
+.fleet-table th[data-col="latestJob"], .fleet-table td.jobs-cell { width: 180px; min-width: 180px; max-width: 180px; }
+.job-history-actions { position: absolute; top: 3px; left: 0; right: 0; display: flex; justify-content: center; gap: 4px; }
+.job-history-actions button { min-height: 24px; padding: 2px 4px; font-size: 9px; color: var(--blue); }
+.fleet-table th[data-col="latestJob"] .column-label { height: 42px; margin-top: 32px; }
+.fleet-table td.jobs-cell { padding: 0 5px; white-space: nowrap; }
+.jobs-expand { min-height: 28px; width: 25px; padding: 0; margin-right: 3px; border: 0; background: transparent; color: var(--blue); font-size: 14px; vertical-align: middle; }
+.job-summary-link { display: inline-flex; align-items: center; min-height: 24px; min-width: 24px; color: var(--blue); text-underline-offset: 3px; }
+.job-summary-link:not([href]) { color: var(--amber); text-decoration: none; }
+.job-summary-state { margin-left: 6px; font-size: 9px; color: var(--muted); }
+.job-summary-state[data-current="true"] { color: var(--green); }
+.job-summary-state[data-unknown="true"] { color: var(--amber); }
+.fleet-table > tbody > .job-history-row > td { height: auto; padding: 16px 12px 12px; text-align: left; white-space: normal; background: #111; border-bottom-color: #303030; }
+/* A drawer fills the established Fleet width without contributing its own
+   percentage table to the outer table's intrinsic width calculation. */
+.job-history-panel { contain: inline-size; width: 100%; min-width: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #ededed; }
+.job-history-toolbar { display: flex; align-items: center; gap: 14px; padding: 0 16px; color: #ddd; font-size: 14px; }
+.job-history-toolbar strong { font-weight: 600; }
+.job-history-toolbar button { min-height: 28px; padding: 3px 8px; font-size: 11px; color: #aeb7c4; border-color: #3a3a3a; }
+.job-history-notice, .job-history-empty { margin: 8px 16px 10px; font-size: 11px; line-height: 16px; color: #9ca3af; overflow-wrap: anywhere; }
+.job-history-notice[data-stale="true"] { color: #b5a077; }
+.job-history-table { border-collapse: collapse; width: 100%; min-width: 0; table-layout: fixed; font-size: 14px; }
+/* Older engines without inline-size containment still get a bounded drawer,
+   rather than feeding a percentage width back into the intrinsic Fleet table. */
+@supports not (contain: inline-size) {
+  .job-history-panel, .job-history-table { width: 1280px; }
+}
+.fleet-table .job-history-table th, .fleet-table .job-history-table td { position: static; padding: 8px 16px; text-align: left; background: transparent; white-space: nowrap; border-bottom: 1px solid #272727; }
+.fleet-table .job-history-table thead { position: static; animation: none !important; transform: none; }
+.fleet-table .job-history-table th { height: 36px; font-size: 10px; font-weight: 700; letter-spacing: .025em; color: #adb5c2; }
+.fleet-table .job-history-table td { height: 50px; font-size: 14px; color: #ededed; }
+.fleet-table .job-history-table tbody tr { background: transparent; }
+.fleet-table .job-history-table tbody tr:hover { background: #161616; }
+.job-history-table th[data-history-col="address"], .job-history-table th[data-history-col="host"] { width: 17%; }
+.job-history-table th[data-history-col="started"] { width: 10%; }
+.job-history-table th[data-history-col="duration"] { width: 20%; }
+.job-history-table th[data-history-col="price"] { width: 9%; }
+.job-history-table th[data-history-col="gpu"] { width: 17%; }
+.job-history-table th[data-history-col="status"] { width: 10%; }
+.job-history-table a { display: inline-flex; align-items: center; min-height: 24px; color: #ededed; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 14px; text-decoration: none; }
+.job-history-table a:hover { color: #fff; text-decoration: underline; text-underline-offset: 3px; }
+.job-history-duration, .job-history-limit { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.job-history-duration[data-unknown="true"] { color: var(--amber); }
+.job-history-limit { margin-left: 6px; color: #a5adba; font-size: 10px; }
+.job-history-status-stack { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.job-history-status { display: inline-flex; align-items: center; gap: 5px; min-height: 21px; padding: 0 7px; border: 1px solid currentColor; border-radius: 5px; font-size: 9px; line-height: 18px; color: #b7a58a; }
+.job-history-status svg { flex: 0 0 16px; }
+.job-history-status[data-tone="running"] { color: #0088ff; }
+.job-history-status[data-tone="running"][data-current="false"] { color: #5087b7; }
+.job-history-status[data-tone="success"] { color: #00e600; }
+.job-history-status[data-tone="failed"] { color: #ff393e; }
+.job-history-status[data-tone="unknown"] { color: var(--amber); }
+.job-history-status[data-tone="stopped"] { color: #b5b5b5; }
+.job-history-status-note { font-size: 10px; line-height: 12px; color: #a6a6a6; }
+.job-history-status-note[hidden], .job-history-price-note[hidden] { display: none; }
+.job-history-price-stack { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.job-history-price-note { font-size: 10px; line-height: 12px; color: #a6a6a6; }
+.job-history-table td[data-price-kind="unknown"] { color: var(--amber); }
+.job-history-table td[data-retained="true"] .job-history-price { color: #969696; }
+.job-history-gpu { display: block; overflow: hidden; text-overflow: ellipsis; max-width: 100%; }
+.job-history-source { margin: 12px 16px 0; font-size: 12px; color: #aeb4bf; }
+.job-history-source > summary { min-height: 24px; width: fit-content; cursor: pointer; }
+.job-history-source-summary { line-height: 1.6; white-space: pre-line; }
+.job-history-source-list { padding-left: 22px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 11px; }
+.job-history-source-list > li { padding: 10px 0; line-height: 1.7; white-space: pre-line; overflow-wrap: anywhere; border-top: 1px solid #272727; }
+@media (max-width: 600px) {
+  .jobs-expand { min-height: 32px; width: 32px; }
+  .job-history-actions button { min-height: 28px; padding: 3px 5px; }
+  .job-history-toolbar button { min-height: 36px; }
+}

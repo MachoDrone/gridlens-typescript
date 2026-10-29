@@ -18,7 +18,7 @@ import { emptyStaking } from "../fixtures/staking.ts";
 const NOW = Date.UTC(2026, 0, 1, 12);
 const market = addresses[7]!;
 const hostileText = `synthetic-${"long".repeat(24)} <img src=x onerror="window.__infoInjected=true"> & literal`;
-const rightColumns = ["nodeRuntime", "dailyUptime", "latestJob", "ram", "disk", "dl", "ul", "ping", "rewards", "nos", "market", "gpuID", "currentNode", "cuda", "nvidia", "cpu", "system"];
+const rightColumns = ["nodeRuntime", "dailyUptime", "ram", "disk", "dl", "ul", "ping", "rewards", "nos", "market", "gpuID", "currentNode", "cuda", "nvidia", "cpu", "system", "country"];
 const servers: Server[] = [];
 const directories: string[] = [];
 const errors: string[] = [];
@@ -152,7 +152,7 @@ test("every column hover and help dialog stays concise while retaining its full 
   await ready(page);
   const before = [...requests];
   const headings = page.locator("#column-headings th[data-col] .column-label");
-  expect(await headings.count()).toBe(27);
+  expect(await headings.count()).toBe(28);
   for (const heading of await headings.all()) {
     const title = (await heading.getAttribute("title"))!;
     expect(title.length).toBeGreaterThan(0);
@@ -165,7 +165,7 @@ test("every column hover and help dialog stays concise while retaining its full 
   }
   const hoverText = await page.locator("#fleet-rows [title], #column-headings [title]").evaluateAll(elements =>
     elements.map(element => element.getAttribute("title") ?? ""));
-  expect(hoverText.length).toBeGreaterThan(27);
+  expect(hoverText.length).toBeGreaterThan(28);
   for (const title of hoverText) {
     expect(title.length).toBeLessThanOrEqual(240);
     expect(title).not.toMatch(/[\r\n]/);
@@ -275,7 +275,7 @@ test("right-side row values have no hover or keyboard controls in either layout,
       await spans.dispose();
       await assertPlainCells();
       await expect(page.getByRole("button", { name: "Sort by System", exact: true })).toHaveAttribute("title", /.+/);
-      for (const label of ["Market", "NVIDIA", "CPU", "System"]) {
+      for (const label of ["Market", "NVIDIA", "CPU", "System", "Country"]) {
         await expect(page.getByRole("button", { name: `Toggle ${label} display`, exact: true })).toBeVisible();
       }
       await page.locator("#fleet-rows .node-state-value").first().click();

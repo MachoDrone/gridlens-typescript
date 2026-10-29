@@ -14,6 +14,7 @@ import { createSnapshotSource } from "../src/server/snapshot-source.ts";
 import type { FleetSource } from "../src/server/snapshot-source.ts";
 import type { FleetContext, FleetResource, FleetSnapshots } from "../src/contracts/fleet.ts";
 import { hostedConfiguration, loadIntegration } from "../scripts/hosted-server.ts";
+import { createFleetTransport } from "../src/preview/fleet-transport.ts";
 
 const address = "1".repeat(31) + "2";
 const second = "1".repeat(31) + "3";
@@ -45,6 +46,63 @@ function authenticated(source = createSnapshotSource(createMemorySnapshotStore()
     : request.headers.authorization === "test-b" ? other : null };
 }
 const options = { headers: { Authorization: "test-a" } };
+
+test("a small history selection ignores irrelevant and unchanged bulk progress frames", async t => {
+  const alphabet = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+  const addresses = [...alphabet].slice(0, 50).map(last => "1".repeat(31) + last);
+  const context = { ...fleet, addresses };
+  const integration: FleetIntegration = { resolveAccess: async () => context, source: {
+    async read(resource, owned, _signal, update) {
+      const snapshot = emptyFleetSnapshots(owned.addresses)[resource];
+      for (const row of snapshot.hosts) {
+        update?.({ ...snapshot, hosts: [row] } as typeof snapshot);
+        update?.(snapshot);
+      }
+      return snapshot;
+    },
+  } };
+  const server = await app(t, integration);
+  let frames = 0;
+  const transport = createFleetTransport({ fetch: (url, init) => fetch(`${origin(server)}${url}`, init) });
+  const selected = [addresses[0]!];
+  const result = await transport.read("job-history", "/api/fleet/job-history.json", {
+    addresses: selected, hosts: selected, onSnapshot: () => { frames++; },
+  });
+  assert.equal(frames, 2, "one selected observation and the finite final result");
+  assert.equal(result.hosts[0]?.address, selected[0]);
+});
+
+test("history selection narrows an authorized roster, preserves source context and strips unused fields", async t => {
+  const context = { ...fleet, addresses: [address, second] };
+  const reads: FleetContext[] = [];
+  const integration: FleetIntegration = {
+    resolveAccess: async () => context,
+    source: { async read(resource, owned) {
+      reads.push(owned);
+      const snapshot = emptyFleetSnapshots(owned.addresses)[resource];
+      return { ...snapshot, privateDefinition: "not exported" };
+    } },
+  };
+  const server = await app(t, integration);
+  const url = `${origin(server)}/api/fleet/job-history.json`;
+  for (const query of ["", "?host=foreign", `?host=${address}&host=${address}`,
+    `?host=${address}&scopeId=operator-b`, `?host=${address}&refresh=0`]) {
+    assert.equal((await fetch(`${url}${query}`)).status, 400);
+  }
+  assert.equal(reads.length, 0);
+  assert.equal((await fetch(`${url}?host=${second}`, { method: "HEAD" })).status, 200);
+  assert.equal(reads.length, 0);
+  const response = await fetch(`${url}?host=${second}&refresh=1`);
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  assert.deepEqual(body.hosts.map((row: { address: string }) => row.address), [second]);
+  assert.equal(body.privateDefinition, undefined);
+  assert.deepEqual(reads[0], context, "selection cannot change store scope or roster revision");
+  const stream = await fetch(`${url}?host=${address}`, { headers: { Accept: "application/x-ndjson" } });
+  const frame = JSON.parse((await stream.text()).trim());
+  assert.equal(frame.complete, true);
+  assert.deepEqual(frame.hosts.map((row: { address: string }) => row.address), [address]);
+});
 
 test("portable gateway requires explicit adapters/origin and never supplies authentication or public-provider defaults", async t => {
   await assert.rejects(startFleetServer({ integration: {} as FleetIntegration }), /resolver.*source/);

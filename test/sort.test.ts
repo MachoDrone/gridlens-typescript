@@ -25,7 +25,7 @@ test("column types omit Monitor HB and Host, lead with Staked NOS and keep activ
     ["ram", "num"], ["disk", "num"], ["dl", "num"], ["ul", "num"],
     ["ping", "num"], ["rewards", "num"], ["nos", "num"],
     ["market", "string"], ["gpuID", "num"], ["currentNode", "string"], ["cuda", "string"],
-    ["nvidia", "string"], ["cpu", "string"], ["system", "string"],
+    ["nvidia", "string"], ["cpu", "string"], ["system", "string"], ["country", "string"],
   ]);
 });
 

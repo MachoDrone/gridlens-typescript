@@ -2,6 +2,13 @@
 
 The local preview uses the same browser and observation contracts as the portable
 hosting runtime.
+
+The [shared backend candidate](SHARED_BACKEND.md) now supplies an optional
+installed composition using these contracts: SQLite collection owner, restricted
+IPC, authenticated HTTPS and device pairing. It has its own
+[modern Docker installer](MODERN_INSTALL.md). The portable artifact described
+here still requires explicit integration and has no default provider fallback.
+Neither source implementation establishes a production deployment.
 The development public-provider adapters and the portable snapshot gateway are
 separate compositions of that application. Moving the supported fields should
 require platform adapters and configuration, not edits throughout the Fleet table.
@@ -19,7 +26,7 @@ provide a running service or connect currently unavailable fields.
 | Browser/domain | The same compiled Fleet UI, pure field projections, original timestamps, retained/unknown values, sorting and preferences. |
 | Browser transport | Trusted same-origin resource prefix, shared roster/record/envelope validation, bounded JSON/NDJSON, complete-response and watch-idle deadlines, cancellation and access-denied errors. |
 | Platform access | Required injected resolver returns an authorized scope and immutable roster revision. There is no default login, token format, proxy-header identity or public provider fallback. |
-| Snapshot source | Typed read/watch port for seven existing resource families; the reference source only reads committed bulk snapshots. Requests do not trigger host discovery or collection. |
+| Snapshot source | Typed read/watch port for eight resource families, including recent job history; the reference source only reads committed bulk snapshots. Requests do not trigger host discovery or collection. |
 | Snapshot storage | Scope/roster isolation, atomic validated resource updates, compare-and-swap revisions, old-evidence rejection, field allowlisting and subscriptions. |
 | Local persistence | Explicit single-writer file adapter, exclusive lifetime lock, bounded validated restore, atomic replacement and durability flushes. Source timestamps survive restart. |
 | Runtime | Explicit bind/port/origin/module configuration, Host/Origin checks, bounded responses, readiness/liveness, stream cancellation and graceful shutdown. |
@@ -184,11 +191,27 @@ sanitized, and malformed/oversized responses fail closed. A failed initial
 authorized-roster read can be retried with Refresh view without reloading.
 Successful rosters remain fixed for that page; there is no automatic roster polling.
 
-The resource families are `metadata`, `node-info`, `jobs`, `queue`, `sol`, `nos`
-and `staking`. Their existing field types, null meanings, exact integer amounts,
+The resource families are `metadata`, `node-info`, `jobs`, `job-history`, `queue`,
+`sol`, `nos` and `staking`. Their existing field types, null meanings, exact integer amounts,
 source identities and date semantics are exported by `./contracts`. Source check
 times are not gateway response times or indexer synchronization watermarks.
 A cache read, heartbeat, login, reload or restart must never refresh them.
+
+Metadata optionally carries `country`, the bounded country text reported by the
+source. It survives snapshot normalization and persistence; older snapshots
+without it restore as unknown. Country uses the metadata observation's original
+time and retained status. The shared UI renders compact codes or full English
+names for recognized codes, preserving other safe reported text. The portable
+gateway performs no geolocation or public-provider fallback for missing country.
+
+History items optionally carry the job market address and recorded USD/hour
+rate, plus market name, current USD/hour quote and its independent check/expiry.
+Older snapshots missing these fields restore as unknown. The browser calculates
+Explorer-style customer prices including 10%, using current market quotes only
+for active jobs and recorded job rates for terminal totals. Market enrichment
+cannot renew job/page evidence, and these rates are not claimable rewards.
+The portable source supplies normalized observations; it never scrapes Explorer
+or falls back to the local public-provider market reader.
 
 The gateway adds `serverTimeMs` (integer Unix milliseconds) to successful roster
 replies and every finite/streamed data envelope at emission, including replay and
@@ -238,9 +261,14 @@ the architecture supplied here.
 
 ## HTTP and runtime responsibilities
 
-- `/api/fleet/hosts.json` obtains the session-authorized roster. The seven data
-  resources use `/api/fleet/<resource>.json`. There is no query-selected scope,
-  address, endpoint or file path and no browser ingestion/mutation route.
+- `/api/fleet/hosts.json` obtains the session-authorized roster. The eight data
+  resources use `/api/fleet/<resource>.json`. Scope, endpoint and file paths
+  cannot be selected through queries; there is no browser ingestion/mutation route.
+  Only `job-history` accepts repeated `host` parameters (1–100 distinct members
+  of the authorized roster) and optional `refresh=1`. These narrow the response;
+  the source still receives the full verified scope and roster revision. Missing,
+  foreign, duplicate or oversized selections are rejected before source reads.
+  Manual refresh reads committed snapshots only, never starts collection.
 - JSON remains finite; `Accept: application/x-ndjson` enables progress and the
   supported watch feeds. Preserve streaming through the reverse proxy; disable
   response buffering for feeds and allow their connection lifetime.

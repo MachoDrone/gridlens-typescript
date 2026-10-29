@@ -9,7 +9,7 @@ export interface FleetSource {
     onUpdate: (snapshot: FleetSnapshots[K]) => void): Promise<never>;
 }
 export const SNAPSHOT_CHECK_INTERVALS: Readonly<Record<FleetResource, number>> = {
-  metadata: 300_000, "node-info": 15_000, jobs: 120_000, queue: 15_000,
+  metadata: 300_000, "node-info": 15_000, jobs: 120_000, "job-history": 300_000, queue: 15_000,
   sol: 30_000, nos: 120_000, staking: 1_800_000,
 };
 

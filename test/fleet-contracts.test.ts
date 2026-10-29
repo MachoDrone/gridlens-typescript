@@ -12,6 +12,7 @@ import { emptyQueue } from "./fixtures/queue.ts";
 import { emptySol } from "./fixtures/sol.ts";
 import { emptyNos } from "./fixtures/nos.ts";
 import { emptyStaking } from "./fixtures/staking.ts";
+import { blankJobHistoryRecord } from "../src/fleet/job-history.ts";
 
 const hosts = addresses.slice(0, 2);
 const at = 1_000_000;
@@ -23,6 +24,7 @@ const snapshots: FleetSnapshots = {
     values: normalizeNodeInfo(address, { node: address, state: "RUNNING_JOB" }), fetchedAtMs: at,
     validUntilMs: at + 30_000, retained: false, error: null })) },
   jobs: await emptyJobs(hosts), queue: await emptyQueue(hosts), sol: await emptySol(hosts),
+  "job-history": { hosts: hosts.map(blankJobHistoryRecord) },
   nos: await emptyNos(hosts), staking: await emptyStaking(hosts),
 };
 
@@ -64,6 +66,20 @@ test("metadata and Node Info contracts reject malformed timestamps, identities a
     lastConfirmed: { status: "online", checkedAtMs: at, lastConfirmed: { status: "online", checkedAtMs: at } } } }), false);
   assert(isNodeInfoRecord({ ...node, apiCheck: { status: "other", checkedAtMs: at + 60_000,
     lastConfirmed: { status: "online", checkedAtMs: at } } }), "old evidence can be returned without being made current");
+});
+
+test("metadata country remains optional for old snapshots and bounds present text", () => {
+  const metadata = structuredClone(snapshots.metadata.hosts[0]!);
+  delete metadata.values!.country;
+  assert(isHostMetadataRecord(metadata), "legacy metadata without country remains valid");
+  assert(isFleetSnapshot("metadata", { hosts: [metadata] }, [metadata.address]));
+  for (const country of [null, "US", "Reported free-form country", "x".repeat(256)]) {
+    assert(isHostMetadataRecord({ ...metadata, values: { ...metadata.values, country } }));
+  }
+  for (const country of [1, false, [], {}, "", "   ", "\u00a0", "x".repeat(257), "U\nS", "U\u0000S", "US\u007f"]) {
+    assert.equal(isHostMetadataRecord({ ...metadata, values: { ...metadata.values, country } }), false);
+  }
+  assert.equal(metadata.fetchedAtMs, at, "validating country never renews metadata evidence");
 });
 
 test("a complete job snapshot rejects conflicting assignments and inflated display deadlines", () => {

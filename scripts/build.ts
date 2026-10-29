@@ -18,7 +18,7 @@ export function buildPreview(): void {
     throw new Error(`Browser compilation failed (${result.signal ?? result.status}).`);
   }
   mkdirSync(outputDirectory, { recursive: true });
-  for (const filename of ["index.html", "styles.css"]) {
+  for (const filename of ["index.html", "styles.css", "shared-setup.html"]) {
     copyFileSync(resolve(projectDirectory, "src/preview", filename), resolve(outputDirectory, filename));
   }
 }

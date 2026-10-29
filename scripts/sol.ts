@@ -23,12 +23,14 @@ function blank(address: string): SolRecord {
 export function createSolProvider(options: BalanceProviderOptions = {}): SolProvider {
   const transport = options.rpc ?? createSolanaRpc(options);
   const { now, rpc, refreshDeadlineMs } = transport;
-  const { eligible, nextEligibleAt, failure: providerFailure, success: providerSuccess } = transport.createSession();
-  const records = new Map<string, SolRecord>();
-  const dueAt = new Map<string, number>();
-  const attemptedAt = new Map<string, number>();
-  const insertionOrder = new Map<string, number>();
-  let insertionSequence = 0;
+  const { eligible, nextEligibleAt, failure: providerFailure, success: providerSuccess } = transport.createSession("sol");
+  const restored = options.assetCheckpoint?.read<{ records: Map<string, SolRecord>; dueAt: Map<string, number>; attemptedAt: Map<string, number>;
+    insertionOrder: Map<string, number>; insertionSequence: number; highWaterSlot: number; stoppedForParameters: boolean }>();
+  const records = restored?.records ?? new Map<string, SolRecord>();
+  const dueAt = restored?.dueAt ?? new Map<string, number>();
+  const attemptedAt = restored?.attemptedAt ?? new Map<string, number>();
+  const insertionOrder = restored?.insertionOrder ?? new Map<string, number>();
+  let insertionSequence = restored?.insertionSequence ?? 0;
   const listeners = new Set<{ addresses: ReadonlySet<string>; signal: AbortSignal | undefined;
     onUpdate: (snapshot: SolSnapshot) => void }>();
   let activeRefresh: {
@@ -36,8 +38,10 @@ export function createSolProvider(options: BalanceProviderOptions = {}): SolProv
     operation: SharedOperation<void>;
     completion: Promise<void>;
   } | undefined;
-  let highWaterSlot = 0;
-  let stoppedForParameters = false;
+  let highWaterSlot = restored?.highWaterSlot ?? 0;
+  let stoppedForParameters = restored?.stoppedForParameters ?? false;
+  const save = (): void => options.assetCheckpoint?.write({ records, dueAt, attemptedAt, insertionOrder,
+    insertionSequence, highWaterSlot, stoppedForParameters });
 
   function snapshot(addresses: readonly string[]): SolSnapshot {
     const earliest = addresses.reduce((next, address) => Math.min(next, dueAt.get(address) ?? now()), Infinity);
@@ -46,6 +50,7 @@ export function createSolProvider(options: BalanceProviderOptions = {}): SolProv
   }
 
   function publish(addresses: readonly string[]): void {
+    save();
     for (const listener of listeners) {
       if (listener.signal?.aborted) continue;
       const matching = addresses.filter(address => listener.addresses.has(address));
@@ -251,6 +256,7 @@ export function createSolProvider(options: BalanceProviderOptions = {}): SolProv
       throwIfAborted(signal);
       return snapshot(addresses);
     } finally {
+      save();
       if (listener) listeners.delete(listener);
     }
   };

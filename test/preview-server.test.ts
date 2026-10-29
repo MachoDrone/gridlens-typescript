@@ -9,6 +9,7 @@ import { test } from "node:test";
 import type { TestContext } from "node:test";
 import { previewPort, startPreviewServer } from "../scripts/preview-server.ts";
 import type { JobProvider } from "../scripts/jobs.ts";
+import { blankJobHistoryRecord } from "../src/fleet/job-history.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
 import { projectNodeApi } from "../src/fleet/node-api.ts";
 import { NOS_MINT, NOS_REFRESH_INTERVAL_MS } from "../src/fleet/nos.ts";
@@ -18,11 +19,11 @@ import { emptyStaking } from "./fixtures/staking.ts";
 import { blankStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../src/fleet/staking.ts";
 
 const fixtureFiles = [
-  "contracts/fleet.js", "contracts/online-hosts.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/online-roster.js",
+  "contracts/fleet.js", "contracts/shared.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "preview/shared-telemetry.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",
   "preview/evidence-clock.js", "preview/refresh-deadline.js", "preview/sidebar.js", "preview/viewport.js", "preview/table-scroll.js", "preview/connection.js",
   "index.html", "styles.css", "preview/main.js", "preview/fixtures.js", "fleet/freshness.js", "fleet/sort.js", "fleet/ip-display.js", "fleet/duration.js", "fleet/market-display.js", "fleet/hardware-display.js", "fleet/host-metadata.js",
-  "fleet/node-info.js", "fleet/node-state.js", "fleet/node-api.js", "fleet/status-display.js", "preview/state-refresh.js", "preview/info-content.js", "preview/column-help.js",
-  "fleet/jobs.js", "fleet/live-duration.js", "fleet/live-activity.js", "fleet/queue.js", "fleet/queued-duration.js", "fleet/sol.js", "fleet/nos.js", "fleet/staking.js", "fleet/staking-view.js",
+  "fleet/node-info.js", "fleet/node-state.js", "fleet/node-api.js", "fleet/status-display.js", "fleet/country-display.js", "preview/state-refresh.js", "preview/info-content.js", "preview/column-help.js",
+  "fleet/jobs.js", "fleet/job-history.js", "fleet/live-duration.js", "fleet/live-activity.js", "fleet/queue.js", "fleet/queued-duration.js", "fleet/sol.js", "fleet/nos.js", "fleet/staking.js", "fleet/staking-view.js",
 ];
 
 const addresses = Array.from({ length: 8 }, (_, index) => `${"1".repeat(31)}${index + 2}`);
@@ -86,6 +87,38 @@ function read(server: Server, path: string, method = "GET", headers: Record<stri
     outgoing.end();
   });
 }
+
+test("history requests only selected startup hosts and rejects invalid selectors before collection", async t => {
+  const directory = fixtureDirectory(t);
+  const real200HostsFile = join(directory, "real200.json");
+  writeFileSync(real200HostsFile, JSON.stringify([addresses[1]]));
+  const calls: { addresses: readonly string[]; refresh: boolean | undefined }[] = [];
+  const provider: JobProvider = async () => { throw new Error("History must not request assignments."); };
+  provider.history = async (selected, _signal, onUpdate, refresh) => {
+    calls.push({ addresses: [...selected], refresh });
+    const snapshot = { hosts: selected.map(blankJobHistoryRecord) };
+    onUpdate?.(snapshot);
+    return snapshot;
+  };
+  const server = await startPreviewServer({ directory, hostsFile: join(directory, "hosts.json"),
+    real200HostsFile, jobProvider: provider, port: 0 });
+  t.after(() => close(server));
+  for (const query of ["", "?host=foreign", `?host=${addresses[0]}&host=${addresses[0]}`,
+    `?host=${addresses[0]}&file=private.txt`, `?host=${addresses[0]}&refresh=0`,
+    `?host=${addresses[0]}&scenario=real200`]) {
+    assert.equal((await read(server, `/preview/job-history.json${query}`)).status, 400);
+  }
+  assert.equal(calls.length, 0);
+  const path = `/preview/job-history.json?host=${addresses[1]}&scenario=real200&refresh=1`;
+  assert.equal((await read(server, path, "HEAD")).status, 200);
+  assert.equal(calls.length, 0);
+  const result = await read(server, path, "GET", { Accept: "application/x-ndjson" });
+  assert.equal(result.status, 200);
+  const frames = result.body.trim().split("\n").map(line => JSON.parse(line));
+  assert.equal(frames.at(-1).complete, true);
+  for (const frame of frames) assert.deepEqual(frame.hosts.map((row: { address: string }) => row.address), [addresses[1]]);
+  assert.deepEqual(calls, [{ addresses: [addresses[1]], refresh: true }]);
+});
 
 test("preview serves exactly the fixture assets on loopback with fixed types and no caching", async (t) => {
   const server = await runningServer(t);

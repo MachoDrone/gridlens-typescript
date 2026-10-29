@@ -1,0 +1,10 @@
+**
+!package.json
+!package-lock.json
+!tsconfig.json
+!tsconfig.browser.json
+!LICENSE
+!src/
+!src/**
+!scripts/
+!scripts/**

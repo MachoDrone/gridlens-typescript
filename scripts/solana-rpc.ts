@@ -1,5 +1,6 @@
 import { isLamports } from "../src/fleet/sol.ts";
 import { createRequestLimiter, createSharedRead, throwIfAborted } from "./shared-read.ts";
+import type { ProviderCheckpoint } from "./provider-checkpoint.ts";
 
 export const SOLANA_PROVIDERS = [
   { name: "Solana Labs", endpoint: "https://api.mainnet-beta.solana.com" },
@@ -17,7 +18,11 @@ const requestLimits = [
 
 /** One process-local rolling budget for all providers AND all RPC methods. */
 export class SolanaRequestBudget {
-  private dispatches: number[] = [];
+  private dispatches: number[];
+  private persist: ((dispatches: number[]) => void) | undefined;
+  constructor(dispatches: readonly number[] = [], persist?: (dispatches: number[]) => void) {
+    this.dispatches = [...dispatches]; this.persist = persist;
+  }
   nextAt(time: number): number {
     while (this.dispatches.length && this.dispatches[0]! <= time - 86_400_000) this.dispatches.shift();
     let next = time;
@@ -39,6 +44,7 @@ export class SolanaRequestBudget {
   reserve(time: number): boolean {
     if (this.nextAt(time) > time) return false;
     this.dispatches.push(time);
+    this.persist?.([...this.dispatches]);
     return true;
   }
 }
@@ -110,20 +116,30 @@ export interface SolanaRpcOptions {
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
   timeoutMs?: number;
   refreshDeadlineMs?: number;
+  checkpoint?: ProviderCheckpoint;
 }
 export type SolanaRpc = ReturnType<typeof createSolanaRpc>;
-export type BalanceProviderOptions = SolanaRpcOptions & { rpc?: SolanaRpc };
+export type BalanceProviderOptions = SolanaRpcOptions & { rpc?: SolanaRpc; assetCheckpoint?: ProviderCheckpoint };
 
 /** One transport owns pacing, limits and provider/network health for every asset and viewer. */
 export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.now, sleep = pause,
-  timeoutMs = 8_000, refreshDeadlineMs = 28_000 }: SolanaRpcOptions = {}) {
-  const providers: SolanaProviderState[] = SOLANA_PROVIDERS.map(provider => ({ ...provider,
+  timeoutMs = 8_000, refreshDeadlineMs = 28_000, checkpoint }: SolanaRpcOptions = {}) {
+  type Health = { failures: number; retryAtMs: number; disabled: boolean };
+  const restored = checkpoint?.read<{ providers: SolanaProviderState[]; dispatches: number[]; preferred?: string;
+    sessions: Map<string, Map<string, Health>> }>();
+  const providers: SolanaProviderState[] = restored?.providers ?? SOLANA_PROVIDERS.map(provider => ({ ...provider,
     genesisVerified: false, disabled: false, failures: 0, healthVersion: 0, retryAtMs: 0 }));
-  const budget = new SolanaRequestBudget();
+  if (providers.length !== SOLANA_PROVIDERS.length || providers.some((provider, index) => provider.endpoint !== SOLANA_PROVIDERS[index]?.endpoint)) {
+    throw new Error("RPC provider checkpoint does not match the fixed provider roster.");
+  }
+  const sessions = restored?.sessions ?? new Map<string, Map<string, Health>>();
+  let dispatches = restored?.dispatches ?? [];
+  const budget = new SolanaRequestBudget(dispatches, values => { dispatches = values; save(); });
   const limited = createRequestLimiter(2);
   const genesisReads = createSharedRead<SolanaProviderState, void>();
   const handledFailures = new WeakSet<SolanaRpcError>();
-  let preferred: SolanaProviderState | undefined;
+  let preferred: SolanaProviderState | undefined = providers.find(provider => provider.endpoint === restored?.preferred);
+  const save = (): void => checkpoint?.write({ providers, dispatches, sessions, preferred: preferred?.endpoint });
   let requestId = 0;
   function retryHeader(response: Response): number | null {
     const value = response.headers.get("retry-after")?.trim();
@@ -163,7 +179,7 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
           body: JSON.stringify({ jsonrpc: "2.0", id, method, params }), signal: controller.signal });
         throwIfAborted(signal);
         const retryAt = retryHeader(response);
-        if (retryAt !== null) provider.retryAtMs = Math.max(provider.retryAtMs, retryAt);
+        if (retryAt !== null) { provider.retryAtMs = Math.max(provider.retryAtMs, retryAt); save(); }
         if (!response.ok) {
           void response.body?.cancel().catch(() => {});
           const kind = [401, 403, 405, 501].includes(response.status) ? "disabled" : response.status === 400 ? "parameters" : "provider";
@@ -223,16 +239,19 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
         throw transportError("Solana provider did not identify the mainnet genesis hash.", "disabled");
       }
       provider.genesisVerified = true;
+      save();
     }, signal);
   }
 
   // Semantic validation failures (mint/owner/layout/slot) belong to their asset.
   // Actual transport failures and wrong-chain identities affect both assets.
-  function createSession() {
-    const local = new Map<SolanaProviderState, { failures: number; retryAtMs: number; disabled: boolean }>();
+  let sessionSequence = 0;
+  function createSession(name = `session-${sessionSequence++}`) {
+    const local = sessions.get(name) ?? new Map<string, Health>();
+    sessions.set(name, local);
     const state = (provider: SolanaProviderState) => {
-      let value = local.get(provider);
-      if (!value) { value = { failures: 0, retryAtMs: 0, disabled: false }; local.set(provider, value); }
+      let value = local.get(provider.endpoint);
+      if (!value) { value = { failures: 0, retryAtMs: 0, disabled: false }; local.set(provider.endpoint, value); }
       return value;
     };
     const enabled = (provider: SolanaProviderState): boolean => !provider.disabled && !state(provider).disabled;
@@ -255,12 +274,13 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
         provider.healthVersion++;
       }
       const health = error.scope === "transport" ? provider : state(provider);
-      if (error.kind === "disabled") { health.disabled = true; return; }
+      if (error.kind === "disabled") { health.disabled = true; save(); return; }
       health.failures++;
       // Retry-After may extend the pause; a short or elapsed header cannot erase
       // the local failure floor or its exponential increase across retries.
       health.retryAtMs = Math.max(health.retryAtMs, error.retryAtMs ?? 0,
         now() + Math.min(900_000, 60_000 * 2 ** Math.min(4, health.failures - 1)));
+      save();
     };
     const success = (provider: SolanaProviderState, healthVersion: number): void => {
       // Earlier valid batches cannot erase a newer overlapping asset failure.
@@ -270,6 +290,7 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
       }
       state(provider).failures = 0;
       state(provider).retryAtMs = 0;
+      save();
     };
     return { eligible, nextEligibleAt, failure, success };
   }

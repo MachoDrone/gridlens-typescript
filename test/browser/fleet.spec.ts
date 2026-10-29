@@ -5,9 +5,9 @@ import { SYNTHETIC_HOST_ADDRESSES } from "../fixtures/host-addresses.ts";
 
 const labels = [
   "Staked NOS", "Status", "PC", "IP", "Host Address", "SOL", "API", "State", "Queued", "Duration",
-  "Node run time", "Daily uptime %", "Latest Job", "RAM",
+  "Node run time", "Daily uptime %", "Jobs", "RAM",
   "Disk", "DL", "UL", "Ping", "Rewards to claim", "NOS", "Market",
-  "GPU ID", "Current Node", "CUDA", "NVIDIA", "CPU", "System",
+  "GPU ID", "Current Node", "CUDA", "NVIDIA", "CPU", "System", "Country",
 ];
 const unexpectedRequests: string[] = [];
 const browserErrors: string[] = [];
@@ -558,9 +558,9 @@ test("corrupt saved sorts fall back safely and blocked storage still allows sort
   expect(await visiblePCs(page)).toEqual(defaultPCs);
 });
 
-test("the 27-column table starts with Staked NOS, omits Monitor HB and keeps activity columns together", async ({ page }, info) => {
+test("the 28-column table starts with Staked NOS, omits Monitor HB and keeps activity columns together", async ({ page }, info) => {
   await expect(page.getByText("Sample data", { exact: true })).toBeVisible();
-  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(27);
+  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(28);
   expect(await page.locator("#column-headings .column-label").allTextContents()).toEqual(labels);
   await expect(page.getByRole("button", { name: "Sort by Host", exact: true })).toHaveCount(0);
   await expect(page.locator('[data-col="hostSignal"], .host-indicator')).toHaveCount(0);
@@ -583,7 +583,7 @@ test("the 27-column table starts with Staked NOS, omits Monitor HB and keeps act
   await expect(page.getByRole("button", { name: "Sort by Node run time", exact: true })).not.toHaveCSS("color", "rgb(248, 113, 113)");
   await expect(page.locator("#fleet-rows [data-host]")).toHaveCount(6);
   for (const row of await page.locator("#fleet-rows [data-host]").all()) {
-    await expect(row.locator("td[data-col]")).toHaveCount(27);
+    await expect(row.locator("td[data-col]")).toHaveCount(28);
     expect(await row.evaluate((element) => element.getBoundingClientRect().height)).toBe(34);
   }
   const geometry = await page.locator(".fleet-table").boundingBox();
@@ -606,7 +606,8 @@ test("fresh container inventory never fabricates Nosana or hardware metrics", as
       await expect(cells.locator(".state-unknown .state-dots")).toHaveCount(8);
       expect(await cells.evaluateAll(elements => elements.every(element =>
         element.getAttribute("data-state") === "unknown" && element.getAttribute("data-state-current") === "false"))).toBe(true);
-    } else expect(await cells.allTextContents()).toEqual(Array(8).fill("—"));
+    } else if (key === "latestJob") expect(await cells.locator(".job-summary-link").allTextContents()).toEqual(Array(8).fill("—"));
+    else expect(await cells.allTextContents()).toEqual(Array(8).fill("—"));
   }
 });
 
@@ -707,8 +708,8 @@ for (const width of [320, 390]) {
     expect(await region.evaluate(element => element.scrollLeft)).toBeGreaterThan(0);
     await region.evaluate(element => { element.scrollLeft = element.scrollWidth; });
     expect(await page.evaluate(() => window.scrollX)).toBe(0);
-    await expect(page.getByRole("button", { name: "Sort by System", exact: true })).toBeInViewport();
-    await expect(page.locator('#fleet-rows tr:first-child td[data-col="system"]')).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Sort by Country", exact: true })).toBeInViewport();
+    await expect(page.locator('#fleet-rows tr:first-child td[data-col="country"]')).toBeInViewport();
     await page.getByLabel("Scenario", { exact: true }).focus();
     await scenario(page, "missing");
     expect(await page.evaluate(() => window.scrollX)).toBe(0);
@@ -723,12 +724,12 @@ for (const zoom of [1.25, 1.5, 2]) {
   test(`CSS zoom ${zoom}x approximates reflow without losing controls or columns`, async ({ page }) => {
     // CSS zoom is a layout check, not proof of native browser-zoom acceptance.
     await page.evaluate((factor) => { document.documentElement.style.zoom = String(factor); }, zoom);
-    await expect(page.locator("#column-headings th[data-col]")).toHaveCount(27);
+    await expect(page.locator("#column-headings th[data-col]")).toHaveCount(28);
     await page.getByRole("button", { name: "Advance 30s", exact: true }).click();
     await expect(page.locator("#sample-clock")).toHaveText("Sample clock 12:00:30 UTC");
     expect(await page.evaluate(() => document.body.getBoundingClientRect().width <= window.innerWidth + 1)).toBe(true);
     await page.evaluate(() => { window.scrollTo(0, 0); const region = document.querySelector(".fleet-table-wrap")!; region.scrollLeft = region.scrollWidth; });
-    await expect(page.getByRole("button", { name: "Sort by System", exact: true })).toBeInViewport();
+    await expect(page.getByRole("button", { name: "Sort by Country", exact: true })).toBeInViewport();
   });
 }
 
@@ -746,7 +747,7 @@ test("unsupported scroll timelines retain the legacy heading and document scroll
   await expectFleetDocumentFlow(page, { native: false });
   const region = page.getByRole("region", { name: "Fleet table", exact: true });
   const first = page.getByRole("button", { name: "Sort by Staked NOS", exact: true });
-  const last = page.getByRole("button", { name: "Sort by System", exact: true });
+  const last = page.getByRole("button", { name: "Sort by Country", exact: true });
   await first.focus();
   await expect(first).toBeInViewport();
   await last.focus();
@@ -755,7 +756,7 @@ test("unsupported scroll timelines retain the legacy heading and document scroll
   expect(await region.evaluate(element => element.scrollLeft)).toBe(0);
   await page.evaluate(() => window.scrollTo({ top: 500 }));
   await expect(last).toBeInViewport();
-  await expect(page.locator('.fleet-table th[data-col="system"]')).toHaveCSS("position", "sticky");
+  await expect(page.locator('.fleet-table th[data-col="country"]')).toHaveCSS("position", "sticky");
   await page.locator('#fleet-rows [data-host="sample-host-50-4"]').scrollIntoViewIfNeeded();
   expect(await page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
   expect(await region.evaluate(element => element.scrollTop)).toBe(0);
@@ -800,7 +801,7 @@ for (const viewport of [{ width: 1440, height: 900 }, { width: 1080, height: 192
     await page.setViewportSize(viewport);
     await scenario(page, "scale");
     await expect(page.locator("#fleet-rows [data-host]")).toHaveCount(200);
-    await expect(page.locator("#fleet-rows [data-host] td[data-col]")).toHaveCount(5400);
+    await expect(page.locator("#fleet-rows [data-host] td[data-col]")).toHaveCount(200 * 28);
     expect(await page.locator("#column-headings .column-label").allTextContents()).toEqual(labels);
     await expect(page.locator('[data-col="hostSignal"], .host-indicator')).toHaveCount(0);
     await expect(page.locator("#inventory-summary")).toHaveText("50 PCs · 200 current · 0 retained");

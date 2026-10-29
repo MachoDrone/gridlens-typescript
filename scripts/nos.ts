@@ -60,18 +60,21 @@ function decodeBalance(account: unknown, owner: string): Pick<NosRecord, "amount
 export function createNosProvider(options: BalanceProviderOptions = {}): NosProvider {
   const transport = options.rpc ?? createSolanaRpc(options);
   const { now, rpc, refreshDeadlineMs } = transport;
-  const { eligible, nextEligibleAt, failure: providerFailure, success: providerSuccess } = transport.createSession();
-  const records = new Map<string, NosRecord>();
-  const tokenAccounts = new Map<string, string>();
+  const { eligible, nextEligibleAt, failure: providerFailure, success: providerSuccess } = transport.createSession("nos");
+  const restored = options.assetCheckpoint?.read<{ records: Map<string, NosRecord>; tokenAccounts: Map<string, string>;
+    dueAt: Map<string, number>; highWaterSlot: number; stoppedForParameters: boolean }>();
+  const records = restored?.records ?? new Map<string, NosRecord>();
+  const tokenAccounts = restored?.tokenAccounts ?? new Map<string, string>();
   const verifiedMints = new Set<ProviderState>();
-  const dueAt = new Map<string, number>();
+  const dueAt = restored?.dueAt ?? new Map<string, number>();
   let activeRefresh: {
     addresses: ReadonlySet<string>;
     operation: SharedOperation<void>;
     completion: Promise<void>;
   } | undefined;
-  let highWaterSlot = 0;
-  let stoppedForParameters = false;
+  let highWaterSlot = restored?.highWaterSlot ?? 0;
+  let stoppedForParameters = restored?.stoppedForParameters ?? false;
+  const save = (): void => options.assetCheckpoint?.write({ records, tokenAccounts, dueAt, highWaterSlot, stoppedForParameters });
 
   async function tokenAccountFor(owner: string): Promise<string> {
     const cached = tokenAccounts.get(owner);
@@ -150,6 +153,7 @@ export function createNosProvider(options: BalanceProviderOptions = {}): NosProv
           validUntilMs: checkedAtMs + NOS_DISPLAY_VALIDITY_MS, retained: false, error: null, retryAtMs: null });
         });
         highWaterSlot = Math.max(highWaterSlot, payload.context.slot);
+        save();
         accepted = true;
         remaining = batches.slice(index + 1);
       }
@@ -253,6 +257,7 @@ export function createNosProvider(options: BalanceProviderOptions = {}): NosProv
     throwIfAborted(signal);
     const earliest = Math.min(...addresses.map(address => dueAt.get(address) ?? now()));
     const nextRefreshAtMs = !stoppedForParameters && Number.isFinite(earliest) ? earliest : null;
+    save();
     return { hosts: addresses.map(address => ({ ...(records.get(address) ?? blank(address)) })), nextRefreshAtMs };
   };
   provider.retention = {

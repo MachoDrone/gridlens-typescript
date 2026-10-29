@@ -131,7 +131,7 @@ test("API precedes State, Queued and Duration and uses Nosana green, bold red Of
   await page.goto(await start(async () => matrix()));
   await openPreviewTools(page);
   const labels = await page.locator("#column-headings .column-label").allTextContents();
-  expect(labels).toHaveLength(27);
+  expect(labels).toHaveLength(28);
   expect(labels.slice(labels.indexOf("SOL"), labels.indexOf("SOL") + 6)).toEqual(["SOL", "API", "State", "Queued", "Duration", "Node run time"]);
   expect(labels).not.toContain("Host");
   const expected = ["Online", "Online", "Offline", "Unknown", "Online", "Unknown", "Offline", "Online"];

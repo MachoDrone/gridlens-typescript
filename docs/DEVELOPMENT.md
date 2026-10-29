@@ -5,6 +5,14 @@ source contracts, and the remaining work. See [README](../README.md) for startup
 [HOSTING_HANDOFF](HOSTING_HANDOFF.md) for platform integration and
 [UX_CONSISTENCY](UX_CONSISTENCY.md) for phone/laptop acceptance.
 
+The new installed [shared backend composition](SHARED_BACKEND.md) adds durable
+provider checkpoints, a SQLite owner, HTTPS pairing and terminal-backed setup.
+It is separate from the preview behavior documented below. See the
+[modern installer](MODERN_INSTALL.md) for its runtime isolation and recovery,
+candidate build commands and completed isolated Docker acceptance. Published
+launcher, physical reboot, GPU recorder lifecycle and physical-phone acceptance
+remain pending; no live fleet is enabled.
+
 ## Toolchain and commands
 
 Use Node **24.14.1**, npm **11.11.0**, TypeScript **7.0.2**, Node declarations
@@ -179,11 +187,12 @@ Readers require no wallet keys, signing, transactions or privileged host access.
 
 | Reading | Current source and behavior |
 | --- | --- |
-| Status and metadata | Anonymous metrics plus deduplicated market lookup provide Status, Market, RAM/Disk, CPU, CUDA/NVIDIA, package version and System release. Metrics cache for five minutes; market labels for one hour. Status describes tier/classification, not liveness. |
+| Status and metadata | Anonymous metrics plus deduplicated market lookup provide Status, Market, RAM/Disk, CPU, CUDA/NVIDIA, package version, System release and Country. Metrics cache for five minutes; market labels for one hour. Status describes tier/classification, not liveness. |
 | API and State | Validated Node Info supplies reported activity and API results. Successful responses cache for 15 seconds; Node-backed State expires locally after 30 seconds. OTHER may be resolved with positive, nonconflicting public running-job/queue membership. |
 | DL / UL / Ping | Reported Node Info network readings, not browser-triggered speed tests. The default 0/0/0 triplet is unknown because validity is not established. |
 | Queued | Validated ordered indexer market queue gives one-based position/total, never an ETA. It shares market reads with State, caches for 15 seconds and expires locally after 30 seconds. |
 | Duration | Verified running assignment plus job timing. Known jobs refresh every 120 seconds; evidence expires after 180 seconds. The local clock uses the original start and reported limit. |
+| Jobs | Current verified assignment or last observed job, plus optional ten-record history. Expanded history reads the indexer's host-filtered first page on demand, caches it five minutes and preserves individual job check times. Lifecycle and execution result are separate. |
 | SOL | Confirmed public RPC batches of up to 100 accounts, verified mainnet and block freshness, exact integer lamports. Best-effort refresh every 30 seconds; local expiry after 60 seconds. |
 | NOS | The host's standard associated NOS token account, with verified mint/owner/state. Refresh every 120 seconds; local expiry after 180 seconds. Other token accounts, stake and rewards are separate. |
 | Staked NOS | Verified staking vault balance and current market target, with independent source times. Refresh every 30 minutes; expiry after 35 minutes. Vault tokens still releasing are included. |
@@ -336,24 +345,115 @@ need shared durable cache and budget ownership, not independent public collector
 The portable snapshot gateway uses trusted independent ingestion instead;
 see [HOSTING_HANDOFF](HOSTING_HANDOFF.md).
 
+### Recent job history
+
+Jobs replaces the unconnected Latest Job placeholder without adding a data
+column. Its collapsed summary uses the existing independently validated current
+assignment, otherwise the most recent observed job with a historical label.
+Historical records never feed State, API or Duration. The expanded table follows
+Explorer's Address / Host / Started / Duration / Price / GPU / Status layout,
+with a uniform dark surface, readable sans-serif text, relative starts and
+outlined status badges. Only expanded job rows grow to 50–52 pixels; Fleet host
+rows remain 34 pixels. Inline-size containment keeps the nested table within the
+established Fleet width; unsupported engines use a bounded 1,280px fallback.
+History headings scroll with their own rows; only Fleet's direct header is pinned.
+Running elapsed values are estimates and show the original
+reported maximum. A completed lifecycle is separate from a successful execution
+result: SUCCESS/FAILED require explicit completed outcomes, while missing or
+contradictory results stay explicit. Last-reported running evidence cannot claim
+current work. Exact UTC start/end/check times, lifecycle/result, page coverage
+and pricing inputs remain in a default-closed Source details disclosure. Opening
+that disclosure changes presentation only and preserves its focus through ticks.
+
+Expansion is per host, survives sorting, and resets on reload or scenario change.
+Show all / Hide all operates on the displayed roster. Selected histories are
+requested in chunks of at most 100 through `/preview/job-history.json`, with
+repeated `host` parameters checked against the startup/Online roster. Optional
+`refresh=1` expresses manual refresh, without bypassing budgets or the one-minute
+lookup floor. Online requests retain revision checks and only call `peekHistory`;
+they never construct a job provider or collect new history.
+
+The source is the same configured Nosana indexer as Duration:
+`GET /jobs/?node=<host>&limit=10&offset=0`. It supplies a bounded recent page,
+not a synchronized or complete archive. Normalize identity, lifecycle, timings
+and the allowlisted `jobStatus` result immediately; raw workload definitions,
+results and environment values are discarded. Existing assignment/terminal reads
+also retain up to ten observations without renewing the separate history-page
+check time. Deduplicate by full job address and preserve newer item observations.
+
+Price/GPU enrichment uses the job's own `market` and recorded
+`usdRewardPerHour`, plus one deduplicated, five-minute
+`https://host-manager.k8s.prd.nosana.com/markets` catalog. Select only each market's
+`address`, `name` and `usd_reward_per_hour`, with 2 MiB/2,048-entry bounds. This
+JSON API call shares the same job pool, budgets, retry rules and cancellation;
+it runs only for explicit expanded-history demand. Ordinary assignment reads and
+Online cache peeks never initiate market enrichment. A market failure preserves
+the successful job page and dated catalog; a later explicit read can retry the
+metadata independently of the page's refresh floor.
+
+Active job Price uses the market USD/hour quote × 1.1 and displays `/h`;
+finished job Price uses its recorded USD/hour rate × final seconds / 3,600 × 1.1.
+This follows Explorer's calculated customer price including 10%, not a settled
+invoice or host rewards. The [indexer records the job rate](https://github.com/nosana-ci/indexer/blob/0a115f3801c2b2d5d71dc3723dd3a4171c89278c/src/indexer/job-processor.ts#L305)
+and [Explorer applies the price multiplier](https://github.com/nosana-ci/explore.nosana.com/blob/8a41d1bf8993ddab676a2600b0af6e91934af676/app/composables/useMarketPricing.ts#L4).
+Never replace a missing historical rate with today's
+market quote. Missing, default-zero or invalid rates remain unknown; tiny positive
+display amounts use `<$0.001` rather than falsely showing zero. Retained hourly
+quotes say Last quoted. GPU is the associated job market's name, never the host's
+current market or measured physical GPU. Independent market check/expiry times
+and retained pricing evidence must not renew job or page timestamps.
+
+Opening missing or five-minute-old history requests one page. No periodic history
+polling runs after that read settles. Deferred work follows shared eligibility
+only while expanded and visible; hiding/collapsing cancels unneeded work. Manual
+Refresh and new openings still share the existing two slots, global budgets and
+repeated-discovery allowance, at lower dispatch priority than current-job work.
+Failures preserve original records and timestamps. Memory-only caches disappear
+on restart; subsequent expansion can retrieve pre-restart records that Nosana
+still supplies. There is no live lab database or retention guarantee.
+
+The separate `JobHistorySnapshot` resource carries the same values through the
+portable gateway and isolated hosting rehearsal. Missing history in older
+snapshots restores as unknown. The trusted platform source and production
+retention remain integration work; browser history requests never create a public
+provider fallback in snapshot mode.
+
+### Reported country
+
+Country reuses the existing host metrics read, preferring valid
+`metrics.network.country` and falling back to `metrics.country`. Bounded safe
+text is retained; missing or invalid values remain unknown. Known country codes
+have compact code and full English-name displays; other safe reported text stays
+as reported. This is upstream-reported country, not verified physical location.
+No IP lookup, browser geolocation, new endpoint or extra request is introduced.
+Country shares metadata's original check time, cache and retained-value behavior.
+
+The column is last, after System, with a saved compact/full header toggle that
+defaults to compact. Sorting uses the full display name in either mode. Body
+cells remain plain text without hovers or popups; header help explains the source
+and limits. Optional `HostMetadataValues.country` crosses the metadata contract
+and snapshot allowlist; older snapshots without it restore as unknown.
+Region and city remain unverified and unconnected.
+
 ## Fleet interaction contract
 
-Fleet has 27 data columns, or 26 with the optional combined Queued / Duration
+Fleet has 28 data columns, or 27 with the optional combined Queued / Duration
 layout. Staked NOS precedes Status. After SOL, keep **API → State → Queued →
 Duration**, then the decorative divider. Rows remain compact, and the page grows
 vertically with the fleet; horizontal overflow supports the full table.
 
 Sorting uses exact amounts/full identities and stable ties, with unknown values
 last in either direction. Clear sort restores supplied order or synthetic PC
-order. The eight independent saved display controls are IP, Host Address,
-Duration, Staked NOS, Market, NVIDIA, CPU and System. Full values remain in the
-model even in compact display. Combined Queued / Duration retains both readings,
+order. The nine independent saved display controls are IP, Host Address,
+Duration, Staked NOS, Market, NVIDIA, CPU, System and Country. Full values remain
+in the model even in compact display. Combined Queued / Duration retains both readings,
 freshness, sort controls and source details; changing layout does not change data.
 
 All column headers retain sorting, information and display controls. Left-side
 body controls open concise details with full provenance in a closed Source details
 disclosure. Body values right of the divider are plain, nonfocusable text without
-hover or row popups. Keep controls connected through refresh, sorting and layout
+hover or row popups, except the requested Jobs expansion and job links.
+Keep controls connected through refresh, sorting and layout
 changes to preserve keyboard focus and animation timelines. Unchanged status
 messages must not repeatedly announce loading or rebuild stable text.
 
@@ -420,9 +520,12 @@ reference, synthetic rehearsal and compiled artifact are implemented. The gatewa
 requires injected authorized scope/roster resolution and a normalized snapshot
 source. It validates and rechecks access, filters responses, bounds streams and
 preserves evidence times across storage/restart. The local file store is not a
-distributed database. Platform authentication, data connectors, production storage,
-TLS/domain/ingress and deployment/recovery acceptance remain integration work.
-See [HOSTING_HANDOFF](HOSTING_HANDOFF.md) for the contract and exact open decisions.
+distributed database. External hosting through that handoff still needs its own
+platform authentication, data connectors, storage and TLS/ingress integration.
+The separate [shared backend candidate](SHARED_BACKEND.md) supplies SQLite, device
+pairing and HTTPS in Docker and has passed isolated lifecycle acceptance; it is
+not enabled for a live fleet. See [HOSTING_HANDOFF](HOSTING_HANDOFF.md) for the
+portable contract and its remaining platform decisions.
 
 The proposed small beta would associate unguessable links with fixed operator
 rosters and enforce that assignment on every data request, retaining shared
@@ -437,7 +540,7 @@ Current feature priorities and source gaps:
 | --- | --- |
 | Exact claimable uptime rewards | Verify the supported source, amount/units, identity permissions and observation times; no estimate, manual entry or user-managed credential substitute. |
 | Daily uptime/history | Verify day/timezone boundaries, coverage, partial/empty history and completeness. |
-| Node run time and Latest Job | Connect verified sources with independent evidence and correct host/job association. |
+| Node run time | Connect a verified source with independent evidence and correct host association. |
 | PC/private IP/physical GPU identity | Define authoritative grouping and physical-device mapping, including replacement/reordering; reported device index alone is insufficient. |
 | 200+ host overview | Design a separate overview that exposes every host without shrinking the detailed table further. |
 | Alerts | Define live alert behavior and delivery; the current sidebar entry is disabled. |
@@ -446,7 +549,7 @@ Current feature priorities and source gaps:
 
 Deferred field candidates are GPU model/VRAM, GPU verification and UUID details,
 CPU core counts, model-named benchmark throughput, benchmark temperature/power,
-location, GPU runtime version, market guidance, alternate network-test selection
+region/city, GPU runtime version, market guidance, alternate network-test selection
 and last-reported-update semantics. Their presence in a source does not settle
 meaning, units, access or freshness. Add verified fields in bounded changes;
 benchmark averages are not current sensor readings, and runtime version is not

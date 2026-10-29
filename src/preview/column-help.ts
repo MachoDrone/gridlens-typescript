@@ -14,7 +14,7 @@ export const COLUMN_HELP = {
   duration: "Elapsed job time against its reported limit; red begins more than five minutes over the unchanged limit.",
   nodeRuntime: "Time since the node process started; this reading is not connected yet.",
   dailyUptime: "Host uptime for the last completed provider day; no verified uptime source is connected yet.",
-  latestJob: "Latest verified job; job history is not connected yet, while current assignment details appear in Duration.",
+  latestJob: "Current verified assignment or last observed job; expand for up to ten recent jobs, separate results and original check times.",
   ram: "Reported memory capacity in GB, rounded to whole GB here; current memory usage is not measured.",
   disk: "Reported disk size in GB; this reading does not show current free space.",
   dl: "Saved download speed in Mbps; this page does not run a new speed test.",
@@ -29,4 +29,5 @@ export const COLUMN_HELP = {
   nvidia: "Reported NVIDIA driver version, shown as its major version or full version.",
   cpu: "Reported processor model, shown as a short label or full description.",
   system: "Reported system release, shown in short or full form; a kernel release does not identify the full OS distribution.",
+  country: "Country reported by Nosana, shown as a code or full name; this does not verify the host’s physical location.",
 } as const satisfies Record<SortColumn, string>;

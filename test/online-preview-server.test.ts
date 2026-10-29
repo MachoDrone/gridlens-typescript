@@ -16,6 +16,7 @@ import type { HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
 import { normalizeHostMetadata } from "../src/fleet/host-metadata.ts";
 import { isFleetSnapshot } from "../src/contracts/fleet.ts";
 import { BROWSER_ASSETS } from "../src/server/browser-assets.ts";
+import { blankJobHistoryRecord } from "../src/fleet/job-history.ts";
 
 const addresses = Array.from({ length: 5 }, (_, index) => `${"1".repeat(31)}${index + 2}`);
 const scenario = "?scenario=online-gpu-hosts";
@@ -94,6 +95,28 @@ async function until(predicate: () => boolean): Promise<void> {
   }
   assert(predicate(), "Expected server activity did not occur.");
 }
+
+test("Online job history including explicit refresh only peeks existing observations", async t => {
+  const source = discovery();
+  let peeks = 0;
+  let reads = 0;
+  const jobProvider: JobProvider = async () => { reads++; throw new Error("No assignment discovery."); };
+  jobProvider.history = async () => { reads++; throw new Error("No history collection."); };
+  jobProvider.peekHistory = members => { peeks++; return { hosts: members.map(blankJobHistoryRecord) }; };
+  const { server } = await fixture(t, source.provider, undefined, jobProvider);
+  await read(server, `/preview/hosts.json${scenario}`);
+  const url = `/preview/job-history.json${scenario}&revision=r1&host=${addresses[2]}`;
+  for (const suffix of ["", "&refresh=1"]) {
+    const result = await read(server, url + suffix);
+    assert.equal(result.status, 200);
+    assert.equal(JSON.parse(result.body).onlineRevision, "r1");
+    assert.deepEqual(JSON.parse(result.body).hosts, [blankJobHistoryRecord(addresses[2]!)]);
+  }
+  assert.equal(reads, 0);
+  assert.equal(peeks, 2);
+  assert.equal((await read(server, url.replace("revision=r1", "revision=old"))).status, 409);
+  assert.equal(peeks, 2);
+});
 
 test("Online discovery is lazy and fixed scenario files and reads remain isolated", async t => {
   const source = discovery();

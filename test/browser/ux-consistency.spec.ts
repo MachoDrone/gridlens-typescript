@@ -708,11 +708,11 @@ for (const width of [320, 390]) test.describe(`complete touch journey ${width}px
     await activate(page, page.locator("#sidebar-toggle"), true);
     await expectShell(page);
     await expectReachable(first);
-    const right = page.locator('#column-headings th[data-col="system"] .column-label');
+    const right = page.locator('#column-headings th[data-col="country"] .column-label');
     await reachByPan(page, session, right, "x");
     await page.screenshot({ path: info.outputPath("rightmost-column-menu-expanded.png") });
     await activate(page, right, true);
-    await expect(page.locator('th[data-col="system"]')).toHaveAttribute("aria-sort", "ascending");
+    await expect(page.locator('th[data-col="country"]')).toHaveAttribute("aria-sort", "ascending");
     await reachByPan(page, session, first, "x");
     await activate(page, page.locator("#clear-sort"), true);
     const last = page.locator('#fleet-rows tr:last-child td[data-col="pc"] button');

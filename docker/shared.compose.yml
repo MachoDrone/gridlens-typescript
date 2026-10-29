@@ -1,0 +1,59 @@
+# Review/reference topology. The signed terminal coordinator owns lifecycle and
+# persists its selected image, address, ports and matched state recovery pairs.
+services:
+  owner:
+    image: ${GRIDLENS_IMAGE:?Use the verified release image digest}
+    user: "1000:1000"
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m]
+    command: [node, scripts/shared-owner.ts]
+    labels: {io.gridlens.product: shared-backend, io.gridlens.instance: "${GRIDLENS_INSTANCE:-default}"}
+    environment:
+      GRIDLENS_STATE_DIR: /state
+      GRIDLENS_LEDGER_DIR: /ledger
+      GRIDLENS_SOCKET_DIR: /ipc
+      GRIDLENS_CONTROL_DIR: /control
+      GRIDLENS_CREDENTIAL_DIR: /credentials
+    volumes:
+      - state:/state
+      - ledger:/ledger
+      - read-ipc:/ipc
+      - control-ipc:/control
+      - credentials:/credentials
+  gateway:
+    image: ${GRIDLENS_IMAGE:?Use the verified release image digest}
+    user: "1000:1000"
+    read_only: true
+    restart: unless-stopped
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    pids_limit: 128
+    tmpfs: [/tmp:rw,nosuid,nodev,noexec,size=64m]
+    command: [node, scripts/shared-gateway.ts]
+    labels: {io.gridlens.product: shared-backend, io.gridlens.instance: "${GRIDLENS_INSTANCE:-default}"}
+    ports: ["${GRIDLENS_BIND_ADDRESS:?Choose the assigned private IP}:${GRIDLENS_PORT:-8789}:8443"]
+    environment:
+      GRIDLENS_SOCKET: /ipc/read.sock
+      GRIDLENS_TLS_CERT: /tls/server.crt
+      GRIDLENS_TLS_KEY: /tls/server.key
+      GRIDLENS_PUBLIC_ORIGIN: ${GRIDLENS_PUBLIC_ORIGIN:?Set the exact HTTPS private IP and port}
+    volumes:
+      - read-ipc:/ipc:ro
+      - tls:/tls:ro
+volumes:
+  state: {external: true, name: "${GRIDLENS_STATE_VOLUME:?Select the matched image/state pair}"}
+  ledger: {external: true, name: "gridlens-modern-${GRIDLENS_INSTANCE:-default}-ledger"}
+  read-ipc: {external: true, name: "gridlens-modern-${GRIDLENS_INSTANCE:-default}-read-ipc"}
+  control-ipc: {external: true, name: "gridlens-modern-${GRIDLENS_INSTANCE:-default}-control-ipc"}
+  credentials: {external: true, name: "gridlens-modern-${GRIDLENS_INSTANCE:-default}-credentials"}
+  tls: {external: true, name: "gridlens-modern-${GRIDLENS_INSTANCE:-default}-tls"}
+
+networks:
+  default:
+    labels:
+      io.gridlens.product: shared-backend
+      io.gridlens.instance: "${GRIDLENS_INSTANCE:-default}"

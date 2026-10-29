@@ -59,6 +59,10 @@ branding may scroll away while the toggle and menu links remain reachable.
   Do not add mobile hover instructions or new info bubbles. A mobile bubble
   toggle remains future work. The approved removal of body hover text and
   popups to the right of the divider remains in effect on both device types.
+  Country is the final plain-text column after System. Its header help, sorting
+  and saved compact-code/full-name toggle remain available on phone and laptop;
+  the body adds no hover or popup. Both modes preserve reported country meaning,
+  unknown/retained styling and metadata refresh behavior.
 - Browser-local preferences, source meanings, data APIs and refresh semantics
   are preserved. A smaller screen or an open menu does not pause a visible
   page's refreshes or change evidence, timestamps, ordering or source selection.
@@ -141,8 +145,8 @@ viewport geometry is unavailable, retain the ordinary CSS fallback.
 Native phone zoom-out must be able to reveal the whole table, rather than a
 smaller clipped table window. On genuine two-finger contraction, temporarily
 expose a page width measured from the actual table, sidebar and padding, and
-expand the existing table's visible area with it. Support all 27 data columns,
-or 26 in combined Queued / Duration, with both compact and expanded field displays.
+expand the existing table's visible area with it. Support all 28 data columns,
+or 27 in combined Queued / Duration, with both compact and expanded field displays.
 Keep the full canvas available during contraction. At an intermediate zoom-out
 level, when the gesture ends adopt the visible CSS width rounded inward to an
 integer at that native scale and restore the horizontal table scroller at its
@@ -150,9 +154,15 @@ full content height.
 At the naturally fitting minimum, where the visible width is within 1 CSS pixel
 of full capacity, keep the full canvas exposed: the layout and visual widths
 already coincide. Preserve this responsive fit through rotation, including
-expanded CPU/System values. The exposed wrapper includes the main's 12px right
-gutter in its intrinsic maximum-content width so the last column fits before
-ResizeObserver updates. One-finger pans at intermediate levels use
+expanded CPU/System/Country values. The exposed wrapper includes the main's 12px
+right gutter in its intrinsic maximum-content width so the last column fits before
+ResizeObserver updates. Rotation may round unused right gutter while the actual
+table still fits. Keep that table exposed only when both edges fit the visible
+viewport and layout/visual widths naturally coincide within the existing 1.1px
+allowance. A deliberate zoom just above the fitting minimum must still enter
+the inward-rounded scroller, without blank document pan. The wider Jobs column
+is covered by rotation and near-minimum regression checks.
+One-finger pans at intermediate levels use
 native table/document scrolling with near-zero visual-viewport offsets, keeping
 the navigation stationary without JavaScript following every pan. A subsequent
 contraction exposes the whole width again, preserving the viewed column and row.

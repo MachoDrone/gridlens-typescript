@@ -2,6 +2,8 @@ import { FLEET_RESOURCES, isFleetRoster, isFleetSnapshot } from "../contracts/fl
 import type { FleetContext, FleetResource, FleetSnapshots } from "../contracts/fleet.ts";
 import { NOS_MINT } from "../fleet/nos.ts";
 import { blankStakingRecord } from "../fleet/staking.ts";
+import { blankJobHistoryRecord, JOB_HISTORY_LIMIT } from "../fleet/job-history.ts";
+import type { JobHistoryItem } from "../fleet/job-history.ts";
 
 export interface StoredFleetSnapshot {
   schemaVersion: 1;
@@ -47,6 +49,7 @@ export function emptyFleetSnapshots(addresses: readonly string[]): FleetSnapshot
     "node-info": { hosts: addresses.map(address => ({ address, values: null, fetchedAtMs: null, validUntilMs: null, retained: false, error: null })) },
     jobs: { hosts: addresses.map(address => ({ address, job: null, checkedAtMs: null, validUntilMs: null,
       failedAtMs: null, retained: false, pending: false, retryAtMs: null, error: null })), nextRefreshAtMs: null },
+    "job-history": { hosts: addresses.map(blankJobHistoryRecord), nextRefreshAtMs: null },
     queue: { hosts: addresses.map(address => ({ address, marketAddress: null, position: null, total: null,
       checkedAtMs: null, validUntilMs: null, sourceUpdatedAtMs: null, retained: false, error: null })), nextRefreshAtMs: null },
     sol: { hosts: addresses.map(address => ({ address, lamports: null, ...evidence() })), nextRefreshAtMs: null },
@@ -64,7 +67,7 @@ function select(value: unknown, fields: string): Record<string, unknown> {
 const evidenceFields = "provider endpoint contextSlot blockTimeMs checkedAtMs validUntilMs retained error retryAtMs";
 const apiResultFields = "status checkedAtMs firstFailedAtMs httpStatus nextCheckAtMs";
 const observationFields = new Set(["fetchedAtMs", "checkedAtMs", "blockTimeMs", "failedAtMs", "sourceUpdatedAtMs",
-  "marketFetchedAtMs", "lastOnlineAtMs", "firstFailedAtMs"]);
+  "marketFetchedAtMs", "marketCheckedAtMs", "lastOnlineAtMs", "firstFailedAtMs"]);
 const maximumTime = 8_640_000_000_000_000;
 function observationCeiling(now: number): number {
   if (!Number.isSafeInteger(now) || now < 0 || now > maximumTime) throw new SnapshotStoreError("invalid", "Invalid snapshot store clock.");
@@ -90,7 +93,7 @@ export function normalizeFleetSnapshot<K extends FleetResource>(resource: K, val
     const row = value as unknown as Record<string, unknown>;
     switch (resource) {
       case "metadata": return { ...select(row, "address fetchedAtMs retained error marketError"), values: row.values === null ? null :
-        select(row.values, "status marketAddress marketLabel ram disk cpu cuda nvidia currentNode system") };
+        select(row.values, "status marketAddress marketLabel ram disk cpu cuda nvidia currentNode system country") };
       case "node-info": {
         const result = { ...select(row, "address fetchedAtMs validUntilMs retained error"), values: row.values === null ? null :
           select(row.values, "state dl ul ping networkUnavailableReason") } as Record<string, unknown>;
@@ -104,6 +107,13 @@ export function normalizeFleetSnapshot<K extends FleetResource>(resource: K, val
       }
       case "jobs": return { ...select(row, "address checkedAtMs validUntilMs failedAtMs retained pending retryAtMs error"),
         job: row.job === null ? null : select(row.job, "address node state timeStart timeEnd timeout") };
+      case "job-history": return { ...select(row, "address totalJobs checkedAtMs validUntilMs retained pending retryAtMs error"),
+        jobs: (row.jobs as JobHistoryItem[]).map(item => ({
+          ...select(item, "address node state timeStart timeEnd timeout result checkedAtMs"),
+          marketAddress: item.marketAddress ?? null, usdRewardPerHour: item.usdRewardPerHour ?? null,
+          marketName: item.marketName ?? null, marketUsdRewardPerHour: item.marketUsdRewardPerHour ?? null,
+          marketCheckedAtMs: item.marketCheckedAtMs ?? null, marketValidUntilMs: item.marketValidUntilMs ?? null,
+        })) };
       case "queue": return select(row, "address marketAddress position total checkedAtMs validUntilMs sourceUpdatedAtMs retained error");
       case "sol": return select(row, `address lamports ${evidenceFields}`);
       case "nos": return select(row, `address tokenAccount mint amount decimals accountState ${evidenceFields}`);
@@ -131,7 +141,12 @@ export function restoreFleetSnapshots(value: unknown, { now = Date.now }: { now?
     keys.add(key);
     const snapshots = {} as FleetSnapshots;
     for (const resource of FLEET_RESOURCES) {
-      Object.assign(snapshots, { [resource]: normalizeFleetSnapshot(resource, entry.snapshots[resource], entry.context.addresses) });
+      // Schema 1 predates optional recent history. Only a truly absent resource
+      // restores as unknown; malformed present history must still fail closed.
+      const value = resource === "job-history" && !Object.hasOwn(entry.snapshots, resource)
+        ? { hosts: entry.context.addresses.map(blankJobHistoryRecord), nextRefreshAtMs: null }
+        : entry.snapshots[resource];
+      Object.assign(snapshots, { [resource]: normalizeFleetSnapshot(resource, value, entry.context.addresses) });
     }
     rejectFutureObservations(snapshots, ceiling);
     const fences: Record<string, number> = {};
@@ -198,6 +213,40 @@ function activityFences(previous: StoredFleetSnapshot, updates: SnapshotUpdates)
   }
   return fences;
 }
+function compareHistory(previous: Record<string, unknown>, next: Record<string, unknown>): void {
+  // Current-job observations may enrich a page without performing another page
+  // read. Its original coverage count and cache deadline must remain unchanged.
+  compareEvidence(previous, next, "checkedAtMs", "totalJobs");
+  const oldJobs = previous.jobs as JobHistoryItem[];
+  const newJobs = next.jobs as JobHistoryItem[];
+  const old = new Map(oldJobs.map(item => [item.address, item]));
+  for (const item of newJobs) {
+    const prior = old.get(item.address);
+    compareEvidence(prior, item, "checkedAtMs", "address node state timeStart timeEnd timeout result marketAddress usdRewardPerHour");
+    if (prior && prior.marketAddress === item.marketAddress) {
+      // Optional display metadata may arrive after its job, on an independent
+      // clock. A new name/rate must not renew job or page timing evidence.
+      const market = (job: JobHistoryItem) => ({ checkedAtMs: job.marketCheckedAtMs ?? null,
+        validUntilMs: job.marketValidUntilMs ?? null, name: job.marketName ?? null,
+        rate: job.marketUsdRewardPerHour ?? null });
+      compareEvidence(market(prior), market(item), "checkedAtMs", "name rate");
+    }
+  }
+  const freshPage = typeof next.checkedAtMs === "number" &&
+    (previous.checkedAtMs === null || next.checkedAtMs > (previous.checkedAtMs as number));
+  const newestFirst = (a: JobHistoryItem, b: JobHistoryItem): number =>
+    (b.timeStart ?? 0) - (a.timeStart ?? 0) || a.address.localeCompare(b.address);
+  const tail = [...newJobs].sort(newestFirst).at(-1);
+  const newIds = new Set(newJobs.map(item => item.address));
+  for (const item of oldJobs) if (!newIds.has(item.address)) {
+    if (freshPage && (next.checkedAtMs as number) >= item.checkedAtMs) continue;
+    // An observed-only update may evict the oldest member of a full ten-item
+    // list. A page that predates an individual observation cannot discard it.
+    if (newJobs.length !== JOB_HISTORY_LIMIT || !tail || newestFirst(item, tail) < 0) {
+      throw new SnapshotStoreError("stale", "Removing job history requires a new page check or bounded recent-history eviction.");
+    }
+  }
+}
 function rejectRegressions(resource: FleetResource, previous: FleetSnapshots[FleetResource], next: FleetSnapshots[FleetResource]): void {
   const old = new Map(previous.hosts.map(row => [row.address, row as unknown as Record<string, unknown>]));
   for (const value of next.hosts) {
@@ -206,9 +255,12 @@ function rejectRegressions(resource: FleetResource, previous: FleetSnapshots[Fle
     switch (resource) {
       case "metadata": {
         // Optional labels can arrive after the same validated metrics observation.
-        const core = "status marketAddress ram disk cpu cuda nvidia currentNode system";
-        compareEvidence({ ...prior, values: prior.values === null ? null : select(prior.values, core) },
-          { ...row, values: row.values === null ? null : select(row.values, core) }, "fetchedAtMs", "values");
+        const core = "status marketAddress ram disk cpu cuda nvidia currentNode system country";
+        const measurements = (values: unknown) => values === null ? null : {
+          ...select(values, core), country: object(values) ? values.country ?? null : null,
+        };
+        compareEvidence({ ...prior, values: measurements(prior.values) },
+          { ...row, values: measurements(row.values) }, "fetchedAtMs", "values");
         break;
       }
       case "node-info":
@@ -220,6 +272,7 @@ function rejectRegressions(resource: FleetResource, previous: FleetSnapshots[Fle
         if (!failedActivity(row.activity)) compareEvidence(prior.activity, row.activity, "checkedAtMs", "state source");
         break;
       case "jobs": compareEvidence(prior, row, "checkedAtMs", "job"); break;
+      case "job-history": compareHistory(prior, row); break;
       case "queue":
         if (prior.marketAddress === row.marketAddress) compareEvidence(prior, row, "checkedAtMs", "marketAddress position total sourceUpdatedAtMs");
         else if (typeof row.checkedAtMs === "number") compareClock(prior, row, "checkedAtMs");

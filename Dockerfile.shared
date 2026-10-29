@@ -1,0 +1,23 @@
+# Runtime image identity is pinned by the signed release manifest after building.
+FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c AS build
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --ignore-scripts
+COPY tsconfig.json tsconfig.browser.json ./
+COPY src/ src/
+COPY scripts/ scripts/
+RUN npm run build
+
+FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c
+ARG GRIDLENS_VERSION=0.1.0-candidate
+LABEL io.gridlens.product="shared-backend" io.gridlens.version="${GRIDLENS_VERSION}"
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssl && rm -rf /var/lib/apt/lists/*
+WORKDIR /app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+COPY --from=build /app/dist/ dist/
+COPY src/ src/
+COPY scripts/ scripts/
+COPY LICENSE ./
+USER 1000:1000
+CMD ["node", "scripts/shared-owner.ts"]

@@ -17,6 +17,15 @@ export function sampleAddresses(pcIndex: number): IPAddresses {
 
 export const SAMPLE_TIME = Date.UTC(2026, 0, 1, 12);
 
+/** Invented country reports shared by hosts on a sample PC; never live geography. */
+export function sampleCountry(hostId: string): string | null {
+  const match = /^sample-host-(\d+)-\d+$/.exec(hostId);
+  const pcNumber = Number(match?.[1]);
+  if (!Number.isSafeInteger(pcNumber) || pcNumber < 1) return null;
+  const countries = ["US", "nl", null, "DE", "Canada", "GB"] as const;
+  return countries[(pcNumber - 1) % countries.length] ?? null;
+}
+
 export interface HardwareSample {
   readonly values: Readonly<Record<HardwareColumn, string | null>>;
   readonly observedAtMs: number | null;

@@ -118,10 +118,10 @@ async function showEveryColumn(page: Page, session: CDPSession, combined: boolea
     { message: "A native pinch must show every header and first-row cell at once, with no clipped table window" }).toEqual([]);
   const geometry = await overviewGeometry(page);
   expect(geometry.scale, "The browser must actually zoom out").toBeLessThan(before.scale * .8);
-  expect(geometry.columns).toHaveLength(combined ? 26 : 27);
-  expect(geometry.cells).toBe(combined ? 26 : 27);
+  expect(geometry.columns).toHaveLength(combined ? 27 : 28);
+  expect(geometry.cells).toBe(combined ? 27 : 28);
   expect(geometry.first).toBe("stakedNos");
-  expect(geometry.last).toBe("system");
+  expect(geometry.last).toBe("country");
   expect(geometry.wrapperWidth + 1).toBeGreaterThanOrEqual(geometry.tableWidth);
   expect(geometry.pageWidth - geometry.visibleWidth, "The final overview must not strand columns beyond blank canvas").toBeLessThan(2);
   return geometry;
@@ -136,6 +136,7 @@ async function prepare(page: Page, options: { expandedMenu: boolean; combined: b
     localStorage.setItem("gridlens.preview.ip-mode.v1", expandedFields ? "full" : "dot");
     localStorage.setItem("gridlens.preview.staking-mode.v1", expandedFields ? "amounts" : "symbols");
     localStorage.setItem("gridlens.preview.duration-mode.v1", expandedFields ? "text" : "bar");
+    localStorage.setItem("gridlens.preview.country-mode.v1", expandedFields ? "full" : "compact");
     for (const field of ["nvidia", "cpu", "system"]) {
       localStorage.setItem(`gridlens.preview.${field}-mode.v1`, expandedFields ? "expanded" : "compact");
     }
@@ -319,7 +320,7 @@ for (const width of [320, 390]) test.describe(`phone overview ${width}px`, () =>
       await nativePinch(page, session, "out");
       await expect.poll(async () => (await overviewGeometry(page)).issues).toEqual([]);
     }
-    expect((await overviewGeometry(page)).columns).toHaveLength(27);
+    expect((await overviewGeometry(page)).columns).toHaveLength(28);
   });
 
   test("a second native contraction preserves the scrolled column and row when reopening the overview", async ({ page, context }) => {
@@ -461,9 +462,27 @@ for (const width of [320, 390]) test.describe(`phone overview ${width}px`, () =>
     await page.setViewportSize({ width: 844, height: width });
     await page.waitForTimeout(350);
     await expect.poll(async () => (await overviewGeometry(page)).issues).toEqual([]);
+    const rotated = await overviewGeometry(page);
+    expect(rotated.pageWidth - rotated.visibleWidth, "A fitting rotated table must not leave blank horizontal canvas").toBeLessThan(2);
+    expect(Math.max(Math.abs(rotated.pageLeft), Math.abs(rotated.tableScroll)), "A fitting rotated table retains its horizontal origin").toBeLessThan(1.1);
+    // The table can fit while a deliberate near-minimum endpoint still leaves
+    // part of its unused gutter outside the viewport. Keep that endpoint in the
+    // normal contained scroller instead of retaining blank document panning.
+    const nearMinimumWidth = Math.floor(rotated.visibleWidth) - 10;
+    await setBrowserPinchScale(page, session, page.viewportSize()!.width / nearMinimumWidth);
+    await settledViewport(page);
+    await expect(page.locator("html")).not.toHaveAttribute("data-fleet-overview-exposed", "true");
+    const nearMinimum = await overviewGeometry(page);
+    expect(nearMinimum.pageWidth - nearMinimum.visibleWidth, "A deliberate near-minimum zoom must not retain blank document pan").toBeLessThan(2);
+    expect(Math.abs(nearMinimum.pageLeft)).toBeLessThan(1.1);
+    expect(nearMinimum.wrapperWidth).toBeLessThan(nearMinimum.tableWidth);
+    await nativePinch(page, session, "out");
+    await expect.poll(async () => (await overviewGeometry(page)).issues).toEqual([]);
     await page.setViewportSize({ width, height: 844 });
     await page.waitForTimeout(350);
     await expect.poll(async () => (await overviewGeometry(page)).issues).toEqual([]);
+    const portrait = await overviewGeometry(page);
+    expect(portrait.pageWidth - portrait.visibleWidth, "Returning to portrait keeps the natural full-table fit").toBeLessThan(2);
     await page.reload();
     await page.waitForTimeout(350);
     await expectNormalShell(page);

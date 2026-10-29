@@ -51,6 +51,8 @@ test("handoff is reproducible, contains only runtime files, and runs outside its
   assert(filenames.includes("src/server/application.d.ts"));
   assert(filenames.includes("src/contracts/fleet.js"));
   assert(filenames.includes("src/contracts/fleet.d.ts"));
+  assert(filenames.includes("src/fleet/job-history.d.ts"));
+  assert(filenames.includes("dist/preview/job-history.js"));
   assert(filenames.includes("INTEGRATION.md"));
   assert(filenames.includes("dist/preview/main.js"));
   assert(!filenames.includes("scripts/preview-server.js"), "public adapters must not be a hosted fallback");
@@ -88,6 +90,8 @@ test("handoff is reproducible, contains only runtime files, and runs outside its
 import type { FleetIntegration } from "${package_.name}/application";
 import type { FleetSource } from "${package_.name}/snapshot-source";
 import { isFleetRoster } from "${package_.name}/contracts";
+import type { FleetSnapshots } from "${package_.name}/contracts";
+const history: FleetSnapshots["job-history"] = { hosts: [] };
 const source: FleetSource = { async read() { throw new Error("No backend configured in this type fixture."); } };
 export function createIntegration(): FleetIntegration {
   return { source, resolveAccess: async () => isFleetRoster([])
@@ -109,9 +113,16 @@ export function createIntegration(): FleetIntegration {
   writeFileSync(integration, `
 export function createIntegration() {
   return {
-    resolveAccess: async request => request.headers["x-fixture-session"] === "allowed"
-      ? { scopeId: "isolated-fixture", rosterRevision: "1", addresses: [] } : null,
-    source: { read: async () => ({ hosts: [], nextRefreshAtMs: null }) },
+    resolveAccess: async request => ["allowed", "history"].includes(request.headers["x-fixture-session"])
+      ? { scopeId: "isolated-fixture", rosterRevision: "1",
+          addresses: request.headers["x-fixture-session"] === "history" ? ["${"1".repeat(31)}2"] : [] } : null,
+    source: { read: async (resource, context) => resource === "job-history" ? {
+      hosts: context.addresses.map(address => ({ address, jobs: [{
+        address: "${"1".repeat(31)}3", node: address, state: "COMPLETED", result: "failed",
+        timeStart: 100, timeEnd: 200, timeout: 600, checkedAtMs: 300000,
+      }], totalJobs: 1, checkedAtMs: 300000, validUntilMs: 600000,
+        retained: false, pending: false, retryAtMs: null, error: null })),
+    } : ({ hosts: [], nextRefreshAtMs: null }) },
   };
 }
 `);
@@ -143,6 +154,7 @@ export function createIntegration() {
   const headers = { "x-fixture-session": "allowed" };
   assert.equal((await fetch(`${origin}/`, { headers })).status, 200);
   assert.equal((await fetch(`${origin}/preview/main.js`, { headers })).status, 200);
+  assert.equal((await fetch(`${origin}/preview/job-history.js`, { headers })).status, 200);
   const hosts = await fetch(`${origin}/api/fleet/hosts.json`, { headers });
   assert.equal(hosts.status, 200);
   assert.deepEqual((await hosts.json() as { addresses: string[] }).addresses, []);
@@ -151,6 +163,14 @@ export function createIntegration() {
     assert.equal(response.status, 200, resource);
     assert.deepEqual((await response.json() as { hosts: unknown[] }).hosts, []);
   }
+  const history = await fetch(`${origin}/api/fleet/job-history.json?host=${"1".repeat(31)}2`, {
+    headers: { "x-fixture-session": "history" },
+  });
+  assert.equal(history.status, 200);
+  const record = (await history.json()).hosts[0];
+  assert.equal(record.jobs[0].state, "COMPLETED");
+  assert.equal(record.jobs[0].result, "failed");
+  assert.equal(record.checkedAtMs, 300000, "copied runtime preserves historical source dates");
   child.kill("SIGTERM");
   assert.equal(await exited, 0, outputText);
   const installed = spawnSync("npm", ["ci", "--omit=dev", "--ignore-scripts", "--offline", "--no-audit", "--no-fund"], {

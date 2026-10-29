@@ -366,7 +366,7 @@ test("Online uses only cached timings; Supplied collects them and switching back
   const duration = page.locator(`#fleet-rows [data-host="${a}"] [data-col="duration"]`);
   await expect(duration).toHaveText("Populating..");
   await expect(page.locator("#online-job-policy")).toHaveText(
-    "Online GPU Hosts uses cached job timings only. Active job collection is reserved for Supplied Host Addresses and Real200.");
+    "Online GPU Hosts uses cached job timings and history only. Active job collection is reserved for Supplied Host Addresses and Real200.");
   await expect(page.locator("#online-job-policy")).toBeVisible();
   expect(await page.locator("#online-job-policy").evaluate(element => element.closest("#preview-tools") === null)).toBe(true);
   await expect(page.locator("#preview-tools")).not.toHaveAttribute("open");

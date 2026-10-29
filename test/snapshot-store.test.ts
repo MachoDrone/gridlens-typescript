@@ -8,6 +8,7 @@ import { FLEET_RESOURCES, isFleetSnapshot } from "../src/contracts/fleet.ts";
 import type { FleetContext } from "../src/contracts/fleet.ts";
 import type { SolSnapshot } from "../src/fleet/sol.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
+import { normalizeHostMetadata } from "../src/fleet/host-metadata.ts";
 import { createMemorySnapshotStore, emptyFleetSnapshots, normalizeFleetSnapshot, restoreFleetSnapshots } from "../src/server/snapshot-store.ts";
 import type { SnapshotUpdates, StoredFleetSnapshot } from "../src/server/snapshot-store.ts";
 import type { FleetSnapshotStore } from "../src/server/snapshot-store.ts";
@@ -149,6 +150,41 @@ test("metadata label enrichment preserves the original measurement while changed
   assert.equal(enriched.snapshots.metadata.hosts[0]!.fetchedAtMs, base);
   metadata.hosts[0]!.values.ram = 64;
   await assert.rejects(store.commit(context, { metadata }, 2), { kind: "stale" });
+  await store.close();
+});
+
+test("country survives sanitization and restore while changes require a new metadata observation", async () => {
+  const store = createMemorySnapshotStore({ now: () => base + 86_400_000 });
+  const metadata = { hosts: addresses.map(address => ({ address, fetchedAtMs: base, retained: false,
+    error: null, marketError: null, values: normalizeHostMetadata(address, { nodeAddress: address }) })) };
+  for (const row of metadata.hosts) delete row.values.country;
+  const legacy = await store.commit(context, { metadata }, 0);
+  const restored = restoreFleetSnapshots([legacy], { now: () => base });
+  assert.equal(restored[0]!.snapshots.metadata.hosts[0]!.values?.country ?? null, null);
+  assert.equal(restored[0]!.snapshots.metadata.hosts[0]!.fetchedAtMs, base);
+
+  // Absent and explicit null both mean unknown, including replay of old stores.
+  metadata.hosts[0]!.values.country = null;
+  const unknown = await store.commit(context, { metadata }, 1);
+  assert.equal(unknown.snapshots.metadata.hosts[0]!.values?.country, null);
+  metadata.hosts[0]!.values.country = "US";
+  await assert.rejects(store.commit(context, { metadata }, 2), { kind: "stale" });
+  metadata.hosts[0]!.fetchedAtMs = base + 1;
+  Object.assign(metadata.hosts[0]!.values, { rawLocationPayload: "discard me" });
+  const saved = await store.commit(context, { metadata }, 2);
+  assert.equal(saved.snapshots.metadata.hosts[0]!.values?.country, "US");
+  assert(!JSON.stringify(saved).includes("discard me"));
+  const roundTrip = restoreFleetSnapshots([JSON.parse(JSON.stringify(saved))], { now: () => base + 1 })[0]!;
+  assert.equal(roundTrip.snapshots.metadata.hosts[0]!.values?.country, "US");
+  assert.equal(roundTrip.snapshots.metadata.hosts[0]!.fetchedAtMs, base + 1);
+
+  metadata.hosts[0]!.values.country = "CA";
+  await assert.rejects(store.commit(context, { metadata }, 3), { kind: "stale" });
+  delete metadata.hosts[0]!.values.country;
+  await assert.rejects(store.commit(context, { metadata }, 3), { kind: "stale" });
+  metadata.hosts[0]!.values.country = "CA";
+  metadata.hosts[0]!.fetchedAtMs = base + 2;
+  assert.equal((await store.commit(context, { metadata }, 3)).snapshots.metadata.hosts[0]!.values?.country, "CA");
   await store.close();
 });
 

@@ -107,15 +107,20 @@ function slot(payload: unknown, floor: number, count?: number): number {
 export function createStakingProvider(options: BalanceProviderOptions & { metadataProvider: HostMetadataProvider }): StakingProvider {
   const transport = options.rpc ?? createSolanaRpc(options);
   const { now, rpc, refreshDeadlineMs } = transport;
-  const session = transport.createSession();
-  const stakes = new Map<string, StakingReading>();
-  const markets = new Map<string, StakingRequirement>();
-  const accounts = new Map<string, DerivedAccounts>();
-  const stakeDue = new Map<string, number>();
-  const marketDue = new Map<string, number>();
-  const hostMarkets = new Map<string, string>();
-  let highWaterSlot = 0;
-  let stoppedForParameters = false;
+  const session = transport.createSession("staking");
+  const restored = options.assetCheckpoint?.read<{ stakes: Map<string, StakingReading>; markets: Map<string, StakingRequirement>;
+    accounts: Map<string, DerivedAccounts>; stakeDue: Map<string, number>; marketDue: Map<string, number>;
+    hostMarkets: Map<string, string>; highWaterSlot: number; stoppedForParameters: boolean }>();
+  const stakes = restored?.stakes ?? new Map<string, StakingReading>();
+  const markets = restored?.markets ?? new Map<string, StakingRequirement>();
+  const accounts = restored?.accounts ?? new Map<string, DerivedAccounts>();
+  const stakeDue = restored?.stakeDue ?? new Map<string, number>();
+  const marketDue = restored?.marketDue ?? new Map<string, number>();
+  const hostMarkets = restored?.hostMarkets ?? new Map<string, string>();
+  let highWaterSlot = restored?.highWaterSlot ?? 0;
+  let stoppedForParameters = restored?.stoppedForParameters ?? false;
+  const save = (): void => options.assetCheckpoint?.write({ stakes, markets, accounts, stakeDue, marketDue, hostMarkets,
+    highWaterSlot, stoppedForParameters });
   let active: { keys: ReadonlySet<string>; operation: SharedOperation<void>; completion: Promise<void> } | undefined;
 
   async function derive(host: string): Promise<DerivedAccounts> {
@@ -193,6 +198,7 @@ export function createStakingProvider(options: BalanceProviderOptions & { metada
           }
         });
         highWaterSlot = Math.max(highWaterSlot, contextSlot);
+        save();
         if (failed.length) failedTasks.push({ ...task, keys: failed });
         remaining = [...failedTasks, ...tasks.slice(index + 1)];
       }
@@ -300,6 +306,7 @@ export function createStakingProvider(options: BalanceProviderOptions & { metada
     throwIfAborted(signal);
     const earliest = Math.min(...addresses.map(address => stakeDue.get(address) ?? now()),
       ...currentMarkets.map(market => marketDue.get(market) ?? now()));
+    save();
     return { hosts: addresses.map(address => {
       const assignment = assignments.get(address);
       const marketAddress = assignment?.values?.marketAddress ?? null;

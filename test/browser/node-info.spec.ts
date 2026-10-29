@@ -143,9 +143,9 @@ test("all eight states preserve exact meanings and compact Fleet artwork without
   await expectUnknown(page, 7);
   await expect(cell(page, "duration")).toHaveText("Populating..");
   for (const key of ["status", "gpuID", "nodeRuntime", "dailyUptime", "latestJob", "queued"]) {
-    await expect(cell(page, key)).toHaveText("—");
+    await expect(key === "latestJob" ? cell(page, key).locator(".job-summary-link") : cell(page, key)).toHaveText("—");
   }
-  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(27);
+  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(28);
   await expect(page.locator("#fleet-rows [data-host]")).toHaveCount(8);
   for (const row of await page.locator("#fleet-rows [data-host]").all()) {
     expect(await row.evaluate(element => element.getBoundingClientRect().height)).toBe(34);
@@ -379,7 +379,7 @@ test("indexer membership resolves OTHER with Fleet artwork while preserving raw 
   expect(await hostOrder(page)).toEqual([2, 3, 6, 1, 5, 0, 4, 7].map(index => addresses[index]));
   await page.getByRole("button", { name: "Sort by State", exact: true }).click();
   expect(await hostOrder(page)).toEqual([4, 0, 5, 1, 6, 3, 2, 7].map(index => addresses[index]));
-  for (const key of ["latestJob", "queued"]) await expect(cell(page, key)).toHaveText("—");
+  for (const key of ["latestJob", "queued"]) await expect(key === "latestJob" ? cell(page, key).locator(".job-summary-link") : cell(page, key)).toHaveText("—");
   expect(observations.hosts[0]!.values!.state).toBe("OTHER");
   expect(observations.hosts[0]!.fetchedAtMs).toBe(NOW);
   expect(nodeRequests).toHaveLength(1);

@@ -4,6 +4,8 @@ import { NODE_API_ERROR_CODES } from "../fleet/node-info.ts";
 import type { NodeInfoRecord, NodeInfoSnapshot } from "../fleet/node-info.ts";
 import { isJobRecord, isJobTimestamp } from "../fleet/jobs.ts";
 import type { JobSnapshot } from "../fleet/jobs.ts";
+import { isJobHistoryRecord } from "../fleet/job-history.ts";
+import type { JobHistorySnapshot } from "../fleet/job-history.ts";
 import { isQueueRecord } from "../fleet/queue.ts";
 import type { QueueSnapshot } from "../fleet/queue.ts";
 import { isSolRecord } from "../fleet/sol.ts";
@@ -18,13 +20,14 @@ export interface FleetSnapshots {
   metadata: HostMetadataSnapshot;
   "node-info": NodeInfoSnapshot;
   jobs: JobSnapshot;
+  "job-history": JobHistorySnapshot;
   queue: QueueSnapshot;
   sol: SolSnapshot;
   nos: NosSnapshot;
   staking: StakingSnapshot;
 }
 export type FleetResource = keyof FleetSnapshots;
-export const FLEET_RESOURCES = ["metadata", "node-info", "jobs", "queue", "sol", "nos", "staking"] as const satisfies readonly FleetResource[];
+export const FLEET_RESOURCES = ["metadata", "node-info", "jobs", "job-history", "queue", "sol", "nos", "staking"] as const satisfies readonly FleetResource[];
 export interface FleetContext {
   scopeId: string;
   rosterRevision: string;
@@ -54,6 +57,8 @@ export function isHostMetadataRecord(value: unknown): value is HostMetadataRecor
   const fields = value.values;
   return object(fields) && (fields.marketAddress === null || isMetadataAddress(fields.marketAddress)) &&
     ["status", "marketLabel", "cpu", "cuda", "nvidia", "currentNode", "system"].every(key => text(fields[key])) &&
+    (fields.country === undefined || text(fields.country, 256) &&
+      (typeof fields.country !== "string" || fields.country.trim().length > 0 && !/[\u0000-\u001f\u007f]/.test(fields.country))) &&
     [fields.ram, fields.disk].every(number);
 }
 
@@ -95,6 +100,7 @@ const validators = {
   metadata: isHostMetadataRecord,
   "node-info": isNodeInfoRecord,
   jobs: (value: unknown) => isJobRecord(value) && deadline(value.checkedAtMs, value.validUntilMs, 180_000),
+  "job-history": isJobHistoryRecord,
   queue: (value: unknown) => isQueueRecord(value) && deadline(value.checkedAtMs, value.validUntilMs, 30_000),
   sol: isSolRecord,
   nos: isNosRecord,
@@ -132,6 +138,10 @@ function matchesRoster<R extends FleetResource>(resource: R, value: unknown,
       !["retry-after", "local-budget", "discovery-budget"].includes(value.waitReason as string)) return false;
   if (resource === "jobs") {
     const jobs = (value as unknown as JobSnapshot).hosts.flatMap(row => row.job ? [row.job.address] : []);
+    if (new Set(jobs).size !== jobs.length) return false;
+  }
+  if (resource === "job-history") {
+    const jobs = (value as unknown as JobHistorySnapshot).hosts.flatMap(row => row.jobs.map(job => job.address));
     if (new Set(jobs).size !== jobs.length) return false;
   }
   return true;

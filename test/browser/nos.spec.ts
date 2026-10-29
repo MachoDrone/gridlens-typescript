@@ -113,7 +113,7 @@ test("plain NOS values retain reference paint, rounded amounts, exact sorting an
   await expect(cell(page).locator("span.nos-value")).toHaveCSS("font-size", "11px");
   await expect(cell(page).locator(".nos-value")).toHaveCSS("font-weight", "400");
   await expect(cell(page).locator(".nos-value")).toHaveCSS("color", "rgb(21, 128, 61)");
-  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(27);
+  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(28);
   await page.getByRole("button", { name: "Sort by NOS", exact: true }).click();
   expect(await order(page)).toEqual([addresses[2], addresses[1], addresses[0], addresses[5], addresses[4], addresses[3], addresses[6], addresses[7]]);
   await page.getByRole("button", { name: "Sort by NOS", exact: true }).click();

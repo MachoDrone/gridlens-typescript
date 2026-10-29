@@ -9,10 +9,44 @@ HTML and CSS provide the page structure and styling. The browser uses plain DOM
 APIs. A Node server supplies same-origin data, shared caches and request limits.
 The live preview uses public Nosana/node APIs and Solana RPC without wallet keys.
 
-**Current status:** the live local preview and a separate portable hosting gateway
-are implemented. Hosting, production access control and backend integrations are
-not deployed. Per-operator beta links and CSV uploads are proposals, not features
-in this revision. Some columns remain unknown until verified sources are connected.
+A separate [shared backend candidate](docs/SHARED_BACKEND.md) adds durable SQLite
+collection, authenticated HTTPS, browser setup and optional Android pairing.
+Its [modern Docker installer](docs/MODERN_INSTALL.md) is separate from the legacy
+installer and this developer preview. Isolated Docker acceptance passed on an
+authorized Nosana host, including HTTPS, cache sharing and recovery. The candidate
+has not been published or enabled for a live fleet; physical reboot, GPU recorder
+lifecycle and physical-phone acceptance remain separate.
+
+**Country** appears after System at the right edge of Fleet. It reuses the country
+reported in existing Nosana metrics, with a saved header toggle between compact
+codes and full English names. Missing values remain unknown; this is reported
+country, not verified physical location. It adds no API requests or location service.
+
+**Jobs** keeps each Fleet row compact. Expand one host with its arrow, or use the
+column's Show all / Hide all controls, to inspect up to ten recent jobs in an
+Explorer-style table: Address, Host, Started, Duration, Price, GPU and Status.
+Starts use relative time; duration includes the reported maximum. Status badges
+keep running, success, failure and unknown results distinct. Exact UTC dates,
+lifecycle/result evidence and pricing calculations remain in closed Source details.
+History comes directly from Nosana's job API, independently of Explorer's page
+layout; Explorer job links are optional. This still depends on Nosana providing
+history. Local copies are in memory and can be fetched again after a restart.
+Price is calculated customer cost including Explorer's 10% fee, not host rewards
+or a settled invoice. Active jobs use a dated market hourly quote; finished jobs
+use their recorded rate and final duration. GPU shows the job's market name,
+not a physical GPU measurement. Missing rates or names remain unknown. Market
+names and current quotes come from a shared, bounded Host Manager JSON API read;
+the app does not scrape Explorer pages.
+Only expanded Supplied Host Addresses/Real200 histories initiate page reads;
+Online GPU Hosts uses already cached records. History shares the existing job
+request limits, so a large expansion may remain pending. A five-minute cache
+avoids repeated page reads; Refresh remains subject to shared limits and backoff.
+
+**Current status:** the live local preview, portable hosting gateway and shared
+backend candidate are implemented. The shared backend passed isolated Docker
+acceptance; a live deployment is not enabled. Per-operator beta links and CSV
+uploads remain proposals. Some columns remain unknown until verified sources are
+connected.
 
 ## Run the live preview
 

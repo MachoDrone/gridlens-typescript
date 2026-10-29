@@ -5,6 +5,7 @@ import type { JobRecord, JobSnapshot } from "../src/fleet/jobs.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
 import { pruneCacheKeys } from "./online-retention.ts";
 import type { ProviderRetention } from "./online-retention.ts";
+import type { ProviderCheckpoint } from "./provider-checkpoint.ts";
 
 /** Ordering hints only: these never make a read eligible or renew evidence. */
 export type ActivityPriority = (address: string, nowMs: number) => 0 | 1 | 2;
@@ -30,13 +31,17 @@ export function refreshPriority(attempted: boolean, validUntilMs: number | null,
 }
 
 /** Backend-only, process-local evidence; no browser/display state enters here. */
-export function createSchedulingEvidence(now: () => number = Date.now) {
-  const assignments = new Map<string, { market: string; checkedAt: number }>();
-  const nodes = new Map<string, { state: string | null; checkedAt: number; validUntil: number;
-    runningSince: number | null; activityAt: number | null }>();
-  const nodeOutcomes = new Map<string, number>();
-  const invalidatedActivity = new Map<string, number>();
-  const jobs = new Map<string, JobRecord>();
+export function createSchedulingEvidence(now: () => number = Date.now, checkpoint?: ProviderCheckpoint) {
+  type Assignment = { market: string; checkedAt: number };
+  type Node = { state: string | null; checkedAt: number; validUntil: number; runningSince: number | null; activityAt: number | null };
+  const restored = checkpoint?.read<{ assignments: Map<string, Assignment>; nodes: Map<string, Node>; nodeOutcomes: Map<string, number>;
+    invalidatedActivity: Map<string, number>; jobs: Map<string, JobRecord> }>();
+  const assignments = restored?.assignments ?? new Map<string, Assignment>();
+  const nodes = restored?.nodes ?? new Map<string, Node>();
+  const nodeOutcomes = restored?.nodeOutcomes ?? new Map<string, number>();
+  const invalidatedActivity = restored?.invalidatedActivity ?? new Map<string, number>();
+  const jobs = restored?.jobs ?? new Map<string, JobRecord>();
+  const save = (): void => checkpoint?.write({ assignments, nodes, nodeOutcomes, invalidatedActivity, jobs });
   const timestamp = (value: number | null): value is number => value !== null && Number.isSafeInteger(value) && value >= 0;
   const activityPriority: ActivityPriority = (address, time) => {
     const node = nodes.get(address);
@@ -84,6 +89,7 @@ export function createSchedulingEvidence(now: () => number = Date.now) {
           || !isMetadataAddress(record.values?.marketAddress)) { assignments.delete(record.address); continue; }
         assignments.set(record.address, { market: record.values.marketAddress, checkedAt: record.fetchedAtMs });
       }
+      save();
     },
     observeStates(snapshot: NodeInfoSnapshot): void {
       for (const record of snapshot.hosts) {
@@ -130,6 +136,7 @@ export function createSchedulingEvidence(now: () => number = Date.now) {
           runningSince: state === "RUNNING_JOB" ? old?.runningSince ?? record.fetchedAtMs
             : state === null ? old?.runningSince ?? null : null });
       }
+      save();
     },
     observeJobs(snapshot: JobSnapshot): void {
       for (const record of snapshot.hosts) {
@@ -143,6 +150,7 @@ export function createSchedulingEvidence(now: () => number = Date.now) {
           && record.checkedAtMs < old.checkedAtMs) continue;
         jobs.set(record.address, structuredClone(record));
       }
+      save();
     },
   };
 }

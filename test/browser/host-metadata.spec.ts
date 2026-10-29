@@ -114,6 +114,8 @@ test.afterEach(async ({ page }) => {
 });
 
 test("selected Nosana fields follow compact reference formatting without inventing the deferred fields", async ({ page }, info) => {
+  const historyRequests: string[] = [];
+  page.on("request", request => { if (new URL(request.url()).pathname === "/preview/job-history.json") historyRequests.push(request.url()); });
   const supplied: string[][] = [];
   await page.goto(await start(async input => { supplied.push([...input]); return completeSnapshot(); }));
   await openPreviewTools(page);
@@ -141,7 +143,7 @@ test("selected Nosana fields follow compact reference formatting without inventi
   await expect(cell(page, "ram", 3)).toHaveText("—");
   await expect(cell(page, "status", 4)).toHaveText("—");
   await expect(page.locator("#inventory-summary")).toContainText(/Reported Nosana metadata/i);
-  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(27);
+  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(28);
   await expect(page.locator("#fleet-rows [data-host]")).toHaveCount(8);
   for (const row of await page.locator("#fleet-rows [data-host]").all()) {
     for (const column of await row.locator("td[data-col]").all()) {
@@ -153,11 +155,18 @@ test("selected Nosana fields follow compact reference formatting without inventi
         await expect(column).toHaveAttribute("data-state-current", "false");
         await expect(column.getByRole("button")).toHaveAccessibleName(/unknown/);
       }
+      else if (key === "latestJob") {
+        await expect(column.locator(".job-summary-link")).toHaveText("—");
+        await expect(column.locator(".job-summary-link")).not.toHaveAttribute("href");
+        await expect(column.locator(".job-summary-state")).toHaveText("Unknown");
+        await expect(column.locator(".jobs-expand")).toHaveAttribute("aria-expanded", "false");
+      }
       else if (!selectedColumns.has(key)) await expect(column).toHaveText("—");
     }
     expect(await row.evaluate(element => element.getBoundingClientRect().height)).toBe(34);
   }
   expect(supplied).toEqual([addresses]);
+  expect(historyRequests, "Metadata must not trigger collapsed job-history reads").toEqual([]);
   await expect(cell(page, "hostAddress").getByRole("link")).toHaveAttribute("href", `https://explore.nosana.com/hosts/${addresses[0]}`);
   await expectFleetDocumentFlow(page);
   const lastRow = await page.locator("#fleet-rows tr").last().boundingBox();
@@ -224,7 +233,7 @@ test("rendering, synthetic scenarios and elapsed time cause no background metada
   await page.goto(await start(async () => { calls++; return completeSnapshot(); }));
   await openPreviewTools(page);
   await expect(cell(page, "status")).toHaveText("P");
-  for (const label of ["IP", "Duration", "Market", "NVIDIA", "CPU", "System"]) {
+  for (const label of ["IP", "Duration", "Market", "NVIDIA", "CPU", "System", "Country"]) {
     await page.getByRole("button", { name: `Toggle ${label} display`, exact: true }).click();
   }
   await page.getByRole("button", { name: "Sort by Status", exact: true }).click();

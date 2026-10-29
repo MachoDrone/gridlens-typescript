@@ -10,6 +10,8 @@ export interface HostMetadataValues {
   nvidia: string | null;
   currentNode: string | null;
   system: string | null;
+  /** Reported country text; older snapshots may omit this optional observation. */
+  country?: string | null;
 }
 
 export interface HostMetadataRecord {
@@ -68,6 +70,7 @@ export function normalizeHostMetadata(address: string, payload: unknown): HostMe
   const metrics = object(host.metrics);
   const cpu = object(metrics.cpu);
   const gpu = object(metrics.gpu);
+  const network = object(metrics.network);
   return {
     status: text(host.status, 64),
     marketAddress: isMetadataAddress(host.marketAddress) ? host.marketAddress : null,
@@ -79,6 +82,7 @@ export function normalizeHostMetadata(address: string, payload: unknown): HostMe
     nvidia: text(gpu.nvml_driver_version, 64),
     currentNode: text(metrics.package_version, 64),
     system: text(metrics.system_environment),
+    country: text(network.country) ?? text(metrics.country),
   };
 }
 

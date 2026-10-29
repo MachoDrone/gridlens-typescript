@@ -7,8 +7,32 @@ import { SYNTHETIC_HOST_ADDRESSES as addresses } from "./fixtures/host-addresses
 import type { HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
 import { createEvidenceClock } from "../src/preview/evidence-clock.ts";
 import { normalizeHostMetadata } from "../src/fleet/host-metadata.ts";
+import { blankJobHistoryRecord } from "../src/fleet/job-history.ts";
 
 const hosts = addresses.slice(0, 2);
+test("history transport selects explicit hosts without weakening its response identity boundary", async () => {
+  const calls: string[] = [];
+  const transport = createFleetTransport({ fetch: async url => {
+    calls.push(String(url));
+    return Response.json({ hosts: hosts.map(blankJobHistoryRecord) });
+  } });
+  const result = await transport.read("job-history", "/preview/job-history.json?scenario=real200", {
+    addresses: hosts, hosts, refresh: true,
+  });
+  assert.equal(result.hosts.length, 2);
+  const url = new URL(calls[0]!, "http://localhost");
+  assert.deepEqual(url.searchParams.getAll("host"), hosts);
+  assert.equal(url.searchParams.get("scenario"), "real200");
+  assert.equal(url.searchParams.get("refresh"), "1");
+  await assert.rejects(transport.read("jobs", "/preview/jobs.json", { addresses: hosts, hosts }), /history/);
+  await assert.rejects(transport.read("job-history", "/preview/job-history.json", {
+    addresses: hosts, hosts: [hosts[0]!],
+  }), /selection/);
+  assert.equal(calls.length, 1, "invalid selectors never dispatch");
+  await assert.rejects(transport.read("job-history", "/preview/job-history.json", {
+    addresses: [hosts[0]!], hosts: [hosts[0]!],
+  }), /invalid observations/, "a server cannot return another host with the selected history");
+});
 const snapshot: HostMetadataSnapshot = { hosts: hosts.map(address => ({ address, values: null,
   fetchedAtMs: 1_000, retained: false, error: null, marketError: null })) };
 const encode = (value: unknown): Uint8Array<ArrayBuffer> => new TextEncoder().encode(JSON.stringify(value) + "\n");

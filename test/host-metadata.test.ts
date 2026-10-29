@@ -18,7 +18,7 @@ test("metrics normalization selects only requested fields and keeps reported num
   assert.deepEqual(normalizeHostMetadata(address, payload), {
     status: "PREMIUM", marketAddress: market, marketLabel: null, ram: 31.4, disk: 495.2,
     cpu: "13th Gen Intel(R) Core(TM)", cuda: "12.8", nvidia: "570.124.06",
-    currentNode: "1.0.0", system: "6.8.0-52-generic",
+    currentNode: "1.0.0", system: "6.8.0-52-generic", country: null,
   });
   assert.deepEqual(payload, before);
 });
@@ -27,7 +27,7 @@ test("missing or malformed fields stay null without inferred values", () => {
   for (const metrics of [undefined, null, [], "not metrics"]) {
     assert.deepEqual(normalizeHostMetadata(address, { nodeAddress: address, metrics }), {
       status: null, marketAddress: null, marketLabel: null, ram: null, disk: null,
-      cpu: null, cuda: null, nvidia: null, currentNode: null, system: null,
+      cpu: null, cuda: null, nvidia: null, currentNode: null, system: null, country: null,
     });
   }
   const result = normalizeHostMetadata(address, {
@@ -44,6 +44,33 @@ test("nonfinite and negative measurements are unknown, while a reported zero is 
     assert.equal(result.disk, null);
   }
   assert.equal(normalizeHostMetadata(address, { nodeAddress: address, metrics: { ram_gb: 0 } }).ram, 0);
+});
+
+test("country selects valid nested text before flat text without inferring a location", () => {
+  const payload = { nodeAddress: address, metrics: {
+    network: { country: " nl ", region: "not selected", city: "not selected" }, country: "US",
+  } };
+  const before = structuredClone(payload);
+  const values = normalizeHostMetadata(address, payload);
+  assert.equal(values.country, "nl");
+  assert.equal(Object.hasOwn(values, "region"), false);
+  assert.equal(Object.hasOwn(values, "city"), false);
+  assert.deepEqual(payload, before);
+  assert.equal(normalizeHostMetadata(address, {
+    nodeAddress: address, metrics: { country: " Reported free-form country " },
+  }).country, "Reported free-form country");
+
+  for (const country of [undefined, null, [], {}, 0, false, "", "  ", "x".repeat(257), "U\nS", "U\u0000S", "US\u007f"]) {
+    assert.equal(normalizeHostMetadata(address, {
+      nodeAddress: address, metrics: { network: { country }, country: "CA" },
+    }).country, "CA", "an invalid nested value must not hide valid flat country text");
+    assert.equal(normalizeHostMetadata(address, {
+      nodeAddress: address, metrics: { network: { country }, country },
+    }).country, null);
+  }
+  assert.equal(normalizeHostMetadata(address, {
+    nodeAddress: address, metrics: { network: "invalid", country: "x".repeat(256) },
+  }).country, "x".repeat(256));
 });
 
 test("text is bounded, trimmed and never partly parsed", () => {

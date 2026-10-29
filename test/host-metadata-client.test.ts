@@ -7,7 +7,8 @@ const addresses = Array.from({ length: 8 }, (_, index) => `${"1".repeat(31)}${in
 const host = addresses[0]!;
 const market = `${"1".repeat(31)}A`;
 const origin = "https://host-manager.k8s.prd.nosana.com";
-const payload = (address = host) => ({ nodeAddress: address, status: "PREMIUM", marketAddress: market, metrics: { ram_gb: 31.4 } });
+const payload = (address = host, country = "US") => ({ nodeAddress: address, status: "PREMIUM", marketAddress: market,
+  metrics: { ram_gb: 31.4, network: { country } } });
 const response = (value: unknown): Response => Response.json(value);
 
 test("all eight hosts load selected metadata using anonymous fixed URLs and one shared market lookup", async () => {
@@ -28,6 +29,7 @@ test("all eight hosts load selected metadata using anonymous fixed URLs and one 
   const result = await provider(addresses);
   assert.deepEqual(result.hosts.map(row => row.address), addresses);
   assert(result.hosts.every(row => row.values?.status === "PREMIUM" && row.values.marketLabel === "ember-demo"));
+  assert(result.hosts.every(row => row.values?.country === "US"), "country reuses each existing metrics response");
   assert(result.hosts.every(row => row.fetchedAtMs === 1234 && !row.retained && !row.error && !row.marketError));
   assert.equal(calls.length, 9);
   assert.equal(calls.filter(url => url === `${origin}/markets/${market}`).length, 1);
@@ -45,8 +47,12 @@ test("metadata is demand-driven and success cache does not refetch or expose mut
   assert.equal(calls, 0);
   const first = await provider([host]);
   first.hosts[0]!.values!.status = "caller changed";
+  first.hosts[0]!.values!.country = "caller changed";
   now = 299_999;
-  assert.equal((await provider([host])).hosts[0]!.values!.status, "PREMIUM");
+  const cached = (await provider([host])).hosts[0]!;
+  assert.equal(cached.values!.status, "PREMIUM");
+  assert.equal(cached.values!.country, "US");
+  assert.equal(cached.fetchedAtMs, 0);
   assert.equal(calls, 2);
   now = 300_000;
   assert.equal((await provider([host])).hosts[0]!.fetchedAtMs, now);
@@ -89,16 +95,18 @@ test("later metadata failure retains selected values and original fetch time unt
   let now = 10_000;
   let fail = false;
   let calls = 0;
+  let country = "US";
   const provider = createHostMetadataProvider({ now: () => now, fetch: async input => {
     calls++;
     if (fail) return new Response("private upstream diagnostic", { status: 503 });
-    return String(input).includes("/markets/") ? response({ address: market, slug: "demo" }) : response(payload());
+    return String(input).includes("/markets/") ? response({ address: market, slug: "demo" }) : response(payload(host, country));
   } });
   const first = (await provider([host])).hosts[0]!;
   now += 300_000;
   fail = true;
   const retained = (await provider([host])).hosts[0]!;
   assert.deepEqual(retained.values, first.values);
+  assert.equal(retained.values?.country, "US");
   assert.equal(retained.fetchedAtMs, 10_000);
   assert.equal(retained.retained, true);
   assert.match(retained.error!, /HTTP 503/);
@@ -107,10 +115,13 @@ test("later metadata failure retains selected values and original fetch time unt
   assert.equal(calls, 3);
   now++;
   fail = false;
+  country = "CA";
   const recovered = (await provider([host])).hosts[0]!;
   assert.equal(recovered.retained, false);
   assert.equal(recovered.error, null);
   assert.equal(recovered.fetchedAtMs, now);
+  assert.equal(recovered.values?.country, "CA");
+  assert.equal(calls, 4, "country recovery adds no separate location request");
 });
 
 test("first failure is unknown and identity mismatch never overwrites another host", async () => {

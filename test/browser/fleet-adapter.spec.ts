@@ -8,6 +8,7 @@ import { emptyStaking } from "../fixtures/staking.ts";
 import { normalizeHostMetadata } from "../../src/fleet/host-metadata.ts";
 import type { FleetResource, FleetSnapshots } from "../../src/contracts/fleet.ts";
 import { openPreviewTools } from "./helpers.ts";
+import { blankJobHistoryRecord } from "../../src/fleet/job-history.ts";
 
 const checkedAt = Date.UTC(2026, 0, 1, 12);
 const now = checkedAt + 3_600_000;
@@ -15,6 +16,7 @@ const host = addresses[0]!;
 
 async function observations(): Promise<FleetSnapshots> {
   return {
+    "job-history": { hosts: addresses.map(blankJobHistoryRecord) },
     metadata: { hosts: addresses.map(address => ({ address,
       values: normalizeHostMetadata(address, { nodeAddress: address, status: "PREMIUM" }),
       fetchedAtMs: checkedAt, retained: false, error: null, marketError: null })) },

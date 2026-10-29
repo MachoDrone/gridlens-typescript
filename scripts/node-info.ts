@@ -6,6 +6,7 @@ import { isMetadataAddress } from "../src/fleet/host-metadata.ts";
 import { normalizeNodeInfo } from "../src/fleet/node-info.ts";
 import { NODE_API_ERROR_CODES } from "../src/fleet/node-info.ts";
 import type { NodeInfoRecord, NodeInfoSnapshot, NodeApiFailureKind, NodeApiFailurePhase, NodeApiErrorCode, NodeApiResult } from "../src/fleet/node-info.ts";
+import type { ProviderCheckpoint } from "./provider-checkpoint.ts";
 
 const successCacheMs = 15_000;
 const stateDisplayValidityMs = 30_000;
@@ -82,22 +83,28 @@ export function createNodeInfoProvider({
   now = Date.now,
   timeoutMs = 8_000,
   activityPriority,
+  checkpoint,
 }: {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   timeoutMs?: number;
+  checkpoint?: ProviderCheckpoint;
   /** Validated backend activity: transition, early/near-limit job, then routine. */
   activityPriority?: (address: string, nowMs: number) => 0 | 1 | 2;
 } = {}): NodeInfoProvider {
-  const hosts = new Map<string, HostCache>();
-  const insertionOrder = new Map<string, number>();
-  let insertionSequence = 0;
+  const restored = checkpoint?.read<{ hosts: Map<string, HostCache>; insertionOrder: Map<string, number>; insertionSequence: number;
+    pauseUntil: number; nextFailureRetryAt: number; nextTransientRetryAt: number; warmConfirmationDispatches: number }>();
+  const hosts = restored?.hosts ?? new Map<string, HostCache>();
+  const insertionOrder = restored?.insertionOrder ?? new Map<string, number>();
+  let insertionSequence = restored?.insertionSequence ?? 0;
   const register = (addresses: readonly string[]): void => {
     for (const address of addresses) if (!insertionOrder.has(address)) insertionOrder.set(address, insertionSequence++);
   };
   const readHost = createSharedRead<string, NodeInfoRecord>();
   const limited = createRequestLimiter(nodeInfoConcurrency);
-  let pauseUntil = 0;
+  let pauseUntil = restored?.pauseUntil ?? 0;
+  const save = (): void => checkpoint?.write({ hosts, insertionOrder, insertionSequence, pauseUntil,
+    nextFailureRetryAt, nextTransientRetryAt, warmConfirmationDispatches });
 
   function noteRateLimit(response: Response): void {
     const retry = response.headers.get("retry-after")?.trim();
@@ -105,6 +112,7 @@ export function createNodeInfoProvider({
     const date = retry && !Number.isFinite(seconds) ? Date.parse(retry) : NaN;
     const until = Number.isFinite(seconds) ? now() + seconds * 1000 : date;
     pauseUntil = Math.max(pauseUntil, now() + failureBackoffMs, Number.isFinite(until) ? until : 0);
+    save();
   }
 
   async function json(address: string, signal: AbortSignal): Promise<{ payload: unknown; httpStatus: number | undefined }> {
@@ -266,14 +274,15 @@ export function createNodeInfoProvider({
       }
       throwIfAborted(signal);
       hosts.set(address, result);
+      save();
       watch.publish(address, result.record);
       return result.record;
     }, signal);
   }
 
-  let warmConfirmationDispatches = 0;
-  let nextFailureRetryAt = 0;
-  let nextTransientRetryAt = 0;
+  let warmConfirmationDispatches = restored?.warmConfirmationDispatches ?? 0;
+  let nextFailureRetryAt = restored?.nextFailureRetryAt ?? 0;
+  let nextTransientRetryAt = restored?.nextTransientRetryAt ?? 0;
   const failedHost = (address: string): boolean => (hosts.get(address)?.consecutiveFailures ?? 0) > 0;
   const transientFailure = (address: string): boolean => {
     const cached = hosts.get(address);
@@ -336,6 +345,7 @@ export function createNodeInfoProvider({
         if (transient) nextTransientRetryAt = pacedRetryAt;
         else nextFailureRetryAt = pacedRetryAt;
       }
+      save();
       let pacingRestored = false;
       const canceled = (): void => {
         if (pacedRetryAt === null || pacingRestored) return;
@@ -343,6 +353,7 @@ export function createNodeInfoProvider({
         if (transient && nextTransientRetryAt === pacedRetryAt) nextTransientRetryAt = previousRetryAt;
         if (!transient && nextFailureRetryAt === pacedRetryAt) nextFailureRetryAt = previousRetryAt;
         warmConfirmationDispatches = previousWarmDispatches;
+        save();
       };
       signal.addEventListener("abort", canceled, { once: true });
       return host(address, signal).then(record => {

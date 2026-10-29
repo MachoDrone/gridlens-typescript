@@ -1,4 +1,5 @@
 import "./sidebar.ts";
+import { createSharedTelemetry } from "./shared-telemetry.ts";
 import { bindFleetViewport } from "./viewport.ts";
 import { bindFleetTableScroll } from "./table-scroll.ts";
 import { startConnectionIndicator } from "./connection.ts";
@@ -13,6 +14,7 @@ import type { DurationDisplayMode, DurationInput, DurationView } from "../fleet/
 import { projectDurationAvailability } from "../fleet/live-duration.ts";
 import { isJobRecord, JOB_REFRESH_INTERVAL_MS } from "../fleet/jobs.ts";
 import type { JobRecord } from "../fleet/jobs.ts";
+import { createJobHistoryView } from "./job-history.ts";
 import { LiveActivityDisplay } from "../fleet/live-activity.ts";
 import type { LiveActivityView } from "../fleet/live-activity.ts";
 import { isQueueRecord, projectQueue, QUEUE_REFRESH_INTERVAL_MS } from "../fleet/queue.ts";
@@ -23,6 +25,8 @@ import { nextMarketMode, normalizeMarketMode, projectMarket } from "../fleet/mar
 import type { MarketDisplayMode, MarketView } from "../fleet/market-display.ts";
 import { formatHardwareDisplay, nextHardwareMode, normalizeHardwareMode } from "../fleet/hardware-display.ts";
 import type { HardwareColumn, HardwareDisplayMode } from "../fleet/hardware-display.ts";
+import { formatCountry, normalizeCountryMode } from "../fleet/country-display.ts";
+import type { CountryDisplayMode } from "../fleet/country-display.ts";
 import type { HostMetadataRecord, HostMetadataValues } from "../fleet/host-metadata.ts";
 import type { NodeInfoRecord } from "../fleet/node-info.ts";
 import { isHostMetadataRecord as isMetadataRecord, isNodeInfoRecord } from "../contracts/fleet.ts";
@@ -44,7 +48,7 @@ import { projectStaking } from "../fleet/staking-view.ts";
 import { projectNodeState, projectNodeStateDisplay } from "../fleet/node-state.ts";
 import { projectNodeApi } from "../fleet/node-api.ts";
 import { statusLabel, statusTone } from "../fleet/status-display.ts";
-import { SAMPLE_TIME, SCENARIOS, sampleAddresses, sampleDuration, sampleHardware, sampleInventory, sampleMarket, sampleNodeInfo } from "./fixtures.ts";
+import { SAMPLE_TIME, SCENARIOS, sampleAddresses, sampleCountry, sampleDuration, sampleHardware, sampleInventory, sampleMarket, sampleNodeInfo } from "./fixtures.ts";
 import type { HardwareSample, ScenarioId } from "./fixtures.ts";
 import { hasNewStateReads, nextJobRefreshAt, nextStateRefreshDelay, retainFailedActivity, STATE_REFRESH_INTERVAL_MS } from "./state-refresh.ts";
 import { COLUMN_HELP } from "./column-help.ts";
@@ -56,6 +60,7 @@ bindFleetTableScroll(document.querySelector<HTMLElement>(".fleet-table-wrap")!);
 bindFleetViewport(document.querySelector<HTMLElement>(".fleet-title-row")!);
 // Service reachability is independent of source freshness and host API status.
 const fleetConfig = readFleetConfig(document);
+const sharedTelemetry = createSharedTelemetry(() => { if (supplied) renderSupplied(); }, () => liveNow());
 const requestedScenario = fleetConfig.sourceMode === "snapshot" ? null : new URLSearchParams(location.search).get("scenario");
 const evidenceClock = createEvidenceClock();
 const liveNow = () => evidenceClock.now();
@@ -95,7 +100,7 @@ const COLUMNS = [
   ["duration", "Duration", "Toggle between a compact elapsed/limit bar and time text. Supplied hosts use the assigned Nosana job’s reported start and timeout, with a local one-second clock. After failed or expired reads, the last verified start keeps counting as a darker estimate until superseded. Bounded bars keep their animation preference; elapsed more than five minutes above the last reported limit is red, dimmer when stale. This display grace does not extend the reported limit or change elapsed time. Amber Populating.. means no useful timing yet; a dash with No running assignment in details means current confirmed absence. Expired or failed absence, or newer running evidence, returns to Populating.. without restoring an old counter. When API Offline is currently confirmed and timing is unknown, a dash means timing unavailable; Offline alone does not establish that a job stopped. Known job timings refresh independently of State every 120 seconds while visible; pending discovery follows the permitted retry deadline. Local display validity is 180 seconds. The indexer supplies no indexing-freshness timestamp."],
   ["nodeRuntime", "Node run time", "Node process run time requires its own observation. It cannot be inferred from inventory freshness."],
   ["dailyUptime", "Daily uptime %", "The last completed provider day, with independently verified coverage. No uptime source is connected."],
-  ["latestJob", "Latest Job", "The latest independently verified job. Live assignments supporting Duration are shown in Duration details; Latest Job history remains unconnected. The Job durations scenario supplies selected synthetic job identifiers."],
+  ["latestJob", "Jobs", "The current verified assignment, otherwise the most recently observed job (marked seen). Expand a host to read up to ten recent indexed jobs. Lifecycle and execution result are separate: Completed does not mean Succeeded. History is loaded on expansion when missing or over five minutes old, through shared request limits. Page and job check times describe our reads, not indexing freshness. History stays in memory and never establishes State or host health. Show all expands the selected roster; Hide all cancels unneeded history work. Explorer links are optional navigation. Online GPU Hosts reads cached history only."],
   ["ram", "RAM", "Reported RAM in GB from Nosana metrics. The compact cell rounds to a whole GB; sorting preserves the reported number. This is not current memory usage."],
   ["disk", "Disk", "Reported disk GB from Nosana metrics. This does not establish current free space or usage."],
   ["dl", "DL", "Reported download Mbps from Node Info info.network.download_mbps. This is saved network data, not a speed test triggered by this page. An all-zero default triplet is unknown."],
@@ -110,10 +115,12 @@ const COLUMNS = [
   ["nvidia", "NVIDIA", "Toggle between the major NVIDIA driver version and the full reported version. Sorting uses the full version. Supplied hosts use reported Nosana metadata; sample scenarios remain synthetic."],
   ["cpu", "CPU", "Toggle between a short CPU label and the full processor description. Compact mode shows the generation (such as 13th), otherwise the vendor, otherwise the first word. Sorting uses the full description. Supplied hosts use reported Nosana metadata."],
   ["system", "System", "Toggle between the release before its first hyphen and the full reported system string. A kernel release does not identify the complete OS or distribution. Sorting uses the full string. Supplied hosts use reported Nosana metadata."],
+  ["country", "Country", "Country reported by Nosana, not verified physical location. Toggle between recognized country codes and full English names; other reported text stays unchanged. Sorting uses the full name. Uses the existing five-minute metadata reads, preferring metrics.network.country then metrics.country. Missing values stay unknown; failed reads retain the original value and check time. No city or region is inferred."],
 ] as const satisfies readonly (readonly [SortColumn, string, string])[];
 
 // The decorative divider follows Duration in either layout. Header help and
-// sorting stay available everywhere; only right-side body cells are passive.
+// sorting stay available everywhere. Jobs has the requested expansion/link controls;
+// other right-side body cells stay passive.
 const RIGHT_BODY_COLUMNS = new Set<string>(COLUMNS.slice(COLUMNS.findIndex(([key]) => key === "duration") + 1)
   .map(([key]) => key));
 function hasRowInformation(cell: HTMLTableCellElement): boolean {
@@ -148,6 +155,7 @@ const IP_MODE_PREFERENCE_KEY = "gridlens.preview.ip-mode.v1";
 const HOST_ADDRESS_MODE_PREFERENCE_KEY = "gridlens.preview.host-address-mode.v1";
 const DURATION_MODE_PREFERENCE_KEY = "gridlens.preview.duration-mode.v1";
 const MARKET_MODE_PREFERENCE_KEY = "gridlens.preview.market-mode.v1";
+const COUNTRY_MODE_PREFERENCE_KEY = "gridlens.preview.country-mode.v1";
 const STAKING_MODE_PREFERENCE_KEY = "gridlens.preview.staking-mode.v1";
 const STATE_MOTION_PREFERENCE_KEY = "gridlens.preview.state-motion.v1";
 const DURATION_MOTION_PREFERENCE_KEY = "gridlens.preview.duration-motion.v1";
@@ -218,6 +226,12 @@ try {
   marketMode = normalizeMarketMode(localStorage.getItem(MARKET_MODE_PREFERENCE_KEY));
 } catch {
   // Market display remains available without persistent browser storage.
+}
+let countryMode: CountryDisplayMode = "compact";
+try {
+  countryMode = normalizeCountryMode(localStorage.getItem(COUNTRY_MODE_PREFERENCE_KEY));
+} catch {
+  // Country display stays compact and usable without persistent storage.
 }
 type StakingDisplayMode = "symbols" | "amounts";
 let stakingMode: StakingDisplayMode = "symbols";
@@ -479,7 +493,7 @@ for (const [key, label] of COLUMNS) {
   if (LOCAL_SOURCE_NOTES[key]) button.setAttribute("aria-describedby", "local-source-note");
   button.addEventListener("click", () => changeSort(nextFleetSort(activeSort, key)));
   heading.append(button);
-  if (key === "ip" || key === "hostAddress" || key === "duration" || key === "market" || key === "stakedNos" || key === "nvidia" || key === "cpu" || key === "system") {
+  if (key === "ip" || key === "hostAddress" || key === "duration" || key === "market" || key === "stakedNos" || key === "nvidia" || key === "cpu" || key === "system" || key === "country") {
     heading.classList.add("has-display-toggle");
     const toggle = document.createElement("button");
     toggle.type = "button";
@@ -494,6 +508,7 @@ for (const [key, label] of COLUMNS) {
       else if (key === "hostAddress") hostAddressMode = hostAddressMode === "compact" ? "full" : "compact";
       else if (key === "duration") durationMode = nextDurationMode(durationMode);
       else if (key === "market") marketMode = nextMarketMode(marketMode);
+      else if (key === "country") countryMode = countryMode === "compact" ? "full" : "compact";
       else if (key === "stakedNos") stakingMode = stakingMode === "symbols" ? "amounts" : "symbols";
       else hardwareModes[key] = nextHardwareMode(hardwareModes[key]);
       try {
@@ -501,6 +516,7 @@ for (const [key, label] of COLUMNS) {
         else if (key === "hostAddress") localStorage.setItem(HOST_ADDRESS_MODE_PREFERENCE_KEY, hostAddressMode);
         else if (key === "duration") localStorage.setItem(DURATION_MODE_PREFERENCE_KEY, durationMode);
         else if (key === "market") localStorage.setItem(MARKET_MODE_PREFERENCE_KEY, marketMode);
+        else if (key === "country") localStorage.setItem(COUNTRY_MODE_PREFERENCE_KEY, countryMode);
         else if (key === "stakedNos") localStorage.setItem(STAKING_MODE_PREFERENCE_KEY, stakingMode);
         else localStorage.setItem(hardwarePreferenceKey(key), hardwareModes[key]);
       } catch {
@@ -509,6 +525,20 @@ for (const [key, label] of COLUMNS) {
       render();
     });
     heading.append(toggle);
+  }
+  if (key === "latestJob") {
+    const actions = document.createElement("span");
+    actions.className = "job-history-actions";
+    for (const [id, label] of [["jobs-show-all", "Show all"], ["jobs-hide-all", "Hide all"]]) {
+      const action = document.createElement("button");
+      action.type = "button";
+      action.id = id!;
+      action.textContent = label!;
+      action.setAttribute("aria-label", `${label} recent jobs`);
+      action.onclick = () => id === "jobs-show-all" ? jobHistory.showAll() : jobHistory.hideAll();
+      actions.append(action);
+    }
+    heading.append(actions);
   }
   if (key === "queued" || key === "duration") {
     const container = sourceContainer(heading);
@@ -733,6 +763,7 @@ element("queued-duration-layout-toggle").addEventListener("click", () => {
   renderQueuedDurationHeader();
   for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>("tr[data-host]")) {
     renderQueuedDurationRow(row);
+    jobHistory.renderExpanded(row.dataset.host!, COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1));
   }
   for (const cell of element("fleet-rows").querySelectorAll<HTMLTableCellElement>(".empty-message")) {
     cell.colSpan = COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1);
@@ -857,6 +888,39 @@ let clockRenderPending = false;
 let freshnessRenderPending = false;
 const progressRows = new Map<string, Set<ReadKind>>();
 let pageHidden = false;
+const jobHistory = createJobHistoryView({
+  expanded: address => sharedTelemetry.requestHistory(address),
+  gpuConditions: (item, now, current) => sharedTelemetry.jobConditions(item, now, current),
+  now: () => supplied ? liveNow() : sampleNow,
+  trusted: () => evidenceClock.trusted,
+  visible: () => visibleStateView(),
+  cacheOnly: () => onlineScenario,
+  live: () => supplied,
+  currentJob: address => jobsError ? undefined : liveActivity(address, liveNow()).eligibleJob,
+  read: (addresses, refresh, signal, apply) => fleetTransport.read("job-history", previewURL("job-history"), {
+    addresses, hosts: addresses, refresh, signal, progressive: true,
+    current: () => visibleStateView(),
+    ...(onlineStatus?.revision ? { onlineRevision: onlineStatus.revision } : {}),
+    onSnapshot: snapshot => apply(snapshot),
+  }),
+  changed: () => {
+    if (supplied) render();
+    else renderSampleJobHistory();
+  },
+});
+
+function renderSampleJobHistory(): void {
+  const tbody = element("fleet-rows");
+  for (const row of tbody.querySelectorAll<HTMLTableRowElement>(":scope > tr[data-host]")) {
+    const address = row.dataset.host!;
+    const details = jobHistory.renderExpanded(address, COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1));
+    if (details && row.nextElementSibling !== details) movePresentation(tbody, details, row.nextElementSibling);
+    else if (!details && row.nextElementSibling?.classList.contains("job-history-row")) row.nextElementSibling.remove();
+    const cell = row.querySelector<HTMLTableCellElement>('td[data-col="latestJob"]');
+    if (cell) jobHistory.renderCell(cell, address, sampleDuration(selected, address)?.displayedJobId);
+  }
+  element<HTMLButtonElement>("jobs-hide-all").disabled = jobHistory.expandedCount === 0;
+}
 
 function startRead(kind: ReadKind): AbortController {
   const controller = new AbortController();
@@ -870,6 +934,7 @@ function currentRead(kind: ReadKind, controller: AbortController): boolean {
 
 /** Drop ownership synchronously so visibility can resume before an old fetch settles. */
 function pauseReads(): void {
+  jobHistory.pause();
   // Selecting a synthetic example pauses collection without suspending the
   // browser's elapsed clock. Only page lifecycle suspension loses time trust.
   if (pageHidden || document.visibilityState !== "visible") evidenceClock.suspend();
@@ -909,6 +974,7 @@ function scheduleProgressRender(kind: ReadKind, records: readonly { address: str
       ["duration", "queued", "state"].includes(activeSort.column) ||
       kinds.has("metadata") && isMetadataColumn(activeSort.column) ||
       kinds.has("sol") && activeSort.column === "sol" ||
+      kinds.has("jobs") && activeSort.column === "latestJob" ||
       kinds.has("state") && ["state", "api", "dl", "ul", "ping"].includes(activeSort.column));
     const clockChanged = clockRenderPending;
     const freshnessChanged = freshnessRenderPending;
@@ -944,6 +1010,9 @@ function scheduleProgressRender(kind: ReadKind, records: readonly { address: str
         const queue = row.querySelector<HTMLTableCellElement>('td[data-col="queued"]');
         if (duration) renderLiveDuration(duration, address, at);
         if (queue) renderLiveQueue(queue, address, at);
+        const jobs = row.querySelector<HTMLTableCellElement>('td[data-col="latestJob"]');
+        if (jobs) jobHistory.renderCell(jobs, address);
+        jobHistory.renderExpanded(address, COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1));
         renderQueuedDurationRow(row);
         const staking = row.querySelector<HTMLTableCellElement>('td[data-col="stakedNos"]');
         if (staking && kinds.has("metadata")) renderStakingCell(staking, address, at);
@@ -1009,6 +1078,7 @@ function resumeVisibleView(): void {
   resumeSolView();
   resumeNosView();
   resumeStakingView();
+  jobHistory.resume();
   renderOnlineRosterStatus();
 }
 let sampleNow = SAMPLE_TIME;
@@ -1814,6 +1884,9 @@ function updateLiveDurations(): void {
     const queueCell = row.querySelector<HTMLTableCellElement>('td[data-col="queued"]');
     if (queueCell) renderLiveQueue(queueCell, row.dataset.host!, at);
     renderQueuedDurationRow(row);
+    const jobs = row.querySelector<HTMLTableCellElement>('td[data-col="latestJob"]');
+    if (jobs) jobHistory.renderCell(jobs, row.dataset.host!);
+    jobHistory.renderExpanded(row.dataset.host!, COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1));
     const stateCell = row.querySelector<HTMLTableCellElement>('td[data-col="state"]');
     if (stateCell) renderNodeInfoCell(stateCell, "state", row.dataset.host!, nodeInfoRecords.get(row.dataset.host!), at);
   }
@@ -1913,7 +1986,7 @@ function renderRow({ pcView: pc, runtime, host, addresses, durationInput, durati
         renderNodeInfoCell(cell, key, host.id, sampleNodeInfo(selected, host.id), sampleNow, true);
         break;
       case "latestJob":
-        cell.textContent = durationInput?.displayedJobId ?? "—";
+        jobHistory.renderCell(cell, host.id, durationInput?.displayedJobId);
         break;
       case "queued": {
         const position = duration.kind === "queue" ? durationInput?.activity?.queuePosition?.trim() : null;
@@ -1973,6 +2046,16 @@ function renderRow({ pcView: pc, runtime, host, addresses, durationInput, durati
         }
         break;
       }
+      case "country": {
+        const display = formatCountry(sampleCountry(host.id), countryMode);
+        const value = rowValue(cell, "metadata-value");
+        value.className = "metadata-value";
+        value.textContent = display.text;
+        cell.dataset.metadataState = display.fullName === null ? "unknown" : "reported";
+        cell.setAttribute("aria-label", `Country: ${display.fullName ?? "unknown"}; synthetic sample.`);
+        cell.append(value);
+        break;
+      }
       default:
         cell.textContent = "—";
         cell.className = "unknown";
@@ -2012,6 +2095,11 @@ function renderDisplaySettings(): void {
   element("market-display-toggle").title = marketStatus;
   element("market-display-toggle").dataset.mode = marketMode;
   setText(element("market-mode-status"), marketStatus);
+  const countryStatus = `Country display: ${countryMode === "compact" ? "country code" : "full country name"}; next: ${countryMode === "compact" ? "full country name" : "country code"}. Other reported text stays unchanged.`;
+  element("country-display-toggle").title = countryStatus;
+  element("country-display-toggle").dataset.mode = countryMode;
+  element("country-display-toggle").setAttribute("aria-pressed", String(countryMode === "full"));
+  setText(element("country-mode-status"), countryStatus);
   const stakingStatus = `Staked NOS display: ${stakingMode === "symbols" ? "checkmark / x" : "actual / required amounts"}; next: ${stakingMode === "symbols" ? "actual / required amounts" : "checkmark / x"}.`;
   element("stakedNos-display-toggle").title = stakingStatus;
   element("stakedNos-display-toggle").dataset.mode = stakingMode;
@@ -2027,7 +2115,7 @@ function renderDisplaySettings(): void {
   }
 }
 
-const METADATA_COLUMNS = ["status", "market", "ram", "disk", "cpu", "cuda", "nvidia", "currentNode", "system"] as const;
+const METADATA_COLUMNS = ["status", "market", "ram", "disk", "cpu", "cuda", "nvidia", "currentNode", "system", "country"] as const;
 type MetadataColumn = typeof METADATA_COLUMNS[number];
 
 function isMetadataColumn(key: SortColumn): key is MetadataColumn {
@@ -2051,11 +2139,13 @@ function renderMetadataCell(
     if (key === "status") text = String(raw).charAt(0).toUpperCase();
     else if (key === "ram") text = String(Math.round(Number(raw)));
     else if (key === "market" && marketMode === "compact") text = Array.from(String(raw)).slice(0, 2).join("");
+    else if (key === "country") text = formatCountry(String(raw), countryMode).text;
     else if (key === "nvidia" || key === "cpu" || key === "system") {
       text = formatHardwareDisplay(key, String(raw), hardwareModes[key]).text;
     }
   }
-  const full = raw === null ? "unknown" : `${raw}${key === "ram" || key === "disk" ? " GB" : ""}`;
+  const full = raw === null ? "unknown" : key === "country" ? formatCountry(String(raw), "full").fullName!
+    : `${raw}${key === "ram" || key === "disk" ? " GB" : ""}`;
   const note = COLUMNS.find(([column]) => column === key)![2];
   const issue = record?.error ?? metadataError;
   const details = `${label}: ${full}${key === "status" && record?.values?.status ? `\nRaw Nosana status: ${record.values.status}` : ""}${key === "market" && record?.values?.marketAddress ? `\nMarket address: ${record.values.marketAddress}` : ""}\n\n${note}\n\n${retained ? "Retained from the last successful read. " : ""}Reported Nosana metadata; current host activity is not established.${issue ? `\nRead unavailable: ${issue}` : ""}${marketError ? `\nMarket label unavailable: ${marketError}` : ""}`;
@@ -2360,19 +2450,26 @@ function renderSupplied(): void {
     return deadline === null ? [] : [[address, deadline] as const];
   }));
   const displayedAddresses = onlineScenario ? suppliedAddresses.filter(address => displayedOnlineHosts.has(address)) : suppliedAddresses;
+  jobHistory.setRoster(displayedAddresses, `live:${liveScenario}`);
   renderSuppliedStatus(nodeProjectionTime);
   const tbody = element("fleet-rows");
   const connectedRows = new Map([...tbody.querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')]
     .map(row => [row.dataset.host!, row]));
   const rows: HTMLTableRowElement[] = [];
   const sortableRows = displayedAddresses.map((address) => ({
-    pc: "", gpuIndex: null, containerName: "", solLamports: solRecords.get(address)?.lamports ?? null,
+    pc: sharedTelemetry.sort(address, nodeProjectionTime).pc, gpuIndex: null, containerName: "", solLamports: solRecords.get(address)?.lamports ?? null,
+    rewardAmount: sharedTelemetry.sort(address, nodeProjectionTime).rewards,
     nosAmount: nosRecords.get(address)?.amount ?? null,
     stakedNosAmount: stakingRecords.get(address)?.stake.amount ?? null, values: {
       hostAddress: address,
+      pc: sharedTelemetry.sort(address, nodeProjectionTime).pc,
+      ip: sharedTelemetry.sort(address, nodeProjectionTime).ip,
+      latestJob: jobHistory.summary(address)?.job.address ?? null,
       duration: liveDuration(address, nodeProjectionTime).elapsedSeconds,
       queued: liveQueue(address, nodeProjectionTime).sortValue,
-      ...Object.fromEntries(METADATA_COLUMNS.map((key) => [key, metadataValue(metadataRecords.get(address)?.values, key)])),
+      ...Object.fromEntries(METADATA_COLUMNS.map((key) => [key, key === "country"
+        ? formatCountry(metadataRecords.get(address)?.values?.country, "full").fullName
+        : metadataValue(metadataRecords.get(address)?.values, key)])),
       state: liveActivity(address, nodeProjectionTime).state.reported,
       api: liveApi(nodeInfoRecords.get(address), nodeProjectionTime).label,
       dl: nodeInfoRecords.get(address)?.values?.dl ?? null,
@@ -2388,7 +2485,9 @@ function renderSupplied(): void {
     for (const [key, label] of COLUMNS) {
       const cell = row.querySelector<HTMLTableCellElement>(`td[data-col="${key}"]`) ?? document.createElement("td");
       cell.dataset.col = key;
-      if (key === "hostAddress") {
+      if (sharedTelemetry.render(cell, key, address, nodeProjectionTime, ipMode)) {
+        // The production adapter renders only verified shared PC observations.
+      } else if (key === "hostAddress") {
         const link = cell.querySelector<HTMLAnchorElement>(".host-address") ?? document.createElement("a");
         link.className = "host-address";
         link.href = `https://explore.nosana.com/hosts/${encodeURIComponent(address)}`;
@@ -2407,6 +2506,8 @@ function renderSupplied(): void {
         renderStakingCell(cell, address, nodeProjectionTime);
       } else if (key === "duration") {
         renderLiveDuration(cell, address, nodeProjectionTime);
+      } else if (key === "latestJob") {
+        jobHistory.renderCell(cell, address);
       } else if (key === "queued") {
         renderLiveQueue(cell, address, nodeProjectionTime);
       } else if (isMetadataColumn(key)) {
@@ -2437,6 +2538,16 @@ function renderSupplied(): void {
     renderOnlineRosterStatus();
     setHostCount(inputLoading || inputError ? null : displayedOnlineHosts.size);
   }
+  for (let index = rows.length - 1; index >= 0; index--) {
+    const row = rows[index]!;
+    const details = jobHistory.renderExpanded(row.dataset.host!, COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1));
+    if (details) {
+      rows.splice(index + 1, 0, details);
+      jobHistory.renderCell(row.querySelector<HTMLTableCellElement>('td[data-col="latestJob"]')!, row.dataset.host!);
+    }
+  }
+  element<HTMLButtonElement>("jobs-show-all").disabled = displayedAddresses.length === 0;
+  element<HTMLButtonElement>("jobs-hide-all").disabled = jobHistory.expandedCount === 0;
   if (rows.length === 0) {
     const row = document.createElement("tr");
     const cell = document.createElement("td");
@@ -2515,13 +2626,14 @@ function render(): void {
   }
   setText(element("preview-description"), fleetConfig.sourceMode === "snapshot"
     ? `${fleetConfig.sourceLabel}. This view reads backend observations; opening or refreshing it does not establish new host evidence. Each value keeps its original source time and freshness deadline. Missing observations stay unknown; retained timings remain dimmed estimates. Host activity and API reachability are independent.` : supplied
-    ? "Metadata comes from Nosana metrics; State uses Node Info with independent job/queue evidence when needed. API shows reachability from that same check; DL/UL/Ping also use Node Info. Duration uses assigned Nosana jobs with an independent local clock; Queued uses the ordered Nosana market queue. SOL uses confirmed public mainnet RPC with shared best-effort 30-second checks. NOS checks standard associated token accounts every two minutes. Staked NOS checks vault holdings and current market targets every 30 minutes. Latest-job history, claimable rewards and physical GPU identity remain unconnected. Duration shows Populating.. until useful timing arrives, and a dash for current confirmed absence or unavailable timing while API Offline is confirmed; State uses a dim amber spinner until useful activity arrives. Other unconnected fields stay unknown. Synthetic scenarios stay separate."
+    ? "Metadata comes from Nosana metrics; State uses Node Info with independent job/queue evidence when needed. API shows reachability from that same check; DL/UL/Ping also use Node Info. Duration uses assigned Nosana jobs with an independent local clock; Queued uses the ordered Nosana market queue. SOL uses confirmed public mainnet RPC with shared best-effort 30-second checks. NOS checks standard associated token accounts every two minutes. Staked NOS checks vault holdings and current market targets every 30 minutes. Jobs expands on demand to recent indexed history, with original check times and separate execution results. Claimable rewards and physical GPU identity remain unconnected. Duration shows Populating.. until useful timing arrives, and a dash for current confirmed absence or unavailable timing while API Offline is confirmed; State uses a dim amber spinner until useful activity arrives. Other unconnected fields stay unknown. Synthetic scenarios stay separate."
     : "Sample preview. Market names and hardware readings are synthetic; Job durations and Node states add separate synthetic examples. No live data sources are connected. A dash means unknown, not zero.");
   if (supplied) {
     renderSupplied();
     return;
   }
   const view = projectFleet(inventory, sampleNow);
+  jobHistory.setRoster(view.pcs.flatMap(pc => pc.runtimes.flatMap(runtime => runtime.hosts.map(host => host.id))), `sample:${selected}`);
   const total = view.counts.currentHosts + view.counts.retainedHosts;
   const pending = view.pcs.flatMap((pc) => pc.runtimes).filter((runtime) => runtime.inventoryObservedAtMs === null).length;
   setHostCount(total);
@@ -2553,6 +2665,7 @@ function render(): void {
             nvidia: hardware.values.nvidia,
             cpu: hardware.values.cpu,
             system: hardware.values.system,
+            country: formatCountry(sampleCountry(host.id), "full").fullName,
             state: sampleNodeInfo(selected, host.id)?.values?.state ?? null,
             api: projectNodeApi(sampleNodeInfo(selected, host.id), sampleNow).label,
             dl: sampleNodeInfo(selected, host.id)?.values?.dl ?? null,
@@ -2584,7 +2697,13 @@ function render(): void {
       scopes.append(scope);
     }
   });
-  for (const row of sortFleetRows(sortableRows, activeSort)) rows.append(renderRow(row));
+  for (const row of sortFleetRows(sortableRows, activeSort)) {
+    rows.append(renderRow(row));
+    const details = jobHistory.renderExpanded(row.host.id, COLUMNS.length + (queuedDurationLayout === "combined" ? 0 : 1));
+    if (details) rows.append(details);
+  }
+  element<HTMLButtonElement>("jobs-show-all").disabled = total === 0;
+  element<HTMLButtonElement>("jobs-hide-all").disabled = jobHistory.expandedCount === 0;
   if (total === 0) {
     const empty = document.createElement("tr");
     const cell = document.createElement("td");
@@ -2797,6 +2916,7 @@ async function loadJobs(): Promise<void> {
         jobWaitUntilMs = payload.waitUntilMs ?? null;
       }
       jobRecords = next;
+      jobHistory.observe(records);
       jobsError = null;
       for (const record of records) liveActivity(record.address, liveNow());
       if (!complete) scheduleProgressRender("jobs", records);

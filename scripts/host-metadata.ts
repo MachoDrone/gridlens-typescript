@@ -6,6 +6,7 @@ import {
   isMetadataAddress, normalizeHostMetadata, normalizeMarketLabel,
 } from "../src/fleet/host-metadata.ts";
 import type { HostMetadataRecord, HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
+import type { ProviderCheckpoint } from "./provider-checkpoint.ts";
 
 const origin = "https://host-manager.k8s.prd.nosana.com";
 const successCacheMs = 5 * 60_000;
@@ -43,18 +44,22 @@ export function createHostMetadataProvider({
   fetch: fetcher = globalThis.fetch,
   now = Date.now,
   timeoutMs = 8_000,
+  checkpoint,
 }: {
   fetch?: typeof globalThis.fetch;
   now?: () => number;
   timeoutMs?: number;
+  checkpoint?: ProviderCheckpoint;
 } = {}): HostMetadataProvider {
-  const hosts = new Map<string, HostCache>();
-  const attempted = new Set<string>();
-  const markets = new Map<string, MarketCache>();
+  const restored = checkpoint?.read<{ hosts: Map<string, HostCache>; attempted: Set<string>; markets: Map<string, MarketCache>; pauseUntil: number }>();
+  const hosts = restored?.hosts ?? new Map<string, HostCache>();
+  const attempted = restored?.attempted ?? new Set<string>();
+  const markets = restored?.markets ?? new Map<string, MarketCache>();
   const readHost = createSharedRead<string, HostMetadataRecord>();
   const readMarket = createSharedRead<string, MarketCache>();
   const limited = createRequestLimiter(2);
-  let pauseUntil = 0;
+  let pauseUntil = restored?.pauseUntil ?? 0;
+  const save = (): void => checkpoint?.write({ hosts, attempted, markets, pauseUntil });
 
   function noteRateLimit(response: Response): void {
     const retry = response.headers.get("retry-after")?.trim();
@@ -62,6 +67,7 @@ export function createHostMetadataProvider({
     const date = retry && !Number.isFinite(seconds) ? Date.parse(retry) : NaN;
     const until = Number.isFinite(seconds) ? now() + seconds * 1000 : date;
     pauseUntil = Math.max(pauseUntil, now() + failureBackoffMs, Number.isFinite(until) ? until : 0);
+    save();
   }
 
   async function json(path: string, signal: AbortSignal, hostAddress?: string): Promise<unknown> {
@@ -147,6 +153,7 @@ export function createHostMetadataProvider({
       }
       throwIfAborted(signal);
       markets.set(address, result);
+      save();
       return result;
     }, signal);
   }
@@ -182,6 +189,7 @@ export function createHostMetadataProvider({
       }
       throwIfAborted(signal);
       hosts.set(address, result);
+      save();
       watch.publish(address, result.record);
       return result.record;
     }, signal);
@@ -199,6 +207,7 @@ export function createHostMetadataProvider({
     if (hosts.get(record.address) !== cached) return hosts.get(record.address)!.record;
     if (cached.record.values?.marketLabel !== lookup.label || cached.record.marketError !== lookup.error) {
       cached.record = { ...cached.record, values: { ...cached.record.values!, marketLabel: lookup.label }, marketError: lookup.error };
+      save();
       watch.publish(record.address, cached.record);
     }
     return cached.record;

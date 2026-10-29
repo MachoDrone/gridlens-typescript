@@ -1,4 +1,5 @@
 import { BROWSER_ASSETS } from "../src/server/browser-assets.ts";
+import { selectJobHistoryHosts } from "../src/server/job-history-selection.ts";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { Server } from "node:http";
@@ -29,6 +30,8 @@ import type { HostMetadataSnapshot } from "../src/fleet/host-metadata.ts";
 import type { NodeInfoSnapshot } from "../src/fleet/node-info.ts";
 import type { JobSnapshot } from "../src/fleet/jobs.ts";
 import { JOB_REFRESH_INTERVAL_MS } from "../src/fleet/jobs.ts";
+import { blankJobHistoryRecord } from "../src/fleet/job-history.ts";
+import type { JobHistorySnapshot } from "../src/fleet/job-history.ts";
 import type { QueueSnapshot } from "../src/fleet/queue.ts";
 import type { SolSnapshot } from "../src/fleet/sol.ts";
 import { NOS_MINT, NOS_REFRESH_INTERVAL_MS } from "../src/fleet/nos.ts";
@@ -39,7 +42,7 @@ import { createOnlineHostsProvider } from "./online-hosts.ts";
 import type { OnlineHostsProvider } from "./online-hosts.ts";
 import type { OnlineHostsSnapshot } from "../src/contracts/online-hosts.ts";
 import { createOnlineRetention } from "./online-retention.ts";
-type Snapshot = HostMetadataSnapshot | NodeInfoSnapshot | JobSnapshot | QueueSnapshot | SolSnapshot | NosSnapshot | StakingSnapshot;
+type Snapshot = HostMetadataSnapshot | NodeInfoSnapshot | JobSnapshot | JobHistorySnapshot | QueueSnapshot | SolSnapshot | NosSnapshot | StakingSnapshot;
 
 const defaultDirectory = fileURLToPath(new URL("../dist/", import.meta.url));
 const assets = BROWSER_ASSETS;
@@ -168,6 +171,13 @@ export async function startPreviewServer(
     jobsProvider ??= createJobProvider({ activityPriority: scheduling.activityPriority });
     jobsProvider.observeStates?.(update);
   };
+  const readHistory = (addresses: readonly string[], signal: AbortSignal,
+    onUpdate: (update: Snapshot) => void, refresh = false): Promise<JobHistorySnapshot> => {
+    jobsProvider ??= createJobProvider({ activityPriority: scheduling.activityPriority });
+    return jobsProvider.history?.(addresses, signal, onUpdate, refresh) ?? Promise.resolve({
+      hosts: addresses.map(address => ({ ...blankJobHistoryRecord(address), error: "Job history is not connected to this source." })),
+    });
+  };
   const routes: Record<string, {
     read: Read;
     watch?: () => Read | undefined;
@@ -222,6 +232,11 @@ export async function startPreviewServer(
         retained: false, pending: false, retryAtMs: null,
         error: "The preview could not load Nosana job timing.",
       })) }),
+    },
+    "/preview/job-history.json": {
+      read: readHistory,
+      failure: addresses => ({ hosts: addresses.map(address => ({ ...blankJobHistoryRecord(address),
+        error: "The preview could not load Nosana job history." })) }),
     },
     "/preview/queue.json": {
       read: (addresses, signal, onUpdate) => getQueueProvider()(addresses, signal, onUpdate),
@@ -363,6 +378,7 @@ export async function startPreviewServer(
     }
     const route = Object.hasOwn(routes, path) ? routes[path] : undefined;
     if (route) {
+      let historySelection: ReturnType<typeof selectJobHistoryHosts> | undefined;
       const onlineRevision = online ? (input as OnlineHostsSnapshot).online.revision : null;
       const revisionConflict = (): void => {
         if (response.destroyed || response.writableEnded) return;
@@ -373,6 +389,15 @@ export async function startPreviewServer(
       };
       if (online && (onlineRevision === null || revisions.length !== 1 || revisions[0] !== onlineRevision)) {
         revisionConflict(); return;
+      }
+      if (path === "/preview/job-history.json" && !input.error) {
+        try { historySelection = selectJobHistoryHosts(parameters, input.addresses, ["scenario", "revision"]); }
+        catch {
+          const body = JSON.stringify({ hosts: [], error: "Choose between one and 100 distinct hosts from the current Fleet roster." });
+          response.writeHead(400, { "Content-Type": "application/json; charset=utf-8", "Content-Length": Buffer.byteLength(body) });
+          response.end(request.method === "HEAD" ? undefined : body);
+          return;
+        }
       }
       // HEAD, invalid and empty input never dispatch upstream work. Query input
       // cannot add addresses; every read captures one server-owned roster revision.
@@ -397,14 +422,17 @@ export async function startPreviewServer(
       const disconnect = (): void => { consumer.abort(); };
       response.once("close", disconnect);
       if (onlineRevision !== null) onlineConsumers.set(consumer, { revision: onlineRevision, close: revisionConflict });
-      const addresses = [...input.addresses];
+      const addresses = historySelection?.addresses ?? [...input.addresses];
       const releaseRetention = online ? onlineRetention.hold(addresses) : () => {};
       const progressive = path !== "/preview/nos.json" && path !== "/preview/staking.json" &&
         request.headers.accept?.split(",").some(value => value.trim().split(";", 1)[0] === "application/x-ndjson");
       // Watch consumers remain distinct from finite JSON callers, while the
       // providers underneath share their caches, pending reads and request limits.
       const watch = progressive ? route.watch?.() : undefined;
-      const read: Read = online && path === "/preview/jobs.json" ? async addresses => ({
+      const read: Read = path === "/preview/job-history.json" ? online
+        ? async addresses => jobsProvider?.peekHistory?.(addresses) ?? { hosts: addresses.map(blankJobHistoryRecord) }
+        : (addresses, signal, onUpdate) => readHistory(addresses, signal, onUpdate, historySelection?.refresh)
+        : online && path === "/preview/jobs.json" ? async addresses => ({
         // Network-wide job enrichment cannot spend the fixed fleets' shared
         // assignment/maintenance allowance. Reuse observations without joining
         // pending work or constructing an otherwise unused job provider.
@@ -427,7 +455,8 @@ export async function startPreviewServer(
           ...(online ? { onlineRevision } : {}), serverTimeMs: now() }) + "\n");
         if (complete) response.end();
       };
-      void sharedRoutes(`${scenario}:${onlineRevision ?? ""}:${path}${watch ? ":watch" : ""}`,
+      const selectionKey = historySelection ? `:${JSON.stringify([...addresses].sort())}:${historySelection.refresh}` : "";
+      void sharedRoutes(`${scenario}:${onlineRevision ?? ""}:${path}${watch ? ":watch" : ""}${selectionKey}`,
         (signal, emit) => read(addresses, signal, emit), consumer.signal,
         progressive ? snapshot => stream(snapshot, false) : undefined,
       ).then(

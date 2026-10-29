@@ -33,6 +33,7 @@ export const COLUMN_TYPES = Object.freeze({
   nvidia: "string",
   cpu: "string",
   system: "string",
+  country: "string",
 } as const);
 
 export type SortColumn = keyof typeof COLUMN_TYPES;
@@ -53,6 +54,8 @@ export interface SortableFleetRow {
   readonly nosAmount?: string | null;
   /** Exact NOS base units currently held in the staking vault. */
   readonly stakedNosAmount?: string | null;
+  /** Exact six-decimal claimable uptime reward base units, independent of other NOS balances. */
+  readonly rewardAmount?: string | null;
   readonly values: Readonly<Partial<Record<SortColumn, string | number | null>>>;
 }
 
@@ -106,7 +109,9 @@ export function sortFleetRows<T extends SortableFleetRow>(
     const rightNos = isNosAmount(b.nosAmount) ? b.nosAmount : null;
     const leftStaked = isStakingAmount(a.stakedNosAmount) ? a.stakedNosAmount : null;
     const rightStaked = isStakingAmount(b.stakedNosAmount) ? b.stakedNosAmount : null;
-    const comparison = sort.column === "sol" && (a.solLamports !== undefined || b.solLamports !== undefined)
+    const comparison = sort.column === "rewards" && (a.rewardAmount !== undefined || b.rewardAmount !== undefined)
+      ? compareNosAmounts(a.rewardAmount ?? null, b.rewardAmount ?? null) * (sort.direction === "desc" && a.rewardAmount != null && b.rewardAmount != null ? -1 : 1)
+      : sort.column === "sol" && (a.solLamports !== undefined || b.solLamports !== undefined)
       ? compareSolLamports(leftSol, rightSol) * (sort.direction === "desc" && leftSol !== null && rightSol !== null ? -1 : 1)
       : sort.column === "nos" && (a.nosAmount !== undefined || b.nosAmount !== undefined)
         ? compareNosAmounts(leftNos, rightNos) * (sort.direction === "desc" && leftNos !== null && rightNos !== null ? -1 : 1)

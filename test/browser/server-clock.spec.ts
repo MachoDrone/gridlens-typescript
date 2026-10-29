@@ -9,6 +9,7 @@ import { blankStakingRecord, STAKING_DISPLAY_VALIDITY_MS } from "../../src/fleet
 import { NOS_MINT } from "../../src/fleet/nos.ts";
 import { SYNTHETIC_HOST_ADDRESSES as identities } from "../fixtures/host-addresses.ts";
 import { openPreviewTools } from "./helpers.ts";
+import { blankJobHistoryRecord } from "../../src/fleet/job-history.ts";
 
 const NOW = Date.UTC(2026, 2, 8, 7); // US daylight-saving boundary; source times remain UTC.
 const addresses = identities.slice(0, 3);
@@ -18,6 +19,7 @@ function snapshots(at: number, schedulingAt = at): FleetSnapshots {
   const account = { provider: "Isolated clock fixture", endpoint: "https://rpc.example.invalid", contextSlot: 123,
     blockTimeMs: at - 1_000, checkedAtMs: at, retained: false, error: null, retryAtMs: null };
   return {
+    "job-history": { hosts: addresses.map(blankJobHistoryRecord) },
     metadata: { hosts: addresses.map(address => ({ address, values: { status: "PREMIUM", marketAddress: market,
       marketLabel: "clock-fixture", ram: 64, disk: 500, cpu: "Synthetic CPU", cuda: null, nvidia: null,
       currentNode: null, system: null }, fetchedAtMs: at, retained: false, error: null, marketError: null })) },

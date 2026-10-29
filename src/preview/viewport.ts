@@ -159,9 +159,16 @@ export function bindFleetViewport(header: HTMLElement): () => void {
     if (!overview || !viewport || !wrapper) return;
     const visibleWidth = viewport.width;
     if (!Number.isFinite(visibleWidth) || visibleWidth <= 0) return;
-    // At the all-column minimum the two viewports already coincide. Keep that
-    // naturally fitting canvas, including its responsive width during rotation.
-    if (overview.exposed && visibleWidth >= overview.width - 1) return;
+    // Keep an all-column overview exposed when the table itself still fits.
+    // Rotation can widen responsive cells while native minimum zoom rounds the
+    // unused right gutter. Containing that already-visible table would clip its
+    // last fractional pixels inside the inward-rounded scroll window. Require
+    // naturally coincident viewports, so deliberate partial overviews still
+    // receive their existing inward-rounded containment.
+    const tableBox = overview.exposed ? table?.getBoundingClientRect() : undefined;
+    const tableFits = tableBox !== undefined && tableBox.left >= viewport.offsetLeft &&
+      tableBox.right <= viewport.offsetLeft + visibleWidth && Math.abs(window!.innerWidth - visibleWidth) <= 1.1;
+    if (overview.exposed && (visibleWidth >= overview.width - 1 || tableFits)) return;
     // A fractional CSS width can round the layout viewport upward and leave
     // a persistent visual pan. Round inward so the browser fits the selected
     // canvas, allowing less than one CSS pixel of native scale rounding.

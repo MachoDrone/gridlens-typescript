@@ -16,6 +16,7 @@ import { ASCENDING_HOST_ADDRESSES, SYNTHETIC_HOST_ADDRESSES } from "../fixtures/
 const allowedOrigins = new Set<string>();
 const unexpectedRequests: string[] = [];
 const browserErrors: string[] = [];
+const historyRequests: string[] = [];
 const servers: Server[] = [];
 const directories: string[] = [];
 let expectUnavailableInput = false;
@@ -25,8 +26,10 @@ test.beforeEach(async ({ context, page }) => {
   allowedOrigins.add("http://127.0.0.1:4174");
   unexpectedRequests.length = 0;
   browserErrors.length = 0;
+  historyRequests.length = 0;
   expectUnavailableInput = false;
   await context.route("**/*", route => {
+    if (new URL(route.request().url()).pathname === "/preview/job-history.json") historyRequests.push(route.request().url());
     if (!allowedOrigins.has(new URL(route.request().url()).origin)) {
       unexpectedRequests.push(route.request().url());
       return route.abort();
@@ -96,12 +99,16 @@ test("the default supplied file renders eight Explorer links and leaves every ot
   await expect(page.locator("#input-error")).toBeHidden();
   await expect(page.getByText("Sample data", { exact: true })).toBeHidden();
   expect(await addresses(page)).toEqual(SYNTHETIC_HOST_ADDRESSES);
-  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(27);
+  await expect(page.locator("#column-headings th[data-col]")).toHaveCount(28);
   await expect(page.locator('#fleet-rows [data-source="supplied"]')).toHaveCount(8);
   for (const address of SYNTHETIC_HOST_ADDRESSES) {
     const row = page.locator(`#fleet-rows [data-host="${address}"]`);
-    await expect(row.locator("td[data-col]")).toHaveCount(27);
-    expect(await row.locator('td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"])').allTextContents()).toEqual(Array(23).fill("—"));
+    await expect(row.locator("td[data-col]")).toHaveCount(28);
+    expect(await row.locator('td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"])').allTextContents()).toEqual(Array(23).fill("—"));
+    await expect(row.locator('.job-summary-link')).toHaveText("—");
+    await expect(row.locator('.job-summary-link')).not.toHaveAttribute("href");
+    await expect(row.locator('.job-summary-state')).toHaveText("Unknown");
+    await expect(row.locator('.jobs-expand')).toHaveAttribute("aria-expanded", "false");
     await expect(row.locator('td[data-col="api"]')).toHaveText("Populating..");
     const state = row.locator('td[data-col="state"]');
     await expect(state.locator(".state-unknown .state-dots")).toBeVisible();
@@ -125,6 +132,7 @@ test("the default supplied file renders eight Explorer links and leaves every ot
   const lastRow = await page.locator("#fleet-rows tr").last().boundingBox();
   const controls = await page.getByLabel("Scenario", { exact: true }).boundingBox();
   expect(controls?.y).toBeGreaterThan((lastRow?.y ?? 0) + (lastRow?.height ?? 0));
+  expect(historyRequests, "Collapsed rows do not request job history").toEqual([]);
   await page.screenshot({ path: info.outputPath("supplied-host-addresses.png"), fullPage: true });
 });
 
@@ -176,13 +184,16 @@ test("supplied addresses stay separate from samples and refresh never reloads or
   await expect(page.locator("#host-count")).toHaveText("8 hosts");
   expect(await addresses(page)).toEqual(SYNTHETIC_HOST_ADDRESSES);
   await expect(page.getByText("Sample data", { exact: true })).toBeHidden();
-  expect(await page.locator('#fleet-rows td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"])').allTextContents()).toEqual(Array(8 * 23).fill("—"));
+  expect(await page.locator('#fleet-rows td[data-col]:not([data-col="hostAddress"]):not([data-col="api"]):not([data-col="state"]):not([data-col="duration"]):not([data-col="latestJob"])').allTextContents()).toEqual(Array(8 * 23).fill("—"));
+  await expect(page.locator('.job-summary-link')).toHaveText(Array(8).fill("—"));
+  await expect(page.locator('.job-summary-state')).toHaveText(Array(8).fill("Unknown"));
   const unknownStates = page.locator('#fleet-rows td[data-col="state"][data-state="unknown"][data-state-current="false"]');
   await expect(unknownStates.locator(".state-unknown .state-dots")).toHaveCount(8);
   await expect(unknownStates.getByRole("button", { name: /unknown/ })).toHaveCount(8);
   await expect(page.locator('#fleet-rows td[data-col="duration"]')).toHaveText(Array(8).fill("Populating.."));
   await page.clock.fastForward(300_000);
   expect(inputRequests).toHaveLength(1);
+  expect(historyRequests, "Refreshing or switching scenarios does not request collapsed job history").toEqual([]);
 });
 
 for (const input of [
