@@ -328,3 +328,120 @@ for (const viewport of [{ width: 1280, height: 900 }, { width: 390, height: 844 
     const bounds = await page.locator("main").boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width);
   });
 }
+
+for (const width of [1280, 390, 320]) test(`browser PC manager adds, updates and removes computers without terminal handoff at ${width}px`, async ({ page }) => {
+  await page.clock.install(); await page.setViewportSize({ width, height: 900 });
+  const a = { id: "a".repeat(64), name: "Saved computer", host: "192.168.42.2", port: 22, fingerprint: "SHA256:" + "A".repeat(43) };
+  const b = { id: "b".repeat(64), name: "New computer", host: "192.168.42.3", port: 22, fingerprint: "SHA256:" + "B".repeat(43) };
+  let phase = "done", revision = 1, savedHosts = 2, computers = [a];
+  let managed = [{ ...a, hostCount: 2, username: "fixture", hasSavedCredential: true, status: "approved" }];
+  let scan: Record<string, unknown> | undefined, report: Record<string, unknown> | undefined;
+  const configurations: Record<string, unknown>[] = [], removals: unknown[] = [];
+  const view = () => ({ revision, phase, computers, managed, selected: [], trusted: [a.id], automaticIp: true, fullMonitoring: false,
+    exclusions: [], savedHosts, inspectedPcs: managed.filter(pc => pc.status !== "revoked").length, monitoringStatus: "Approved",
+    network: { backendName: "Synthetic backend", backendAddress: "192.168.42.10", suggestedRange: "192.168.42.0/24", verifiedAtMs: Date.now() },
+    ...(scan ? { scan } : {}), ...(report ? { report } : {}) });
+  await page.route("**/setup", async route => route.fulfill({ contentType: "text/html", body:
+    (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-private-network" content="1"><meta name="gridlens-setup-mode" content="browser"></head>') }));
+  await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  await page.route("**/api/shared/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/status")) { await route.fulfill({ json: { role: "operator" } }); return; }
+    if (path.endsWith("/setup-action")) {
+      const body = route.request().postDataJSON(); expect(body).toEqual({ revision, action: "scan", range: "192.168.42.0/30", port: 22 });
+      phase = "scanning"; scan = { range: body.range, port: 22, total: 4, completed: 0, found: 0, status: "running" }; revision++;
+    } else if (path.endsWith("/setup-configure")) {
+      const body = route.request().postDataJSON(); expect(body.revision).toBe(revision); configurations.push(body);
+      expect(body).not.toHaveProperty("privateKey"); expect(body).not.toHaveProperty("sudoPassword");
+      phase = "inspecting"; report = { status: "running", total: 1, completed: 0, results: [] }; revision++;
+    } else if (path.endsWith("/setup-remove")) {
+      const body = route.request().postDataJSON(); expect(body).toEqual({ revision, pcId: a.id }); removals.push(body);
+      managed = managed.map(pc => pc.id === a.id ? { ...pc, hostCount: 0, hasSavedCredential: false, status: "revoked" } : pc);
+      savedHosts = 1; revision++;
+    } else expect(path).toBe("/api/shared/setup");
+    await route.fulfill({ json: view() });
+  });
+  await page.goto("/setup");
+  await expect(page.locator("#pc-manager-summary")).toContainText("1 computer in the fleet");
+  await expect(page.locator("#network-search")).toBeHidden();
+  await expect(page.locator("#setup")).toBeHidden();
+  await expect(page.locator("main")).not.toContainText("Run the latest GridLens installer");
+  await page.getByRole("button", { name: "Add computers", exact: true }).click();
+  await page.getByLabel("Network or IP address", { exact: true }).fill("192.168.42.0/30");
+  await page.getByRole("button", { name: "Search network", exact: true }).click();
+  computers = [a, b]; phase = "select"; scan = { ...scan!, completed: 4, found: 2, status: "complete" }; revision++;
+  await page.clock.fastForward(3100);
+  await page.locator(`[data-pc-id="${b.id}"]`).getByRole("checkbox").check();
+  await page.getByLabel("Computer username", { exact: true }).fill("fixture");
+  await page.getByLabel("Computer password", { exact: true }).fill("generated-browser-password");
+  await page.clock.fastForward(3100);
+  await expect(page.getByLabel("Computer password", { exact: true })).toHaveValue("generated-browser-password");
+  await expect(page.getByLabel("Also enable rewards and GPU monitoring")).not.toBeChecked();
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
+  expect(configurations[0]).toEqual({ revision: revision - 1, selected: [b.id], username: "fixture", password: "generated-browser-password", fullMonitoring: false, restorePcIds: [] });
+  await expect(page.getByLabel("Computer password", { exact: true })).toHaveValue("");
+  expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain("generated-browser-password");
+  managed.push({ ...b, hostCount: 1, username: "fixture", hasSavedCredential: true, status: "approved" });
+  phase = "done"; savedHosts = 3; report = { status: "complete", total: 1, completed: 1, results: [{ pcId: b.id, name: b.name, status: "success", hosts: 1, message: "Verified and monitoring." }] }; revision++;
+  await page.clock.fastForward(3100);
+  await expect(page.getByRole("heading", { name: "Setup results", exact: true })).toBeVisible();
+  await expect(page.locator("#pc-report-summary")).toHaveText("1 of 1 computers checked · 3 hosts in the fleet");
+  await expect(page.locator("#pc-report-results .success")).toHaveText("Ready · 1 hosts");
+  await page.locator(`[data-pc-id="${a.id}"]`).getByRole("button", { name: "Update sign-in" }).click();
+  await expect(page.getByLabel("Computer username", { exact: true })).toHaveValue("fixture");
+  await expect(page.locator("#pc-signin-help")).toContainText("saved sign-in");
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
+  expect(configurations[1]).not.toHaveProperty("password");
+  phase = "done"; report = { status: "complete", total: 1, completed: 1, results: [{ pcId: a.id, name: a.name, status: "success", hosts: 2, message: "Saved sign-in verified." }] }; revision++;
+  await page.clock.fastForward(3100);
+  const oldRow = page.locator(`[data-pc-id="${a.id}"]`);
+  await oldRow.getByRole("button", { name: "Remove", exact: true }).click();
+  await oldRow.getByRole("button", { name: "Keep computer" }).click(); expect(removals).toHaveLength(0);
+  await oldRow.getByRole("button", { name: "Remove", exact: true }).click();
+  await oldRow.getByRole("button", { name: "Remove computer", exact: true }).click();
+  await expect(page.locator("#pc-manager-summary")).toContainText("1 computer in the fleet · 1 hosts saved");
+  await expect(page.locator(`[data-pc-id="${a.id}"]`)).toHaveCount(0); expect(removals).toHaveLength(1);
+  await page.getByLabel("Show removed computers").check();
+  await page.locator(`[data-pc-id="${a.id}"]`).getByRole("button", { name: "Re-add computer" }).click();
+  await expect(page.getByLabel(`Re-enable monitoring for ${a.name}`)).not.toBeChecked();
+  await page.getByLabel(`Re-enable monitoring for ${a.name}`).check();
+  await page.getByLabel("Computer password", { exact: true }).fill("generated-restored-password");
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
+  expect(configurations[2]!.restorePcIds).toEqual([a.id]);
+  await expect(page.getByLabel("Computer password", { exact: true })).toHaveValue("");
+  const bounds = await page.locator("main").boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+});
+
+test("browser manager clears rejected passwords and presents actionable failed-computer results", async ({ page }) => {
+  await page.clock.install();
+  const computer = { id: "c".repeat(64), name: "Unconfigured computer", host: "192.168.42.4", port: 22, fingerprint: "SHA256:" + "C".repeat(43) };
+  let revision = 1, report: Record<string, unknown> | undefined;
+  await page.route("**/setup", async route => route.fulfill({ contentType: "text/html", body:
+    (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-private-network" content="1"><meta name="gridlens-setup-mode" content="browser"></head>') }));
+  await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  await page.route("**/api/shared/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/status")) { await route.fulfill({ json: { role: "operator" } }); return; }
+    if (path.endsWith("/setup-configure")) { await route.fulfill({ status: 400, json: { error: "Never expose this raw failure" } }); return; }
+    expect(path).toBe("/api/shared/setup");
+    await route.fulfill({ json: { revision, phase: "select", computers: [computer], managed: [], selected: [], trusted: [], automaticIp: false,
+      fullMonitoring: false, exclusions: [], savedHosts: 0, inspectedPcs: 0, monitoringStatus: "Not configured", ...(report ? { report } : {}) } });
+  });
+  await page.goto("/setup"); await page.locator(`[data-pc-id="${computer.id}"]`).getByRole("checkbox").check();
+  await page.getByLabel("Computer username", { exact: true }).fill("fixture");
+  await page.getByLabel("Computer password", { exact: true }).fill("generated-bad-password");
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  await expect(page.locator("#message")).toContainText("Check the selected computers");
+  await expect(page.getByLabel("Computer password", { exact: true })).toHaveValue("");
+  await expect(page.locator("main")).not.toContainText("Never expose this raw failure");
+  report = { status: "complete", total: 1, completed: 1, results: [{ pcId: computer.id, name: computer.name, status: "failed", hosts: 0, message: "Computer sign-in was rejected. Update the username or password and retry." }] }; revision++;
+  await page.clock.fastForward(3100);
+  await expect(page.locator("#pc-report-results .failure")).toHaveText("Failed · 0 hosts");
+  await page.getByRole("button", { name: "Update sign-in and retry" }).click();
+  await expect(page.getByLabel("Computer password", { exact: true })).toBeFocused();
+  await expect(page.getByLabel("Computer username", { exact: true })).toHaveValue("fixture");
+  expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain("generated-bad-password");
+});

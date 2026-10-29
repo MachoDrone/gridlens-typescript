@@ -6,7 +6,7 @@ source contracts, and the remaining work. See [README](../README.md) for startup
 [UX_CONSISTENCY](UX_CONSISTENCY.md) for phone/laptop acceptance.
 
 The installed [shared backend composition](SHARED_BACKEND.md) adds durable
-provider checkpoints, a SQLite owner, HTTPS pairing and terminal setup. It is
+provider checkpoints, a SQLite owner, HTTPS pairing and browser PC management. It is
 separate from the preview behavior documented below. See the
 [modern installer](MODERN_INSTALL.md) for runtime isolation, recovery and build
 commands. Earlier published releases remain immutable; physical reboot, GPU
@@ -19,16 +19,31 @@ Rerunning setup cannot revive revoked access. Anyone who can reach this private
 HTTP address can operate that fleet; the LAN leg is unencrypted. Native Android's
 HTTPS pairing stays separate. No VPN changes or duplicate collection are added.
 
-The dev.6 update makes onboarding a single terminal wizard. It uses verified
-network suggestions, bounded discovery, one numbered computer list with filters
-and selection counts, new-identity review, credential entry, monitoring choices
-and inspection. Only completed setup prints the browser address. Existing fleets
-default to Finish and can explicitly add computers; empty or failed results offer
-retry. Browser Manage computers is a read-only status/installer-command page.
-Search cancellation still fences late results, and owner shutdown cancels scan
-work before state closes. Existing browser setup APIs remain compatible, but the
-deployed UI does not require their interactive flow. Developer-preview sources
-are unchanged.
+The dev.7 update follows the operator's revised workflow: the CLI installs the
+backend and prints its ordinary URL, then the browser manages PCs. The actual web
+port is selected directly on fresh installs; the companion HTTPS port is chosen
+separately without another normal-install question. Green marks Ready/success,
+blue marks the URL/actionable information, amber marks work or attention, red marks
+failure, and muted text marks retained information. Prompts have spacing and
+defaults; `NO_COLOR` keeps the same text meanings without ANSI color.
+
+Manage computers combines saved PCs and bounded discovery, selection, username and
+password entry, saved-sign-in reuse/update, explicit removal/restore and a final
+per-PC report. Setup pins new selected identities, checks SSH/container access and
+tries fixed sudo reads when required; changed saved identities remain blocked.
+Automatic IP and encrypted credential retention are enabled for successful setup;
+new rewards/GPU access still needs its separate option, while existing approvals
+are retained. Missing optional host Podman is not reported as a setup failure.
+
+This latest operator requirement supersedes the earlier terminal-only password
+entry policy. Browser credentials travel in a bounded same-origin POST, not a URL,
+log or browser storage; inputs are cleared after submission. The gateway forwards
+them transiently to the owner and receives no Docker socket, SSH private key,
+credential volume or terminal-control socket. Stored credentials are encrypted in
+the owner's protected volume. The selected HTTP LAN transport is still plaintext;
+encryption at rest does not encrypt that network leg. Native HTTPS access remains
+separate. Search cancellation and setup shutdown fence late work before state
+closes. Developer-preview sources and provider budgets are unchanged.
 
 ## Toolchain and commands
 

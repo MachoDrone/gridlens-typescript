@@ -14,13 +14,14 @@ import { runTerminalSetup, verifiedSetupNetwork } from "./setup-session.ts";
 import type { SetupControl } from "./setup-session.ts";
 import { InstallerError, releaseURL, verifyArtifact, verifyRelease } from "./release.ts";
 import type { ReleaseArtifact } from "./release.ts";
-import { assertLocalDockerForSelection, chooseDashboardPort, choosePrivateEndpoint, discoverPrivateEndpoints, dockerNetworkExclusions, probeBindPort } from "./network-selection.ts";
+import { assertLocalDockerForSelection, chooseDashboardPort, choosePrivateEndpoint, choosePrivateWebPorts, discoverPrivateEndpoints, dockerNetworkExclusions, probeBindPort } from "./network-selection.ts";
 import type { PortProbe, SelectionPrompts } from "./network-selection.ts";
 import type { InstallationConfig } from "./config.ts";
+import { cliColorEnabled, cliSection, cliText } from "./cli-format.ts";
 
 declare const GRIDLENS_RELEASE_PUBLIC_KEY: string;
 
-export interface TerminalPrompts { ask(prompt: string): Promise<string>; secret(prompt: string): Promise<string>; print(text: string): void; close(): void }
+export interface TerminalPrompts { color?: boolean; ask(prompt: string): Promise<string>; secret(prompt: string): Promise<string>; print(text: string): void; close(): void }
 
 const MAX_PUBLIC_CERTIFICATE_BYTES = 32 * 1024;
 export class PublicCertificateExportError extends InstallerError {}
@@ -162,22 +163,22 @@ export async function chooseTlsConfiguration(terminal: Pick<TerminalPrompts, "as
 export async function chooseSavedEndpointRepair(terminal: SelectionPrompts, previous: InstallationConfig,
   assess: (config: InstallationConfig) => { state: string; repairRequired: boolean }, probe: PortProbe = probeBindPort): Promise<number | undefined> {
   if (previous.phase === "applying") {
-    terminal.print("Resuming the saved image/state transaction before assessing its dashboard endpoint.");
+    terminal.print(cliText(terminal, "pending", "Resuming the saved installation…"));
     return undefined;
   }
   const port = previous.pendingPort ?? previous.port, endpoint = assess(previous);
   if (!endpoint.repairRequired) {
-    terminal.print(previous.pendingPort === undefined ? "Keeping the saved network address and dashboard port."
-      : "Completing the saved dashboard-port repair. Existing TLS identity, credentials and data are retained.");
+    terminal.print(cliText(terminal, "muted", previous.pendingPort === undefined ? "Saved network address and ports retained."
+      : "Completing the saved port repair. Identity and data are retained."));
     return undefined;
   }
   const availability = await probe(previous.bindAddress, port);
   if (availability === "unavailable") throw new InstallerError("The saved dashboard address cannot be bound on this PC. Restore its existing private network/VPN connection before retrying. The saved address, TLS identity and data were retained.");
   if (availability === "busy") {
-    terminal.print(`The ${previous.pendingPort === undefined ? "saved" : "pending"} dashboard endpoint is not working, and port ${port} is now occupied. Choose a free replacement port to repair it. TLS identity, credentials and data will be retained; the other service stays running.`);
+    terminal.print(cliText(terminal, "pending", `The ${previous.pendingPort === undefined ? "saved" : "pending"} dashboard endpoint is not working, and port ${port} is now occupied. Choose a free replacement port; identity and data are retained.`));
     return chooseDashboardPort(terminal, previous.bindAddress, { probe });
   }
-  terminal.print("The saved dashboard port is available. Repairing the existing endpoint while retaining TLS identity, credentials and data.");
+  terminal.print(cliText(terminal, "pending", "Repairing the saved dashboard connection…"));
   return undefined;
 }
 export function controllingTerminal(): TerminalPrompts {
@@ -186,10 +187,12 @@ export function controllingTerminal(): TerminalPrompts {
   const input=new ReadStream(inputFd),output=new WriteStream(outputFd);
   if(!input.isTTY||!output.isTTY)throw new InstallerError("Setup requires a controlling terminal.");
   let closed=false;
+  const color=cliColorEnabled(output.isTTY);
   return {
+    color,
     async ask(prompt){const line=createInterface({input,output,terminal:true});try{return (await line.question(prompt)).trim();}finally{line.close();}},
     secret(prompt){
-      output.write(prompt);input.setRawMode(true);input.resume();
+      output.write(cliText({color},"action",prompt));input.setRawMode(true);input.resume();
       return new Promise<string>((resolve,reject)=>{
         let text="";
         const cleanup=():void=>{input.off("data",data);input.setRawMode(false);input.pause();output.write("\n");};
@@ -220,11 +223,22 @@ function savedConfiguration(coordinator: Coordinator, runner: DockerRunner, inst
   if (!config) throw new InstallerError("The saved backend configuration is not available. Rerun setup first.");
   return config;
 }
+export function printBrowserReady(terminal: TerminalPrompts, origin: string): void {
+  // Keep the existing private-origin validation before presenting a clickable URL.
+  privateBrowserConnectionText(origin);
+  terminal.print("");
+  terminal.print(cliText(terminal, "success", "Ready."));
+  terminal.print(cliText(terminal, "action", `${origin}/`));
+  terminal.print("");
+  terminal.print("Open Manage computers to add or update PCs.");
+  terminal.print(cliText(terminal, "muted", "Use your existing VPN when away."));
+  terminal.print("");
+}
 function printSavedConnection(terminal: TerminalPrompts, coordinator: Coordinator, runner: DockerRunner, instance: string): void {
   const config = savedConfiguration(coordinator, runner, instance), web = readVpnWebEndpoint(runner, config);
   if (web) {
     if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
-    terminal.print(privateBrowserConnectionText(web.origin));
+    printBrowserReady(terminal,web.origin);
   } else terminal.print(browserConnectionText(config.origin, coordinator.operatorCode(instance), config.active.sequence >= 3));
 }
 function setupControl(runner: DockerRunner, instance: string): SetupControl {
@@ -241,12 +255,16 @@ function publishSetupNetwork(runner: DockerRunner, config: InstallationConfig): 
   if(context)setupControl(runner,config.instance)({operation:"setup-network-context",scopeId:"default",...context});
 }
 export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts):Promise<void>{
-  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing VPN.\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect | --ssh-sign-in | --scan RANGE]\n--vpn-web adds browser access on your private LAN/existing VPN; local LAN traffic uses HTTP. Optional --web-port PORT. Existing HTTPS remains available for Android.\nComplete search, computer selection, sign-in and monitoring in this terminal. The dashboard address is shown afterward. --connect prints the saved address; --no-setup skips onboarding for automation.\nAll secrets are entered in the controlling terminal. No host Node or Python is required.");return;}
+  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
   if(args.includes("--version")){console.log("gridlens-modern-coordinator 1 / Node "+process.versions.node);return;}
   process.umask(0o077);
   const terminal=suppliedTerminal??controllingTerminal(),runner=localDockerRunner();
   try{
     const instance=option(args,"--instance")??"default";resourceName(instance,"owner");
+    const webPortInput=option(args,"--web-port");
+    if(webPortInput!==undefined&&(!args.includes("--vpn-web")||!/^\d+$/.test(webPortInput)||Number(webPortInput)<1024||Number(webPortInput)>65535))
+      throw new InstallerError("Use --web-port with --vpn-web and a port from 1024 through 65535.");
+    let webPort=webPortInput===undefined?undefined:Number(webPortInput);
     if(args.includes("--ssh-sign-in")){
       const coordinator=new Coordinator(runner),config=savedConfiguration(coordinator,runner,instance);
       if(config.active.sequence<6)throw new InstallerError("Run the current installer with --vpn-web first to update terminal setup.");
@@ -260,6 +278,8 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     }
     const coordinator=new Coordinator(runner);
     if(args.includes("--connect")){printSavedConnection(terminal,coordinator,runner,instance);return;}
+    cliSection(terminal,"GridLens installation");
+    terminal.print("Use this PC with your existing LAN or VPN.");
     const base=option(args,"--release");if(!base)throw new InstallerError("Use the signed release launcher or provide its pinned --release URL.");
     const manifest=await download(releaseURL(base,"modern-release.json"),16_384);
     const signature=await download(releaseURL(base,"modern-release.sig"),64);
@@ -268,42 +288,47 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     checked(runner,["version","--format","{{.Server.Version}}"]);
     const image=runner.run(["image","inspect",release.imageId]);
     if(image.status!==0){
-      terminal.print("Downloading and verifying the signed runtime image.");
+      terminal.print("");
+      terminal.print(cliText(terminal,"pending","Downloading and verifying GridLens…"));
       const bytes=await downloadArtifact(base,release.runtime),directory=mkdtempSync(join(tmpdir(),"gridlens-modern-"));
       try{const file=join(directory,"runtime.tar");writeFileSync(file,bytes,{mode:0o600});checked(runner,["load","--input",file]);}finally{rmSync(directory,{recursive:true,force:true});}
     }
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
     const previous=coordinator.configuration(instance,release.imageId);
-    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<6?"upgrade":"setup";
+    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<7?"upgrade":"setup";
     if(!previous){
-      terminal.print("Scanning and monitoring run on this chosen backend PC. Run this terminal on that PC, including through an interactive SSH login. Setup does not change VPN, DNS or host networking.");
       assertLocalDockerForSelection(runner);
       const selected=await choosePrivateEndpoint(terminal,discoverPrivateEndpoints(networkInterfaces(),dockerNetworkExclusions(runner)));
-      bindAddress=selected.address;port=await chooseDashboardPort(terminal,bindAddress);
-      if(!args.includes("--vpn-web"))certificate=await chooseTlsConfiguration(terminal,bindAddress);
+      bindAddress=selected.address;
+      if(args.includes("--vpn-web")){
+        const selectedPorts=await choosePrivateWebPorts(terminal,bindAddress,webPort===undefined?{}:{requestedWebPort:webPort});
+        webPort=selectedPorts.webPort;port=selectedPorts.httpsPort;
+      }else{port=await chooseDashboardPort(terminal,bindAddress);certificate=await chooseTlsConfiguration(terminal,bindAddress);}
     }else repairPort=await chooseSavedEndpointRepair(terminal,previous,config=>{
       const endpoint=coordinator.endpointStatus(config);
       if(endpoint.repairRequired)assertLocalDockerForSelection(runner);
       return endpoint;
     });
+    terminal.print("");terminal.print(cliText(terminal,"pending","Preparing GridLens…"));
     const result=coordinator.install({instance,release,action,...(bindAddress?{bindAddress}:{}),...(port?{port}:{}),...(repairPort?{repairPort}:{}),...(certificate?{certificate}:{})});
     await verifyGateway(result.config.origin,result.certificate);
-    terminal.print(result.retainedNewer?"Retained the newer installed runtime; no downgrade was performed.":`Runtime ${result.config.active.version} is ready.`);
-    const requestedWebPort=option(args,"--web-port");
-    const web=args.includes("--vpn-web")?ensureVpnWeb(runner,result.config,release,requestedWebPort===undefined?undefined:Number(requestedWebPort),{upgrade:true})
+    if(result.retainedNewer)terminal.print(cliText(terminal,"muted","The newer installed version was retained."));
+    if(args.includes("--vpn-web")&&webPort===undefined&&!inspectOwned(runner,"container",resourceName(instance,"vpn-web"),instance)){
+      assertLocalDockerForSelection(runner);
+      webPort=await chooseDashboardPort(terminal,result.config.bindAddress,{preferred:result.config.port===65535?65534:result.config.port+1,label:"Web dashboard port"});
+    }
+    const web=args.includes("--vpn-web")?ensureVpnWeb(runner,result.config,release,webPort,{upgrade:true})
       :readVpnWebEndpoint(runner,result.config);
     if(web){
       if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
       await verifyPrivateWeb(web.origin,true);
       publishSetupNetwork(runner,result.config);
-      if(!args.includes("--no-setup")&&!(await runTerminalSetup(terminal,setupControl(runner,instance))).completed)return;
-      terminal.print(args.includes("--no-setup")?"Backend ready. Fleet setup was skipped.":"Setup complete. Open your dashboard:");
-      terminal.print(privateBrowserConnectionText(web.origin));
+      printBrowserReady(terminal,web.origin);
       return;
     }
     terminal.print(`Server TLS certificate SHA-256 (Android pin): ${result.config.certificateSha256}`);
     await offerPublicCertificateExport(terminal,instance,result.certificate,{existingTrusted:certificate!==undefined});
-    if(result.config.active.sequence>=6){publishSetupNetwork(runner,result.config);if(!args.includes("--no-setup")&&!(await runTerminalSetup(terminal,setupControl(runner,instance))).completed)return;}
+    if(result.config.active.sequence>=5)publishSetupNetwork(runner,result.config);
     terminal.print(browserConnectionText(result.config.origin,coordinator.operatorCode(instance),result.config.active.sequence>=3));
   }finally{terminal.close();}
 }

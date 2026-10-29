@@ -10,21 +10,23 @@ APIs. A Node server supplies same-origin data, shared caches and request limits.
 The live preview uses public Nosana/node APIs and Solana RPC without wallet keys.
 
 A separate [shared backend candidate](docs/SHARED_BACKEND.md) adds durable SQLite
-collection, authenticated HTTPS, terminal setup and optional Android pairing.
+collection, authenticated HTTPS, browser PC management and optional Android pairing.
 Its [modern Docker installer](docs/MODERN_INSTALL.md) is separate from the legacy
 installer and this developer preview. Isolated Docker acceptance passed on an
 authorized Nosana host, including HTTPS, cache sharing and recovery. Development
 release **0.1.0-dev.4** provides private-address choices, installer recovery and
 direct browser access over an existing LAN/VPN (`--vpn-web`): open the ordinary
-dashboard address. The **0.1.0-dev.6** update completes setup in one terminal:
-search, select computers, confirm new identities, sign in, choose monitoring and
-save the fleet. Recommended defaults are shown at each step. Only after setup
-completes does it print the ordinary dashboard address to open in a browser.
-Existing fleets can finish immediately or add computers. Browser **Manage
-computers** shows status and the command to run setup again; it does not ask for
-onboarding choices. Anyone who can reach that private
+dashboard address. The **0.1.0-dev.7** update keeps installation short: choose the
+PC address and actual web port, then open the printed URL. The CLI uses meaningful
+colors and spacing for choices, progress, errors and the final address.
+Browser **Manage computers** handles network search, selection, username/password
+entry, automatic access checks and a per-computer results report. Saved sign-ins
+can be reused or updated; computers can be removed or explicitly restored.
+Anyone who can reach that private
 address has access to its configured fleet. HTTP LAN traffic is unencrypted;
-the existing HTTPS endpoint and Android pairing remain available separately.
+that includes browser credential submissions on the LAN leg. Credentials are
+retained encrypted only by the backend owner. The existing HTTPS endpoint and
+Android pairing remain available separately.
 Physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
 separate.
 

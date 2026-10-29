@@ -1,7 +1,7 @@
 import type { SharedAccess, PrivateState } from "./access.ts";
 import type { createObservationStore } from "./observations.ts";
 import type { Computer, SshCredential } from "./ssh.ts";
-import { scanAddresses, scanComputers, inspectComputer } from "./ssh.ts";
+import { scanAddresses, scanComputers, inspectComputer, SshAccessError } from "./ssh.ts";
 import type { PcAssociation } from "../contracts/shared.ts";
 import { SharedHttpError } from "./ipc.ts";
 import type { CredentialVault } from "./credential-vault.ts";
@@ -13,6 +13,12 @@ interface SetupScan {
   status: "running" | "complete" | "cancelled" | "failed";
 }
 interface SetupNetwork { backendName: string; backendAddress: string; suggestedRange?: string; verifiedAtMs: number; releaseTag?: string }
+interface SetupResult { pcId: string; name: string; status: "success" | "attention" | "failed"; hosts: number; message: string }
+interface SetupReport { status: "running" | "complete" | "failed"; total: number; completed: number; results: SetupResult[] }
+interface ManagedComputer {
+  id: string; name: string; host: string; port: number; hostCount: number; username: string | null;
+  hasSavedCredential: boolean; status: "approved" | "paused" | "revoked" | "not-approved"; removed: boolean;
+}
 
 interface SetupState {
   version: 1; scopeId: string; revision: number;
@@ -21,15 +27,19 @@ interface SetupState {
   automaticIp: boolean; fullMonitoring: boolean; exclusions: string[]; savedHosts: number; inspectedPcs: number;
   monitoringStatus: string; updatedAtMs: number;
   scan?: SetupScan;
+  report?: SetupReport;
 }
-interface SetupView extends SetupState { network?: SetupNetwork; terminalConnected: boolean }
-/** Public setup intent contains no passwords, passphrases, key files or command strings. */
+interface SetupView extends SetupState { network?: SetupNetwork; terminalConnected: boolean; managed: ManagedComputer[] }
+/** Public setup state/reports contain no credentials. The bounded browser
+ * enrollment request is handled only by the owner and its protected vault. */
 export function createSetup(state: PrivateState, access: SharedAccess, observations: ReturnType<typeof createObservationStore>, now = Date.now,
   options: { vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer } = {}) {
-  const sessions = new Map<string, { credential: SshCredential; remember: boolean }>();
+  const sessions = new Map<string, { credential?: SshCredential; credentials?: Map<string, SshCredential>; remember: boolean;
+    browser?: boolean; restore?: Set<string>; signal?: AbortSignal; failures?: Map<string, string> }>();
   const busy = new Set<string>();
   const terminals = new Map<string, number>();
   const pendingScans = new Set<Promise<SetupView>>();
+  const pendingConfigurations = new Map<string, { controller: AbortController; done: Promise<SetupView> }>();
   let activeScan: { scopeId: string; controller: AbortController; done: Promise<SetupView> } | undefined;
   let closing = false;
   const key = (scopeId: string) => `setup:${scopeId}`;
@@ -38,8 +48,9 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
     if (prior && ["scanning", "review", "inspecting"].includes(prior.phase)) state.set(key(context.scopeId), { ...prior,
       phase: prior.phase === "scanning" ? "scan" : "credentials", revision: prior.revision + 1,
       ...(prior.phase === "scanning" && prior.scan ? { scan: { ...prior.scan, status: "failed" } } : {}),
+      ...(prior.report?.status === "running" ? { report: { ...prior.report, status: "failed" } } : {}),
       exclusions: [...prior.exclusions, prior.phase === "scanning" ? "Search was interrupted. Start it again."
-        : "Setup was interrupted. Confirm terminal sign-in before continuing."], updatedAtMs: now() });
+        : prior.report ? "Setup was interrupted. Enter the computer sign-in again to retry." : "Setup was interrupted. Confirm terminal sign-in before continuing."], updatedAtMs: now() });
   }
   function readState(scopeId: string): SetupState {
     access.fleet(scopeId);
@@ -48,7 +59,22 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
   }
   function read(scopeId: string): SetupView {
     const network = state.get<SetupNetwork>(`setup-network:${scopeId}`);
-    return { ...readState(scopeId), ...(network ? { network } : {}), terminalConnected: (terminals.get(scopeId) ?? 0) > now() };
+    const current = readState(scopeId), data = observations.read(access.fleet(scopeId));
+    const known = new Map((state.get<Computer[]>(`ssh-identities:${scopeId}`) ?? []).map(row => [row.id, row]));
+    for (const row of current.computers) if (!known.has(row.id)) known.set(row.id, row);
+    const managed: ManagedComputer[] = [];
+    for (const computer of known.values()) {
+      const permission = state.get<PcPermission>(`permission:${scopeId}:${computer.id}`);
+      const associations = data.associations.filter(row => row.binding.pcId === computer.id);
+      if (!permission && !associations.length) continue;
+      let credential: SshCredential | undefined;
+      try { credential = options.vault?.read(scopeId, computer.id); } catch { /* A damaged saved sign-in requires a new one. */ }
+      managed.push({ id: computer.id, name: associations[0]?.name ?? computer.name, host: computer.host, port: computer.port,
+        hostCount: associations.length, username: credential?.username ?? null, hasSavedCredential: !!credential,
+        status: !permission ? "not-approved" : permission.revokedAtMs !== null ? "revoked" : permission.paused ? "paused" : "approved",
+        removed: !associations.length && permission?.revokedAtMs !== null && permission?.revokedAtMs !== undefined });
+    }
+    return { ...current, managed, ...(network ? { network } : {}), terminalConnected: (terminals.get(scopeId) ?? 0) > now() };
   }
   function write(value: SetupState): SetupView { const next = { ...value, revision: value.revision + 1, updatedAtMs: now() }; state.set(key(value.scopeId), next); return read(value.scopeId); }
   function acceptedComputers(scopeId: string, prior: SetupState, scanned: Computer[]): { computers: Computer[]; exclusions: string[] } {
@@ -58,7 +84,7 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
   }
   function startScan(scopeId: string, body: Record<string, unknown>): { view: SetupView; done: Promise<SetupView> } {
     const current = readState(scopeId);
-    if (closing || activeScan || busy.has(scopeId) || !["scan", "select", "done"].includes(current.phase)) throw new SharedHttpError(409);
+    if (closing || activeScan || pendingConfigurations.size || busy.has(scopeId) || !["scan", "select", "done"].includes(current.phase)) throw new SharedHttpError(409);
     if (typeof body.range !== "string" || body.range.length > 64 || !Number.isInteger(body.port ?? 22)
       || Number(body.port ?? 22) < 1 || Number(body.port ?? 22) > 65535) throw new SharedHttpError(400);
     const range = body.range.trim(), port = Number(body.port ?? 22);
@@ -107,7 +133,7 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
   }
   function action(scopeId: string, body: Record<string, unknown>): SetupView {
     const current = readState(scopeId);
-    if (body.revision !== current.revision || closing) throw new SharedHttpError(409);
+    if (body.revision !== current.revision || closing || pendingConfigurations.has(scopeId)) throw new SharedHttpError(409);
     if (body.action === "cancel-scan") {
       if (activeScan?.scopeId !== scopeId || current.phase !== "scanning" || !current.scan) throw new SharedHttpError(409);
       const job = activeScan; activeScan = undefined; busy.delete(scopeId); job.controller.abort();
@@ -132,19 +158,49 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
     } else throw new SharedHttpError(409);
     return write(current);
   }
-  async function inspect(scopeId: string): Promise<SetupView> {
+  async function inspect(scopeId: string, browserJob = false): Promise<SetupView> {
     const current = readState(scopeId), session = sessions.get(scopeId);
-    if (current.phase !== "inspecting" || !session || busy.has(scopeId)) throw new SharedHttpError(409);
+    if (current.phase !== "inspecting" || !session || busy.has(scopeId) || pendingConfigurations.has(scopeId) && !browserJob) throw new SharedHttpError(409);
     busy.add(scopeId);
     try {
       const priorContext = access.fleet(scopeId), prior = observations.read(priorContext);
       const found: PcAssociation[] = [], exclusions: string[] = [];
-      let inspected = 0;
+      let inspected = 0; const verifiedComputers = new Set<string>();
+      const report: SetupReport | undefined = session.browser ? { status: "running", total: current.selected.length, completed: 0, results: [] } : undefined;
       for (const computer of current.computers.filter(row => current.selected.includes(row.id))) {
+        if (closing || session.signal?.aborted) throw new Error("Setup interrupted");
         if (!current.trusted.includes(computer.id)) throw new Error("SSH identity was not approved.");
-        try { const result = await (options.inspect ?? inspectComputer)(computer, session.credential, now); found.push(...result.associations); exclusions.push(...result.exclusions); inspected++; }
-        catch { exclusions.push(`${computer.name}: SSH verification or inspection failed`); }
+        const credential = session.credentials?.get(computer.id) ?? session.credential;
+        if (!credential) {
+          const message = session.failures?.get(computer.id) ?? "Enter this computer's username and password.";
+          exclusions.push(`${computer.name}: ${message}`);
+          report?.results.push({ pcId: computer.id, name: computer.name, status: "failed", hosts: 0, message });
+        } else try {
+          const result = await (options.inspect ?? inspectComputer)(computer, credential, now, { autoSudo: !!session.browser, ...(session.signal ? { signal: session.signal } : {}) });
+          if (closing || session.signal?.aborted) throw new Error("Setup interrupted");
+          const safeText = (value: string): string => {
+            for (const secret of [credential.password, credential.passphrase, credential.privateKey, credential.sudoPassword])
+              if (secret) value = value.replaceAll(secret, "[redacted]");
+            return value;
+          };
+          found.push(...result.associations.map(row => ({ ...row, name: safeText(row.name) })));
+          exclusions.push(...result.exclusions.map(safeText)); inspected++; verifiedComputers.add(computer.id);
+          if (result.credential && session.credentials) session.credentials.set(computer.id, result.credential);
+          if (result.name) computer.name = safeText(result.name);
+          report?.results.push({ pcId: computer.id, name: computer.name, status: result.associations.length && !result.exclusions.length ? "success" : "attention",
+            hosts: result.associations.length, message: result.exclusions.length ? "Some inventory checks need attention. Review the details below."
+              : result.associations.length ? `${result.associations.length} Nosana hosts verified.` : "Sign-in worked, but no running Nosana hosts were found." });
+        } catch (error) {
+          if (closing || session.signal?.aborted) throw error;
+          const message = error instanceof SshAccessError ? error.kind === "credential-rejected" ? "Sign-in rejected. Check the username and password."
+            : error.kind === "identity-changed" ? "The SSH identity changed. This computer was not trusted or changed." : "Could not connect to this computer."
+            : "Computer inspection could not complete. Check access and try again.";
+          exclusions.push(`${computer.name}: ${message}`);
+          report?.results.push({ pcId: computer.id, name: computer.name, status: "failed", hosts: 0, message });
+        }
+        if (report) { report.completed++; state.set(key(scopeId), { ...readState(scopeId), report: structuredClone(report), updatedAtMs: now() }); }
       }
+      if (closing || session.signal?.aborted) throw new Error("Setup interrupted");
       // Conflicting public identities must never be silently assigned to a different PC.
       const unique = new Map<string, PcAssociation>();
       for (const association of [...prior.associations, ...found]) {
@@ -170,23 +226,41 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
       // Approval is bound to exact PC/key/container/public identity, never just an IP.
       for (const computer of current.computers.filter(row => current.selected.includes(row.id))) {
         const associations = found.filter(row => row.binding.pcId === computer.id);
-        if (!associations.length) continue;
         const permissionKey = `permission:${scopeId}:${computer.id}`;
         const previous = state.get<PcPermission>(permissionKey);
-        if (previous && (previous.revokedAtMs !== null || previous.paused)) { exclusions.push(`${computer.name}: prior pause or revocation retained`); continue; }
-        if (session.remember && options.vault) options.vault.save(scopeId, computer.id, session.credential);
+        if (!associations.length) {
+          // Updating a verified existing PC's login can succeed while its nodes
+          // are temporarily unavailable; keep original bindings and timestamps.
+          const credential = session.credentials?.get(computer.id);
+          if (session.browser && verifiedComputers.has(computer.id) && previous && !previous.paused && previous.revokedAtMs === null
+            && prior.associations.some(row => row.binding.pcId === computer.id && row.sshFingerprint === computer.fingerprint)
+            && credential && options.vault) options.vault.save(scopeId, computer.id, credential);
+          continue;
+        }
+        const restoring = !!session.restore?.has(computer.id);
+        if (previous && (previous.revokedAtMs !== null || previous.paused) && !restoring) {
+          exclusions.push(`${computer.name}: prior pause or revocation retained`);
+          const row = report?.results.find(row => row.pcId === computer.id); if (row) { row.status = "attention"; row.message = "Monitoring remains paused or removed. Explicitly select Restore to enable it again."; }
+          continue;
+        }
+        const credential = session.credentials?.get(computer.id) ?? session.credential;
+        if (session.remember && options.vault && credential) options.vault.save(scopeId, computer.id, credential);
         else if (session.remember) { exclusions.push(`${computer.name}: protected credential storage unavailable`); continue; }
-        const approved = new Map((previous?.associations ?? []).filter(row => {
+        const approved = new Map((restoring ? [] : previous?.associations ?? []).filter(row => {
           const next = unique.get(row.address); return next && sameBinding(row.binding, next.binding) && row.sshFingerprint === next.sshFingerprint;
         }).map(row => [row.address, row]));
         if (current.fullMonitoring && session.remember) for (const association of associations) approved.set(association.address, association);
         state.set(permissionKey, { version: 1, computer, associations: [...approved.values()], rosterRevision: context.rosterRevision,
-          automaticIp: previous?.automaticIp || current.automaticIp && session.remember,
-          rewards: previous?.rewards || current.fullMonitoring && session.remember,
-          gpu: previous?.gpu || current.fullMonitoring && session.remember,
-          approvedAtMs: current.fullMonitoring && session.remember ? now() : previous?.approvedAtMs ?? now(), revokedAtMs: null, paused: false });
+          automaticIp: !restoring && previous?.automaticIp || current.automaticIp && session.remember,
+          rewards: !restoring && previous?.rewards || current.fullMonitoring && session.remember,
+          gpu: !restoring && previous?.gpu || current.fullMonitoring && session.remember,
+          approvedAtMs: restoring || current.fullMonitoring && session.remember ? now() : previous?.approvedAtMs ?? now(), revokedAtMs: null, paused: false });
       }
       current.phase = "done"; current.savedHosts = context.addresses.length; current.inspectedPcs = inspected; current.exclusions = exclusions;
+      if (report) current.report = { ...report, status: "complete" };
+      const identities = new Map((state.get<Computer[]>(`ssh-identities:${scopeId}`) ?? []).map(row => [row.id, row]));
+      for (const computer of current.computers.filter(row => current.selected.includes(row.id))) if (identities.has(computer.id)) identities.set(computer.id, computer);
+      state.set(`ssh-identities:${scopeId}`, [...identities.values()]);
       const permissions = [...new Set([...unique.values()].map(row => row.binding.pcId))].map(pcId => state.get<PcPermission>(`permission:${scopeId}:${pcId}`));
       const enabled = permissions.filter((permission): permission is PcPermission => !!permission && permission.rosterRevision === context.rosterRevision && !permission.paused && permission.revokedAtMs === null);
       const ipCount = enabled.filter(permission => permission.automaticIp).length;
@@ -195,8 +269,92 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
       current.monitoringStatus = `Automatic IP approved on ${ipCount} PCs · rewards reads approved for ${rewardCount} hosts · GPU monitoring approved for ${gpuCount} hosts. `
         + "Existing healthy approvals are retained. Read status and freshness remain separate."
         + (!session.remember ? " New credentials were not retained." : "");
-      sessions.delete(scopeId); return write(current);
-    } finally { busy.delete(scopeId); }
+      return write(current);
+    } finally { session.credentials?.clear(); sessions.delete(scopeId); busy.delete(scopeId); }
+  }
+  function browserConfigure(scopeId: string, body: Record<string, unknown>): SetupView {
+    const current = readState(scopeId);
+    if (closing || activeScan || pendingConfigurations.size || busy.has(scopeId) || current.phase === "inspecting"
+      || body.revision !== current.revision) throw new SharedHttpError(409);
+    if (!Array.isArray(body.selected) || body.selected.length < 1 || body.selected.length > 512
+      || new Set(body.selected).size !== body.selected.length || body.selected.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
+      || body.username !== undefined && (typeof body.username !== "string" || body.username !== "" && !/^[A-Za-z0-9_.-]{1,64}$/.test(body.username))
+      || body.password !== undefined && (typeof body.password !== "string" || body.password.length > 4096)
+      || body.fullMonitoring !== undefined && typeof body.fullMonitoring !== "boolean"
+      || body.restorePcIds !== undefined && (!Array.isArray(body.restorePcIds) || new Set(body.restorePcIds).size !== body.restorePcIds.length
+        || body.restorePcIds.some(id => !(body.selected as unknown[]).includes(id)))) throw new SharedHttpError(400);
+    const username = typeof body.username === "string" ? body.username : "", password = typeof body.password === "string" ? body.password : "";
+    if (password && !username) throw new SharedHttpError(400);
+    const known = state.get<Computer[]>(`ssh-identities:${scopeId}`) ?? [];
+    const candidates = new Map(known.map(row => [row.id, row]));
+    for (const row of current.computers) candidates.set(row.id, row);
+    const selected = body.selected as string[], computers = selected.map(id => candidates.get(id));
+    if (computers.some(row => !row)) throw new SharedHttpError(400);
+    const approved = computers as Computer[];
+    // A selected scan result is the initial pin. A saved endpoint's changed key
+    // cannot be accepted through this convenient setup action.
+    if (approved.some(row => known.some(old => old.host === row.host && old.port === row.port && old.id !== row.id))) throw new SharedHttpError(409);
+    const restore = new Set((body.restorePcIds ?? []) as string[]), credentials = new Map<string, SshCredential>(), failures = new Map<string, string>();
+    for (const computer of approved) {
+      const permission = state.get<PcPermission>(`permission:${scopeId}:${computer.id}`);
+      if (permission && (permission.paused || permission.revokedAtMs !== null) && !restore.has(computer.id)) {
+        failures.set(computer.id, "This computer is paused or removed. Select Restore to enable it again."); continue;
+      }
+      if (password) credentials.set(computer.id, { username, password });
+      else {
+        let saved: SshCredential | undefined;
+        try { saved = options.vault?.read(scopeId, computer.id); } catch { /* Request fresh credentials instead. */ }
+        if (saved && (!username || saved.username === username)) credentials.set(computer.id, saved);
+      }
+    }
+    const pins = new Map(known.map(row => [row.id, row]));
+    for (const computer of approved) pins.set(computer.id, computer);
+    state.set(`ssh-identities:${scopeId}`, [...pins.values()]);
+    const controller = new AbortController();
+    sessions.set(scopeId, { credentials, failures, remember: true, browser: true, restore, signal: controller.signal });
+    const report: SetupReport = { status: "running", total: approved.length, completed: 0, results: [] };
+    const allComputers = new Map(current.computers.map(row => [row.id, row]));
+    for (const computer of approved) allComputers.set(computer.id, computer);
+    const view = write({ ...current, phase: "inspecting", computers: [...allComputers.values()], selected,
+      trusted: [...new Set([...current.trusted, ...selected])], automaticIp: true, fullMonitoring: body.fullMonitoring === true,
+      report, exclusions: [] });
+    const job = { controller, done: Promise.resolve(view) };
+    pendingConfigurations.set(scopeId, job);
+    job.done = Promise.resolve().then(() => inspect(scopeId, true)).catch(() => {
+      if (!closing) {
+        const latest = readState(scopeId), previous = latest.report ?? report;
+        return write({ ...latest, phase: "done", report: { ...previous, status: "failed" },
+          exclusions: [...latest.exclusions, "Setup could not finish. Review the results and retry the affected computers."] });
+      }
+      return read(scopeId);
+    }).finally(() => { credentials.clear(); failures.clear(); sessions.delete(scopeId); pendingConfigurations.delete(scopeId); });
+    // A disconnected browser does not cancel its authorized setup operation.
+    void job.done.catch(() => {});
+    return view;
+  }
+  function browserRemove(scopeId: string, body: Record<string, unknown>): SetupView {
+    const current = readState(scopeId);
+    if (closing || activeScan || pendingConfigurations.size || busy.has(scopeId) || body.revision !== current.revision) throw new SharedHttpError(409);
+    if (typeof body.pcId !== "string" || !/^[a-f0-9]{64}$/.test(body.pcId)) throw new SharedHttpError(400);
+    const pcId = body.pcId, priorContext = access.fleet(scopeId), prior = observations.read(priorContext);
+    const removed = prior.associations.filter(row => row.binding.pcId === pcId), permissionKey = `permission:${scopeId}:${pcId}`;
+    const permission = state.get<PcPermission>(permissionKey);
+    const computer = permission?.computer ?? (state.get<Computer[]>(`ssh-identities:${scopeId}`) ?? []).find(row => row.id === pcId);
+    if (!computer || !removed.length && !permission) throw new SharedHttpError(404);
+    // Fence in-flight work and erase this sign-in before changing membership.
+    if (permission) state.set(permissionKey, { ...permission, paused: true, revokedAtMs: permission.revokedAtMs ?? now() });
+    options.vault?.forget(scopeId, pcId);
+    const removedAddresses = new Set(removed.map(row => row.address)), kept = prior.associations.filter(row => row.binding.pcId !== pcId);
+    const context = access.setFleet(scopeId, priorContext.addresses.filter(address => !removedAddresses.has(address)));
+    observations.associate(context, kept); observations.carry(context, prior);
+    for (const otherId of new Set(kept.map(row => row.binding.pcId))) {
+      const otherKey = `permission:${scopeId}:${otherId}`, previous = state.get<PcPermission>(otherKey);
+      if (previous?.rosterRevision === priorContext.rosterRevision) state.set(otherKey, { ...previous, rosterRevision: context.rosterRevision });
+    }
+    return write({ ...current, phase: "done", selected: current.selected.filter(id => id !== pcId), savedHosts: context.addresses.length,
+      exclusions: [], monitoringStatus: "Computer removed. Monitoring stopped and its stored sign-in was forgotten. Other computers are unchanged.",
+      report: { status: "complete", total: 1, completed: 1, results: [{ pcId, name: removed[0]?.name ?? computer.name,
+        status: "success", hosts: removed.length, message: `Removed ${removed.length} hosts from the fleet. Monitoring stopped and the stored sign-in was forgotten.` }] } });
   }
   async function control(body: Record<string, unknown>): Promise<unknown> {
     if (typeof body.scopeId !== "string") throw new SharedHttpError(400);
@@ -248,7 +406,8 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
   }
   async function close(): Promise<void> {
     closing = true; terminals.clear(); const job = activeScan;
-    job?.controller.abort(); await Promise.allSettled([...pendingScans]);
+    job?.controller.abort(); for (const pending of pendingConfigurations.values()) pending.controller.abort();
+    await Promise.allSettled([...pendingScans, ...[...pendingConfigurations.values()].map(pending => pending.done)]); sessions.clear();
   }
-  return { read, action, control, inspect, close };
+  return { read, action, control, inspect, browserConfigure, browserRemove, close };
 }

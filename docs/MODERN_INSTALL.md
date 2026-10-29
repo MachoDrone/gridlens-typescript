@@ -3,86 +3,91 @@
 The modern backend is separate from the loopback developer preview and the legacy
 installer. Its TypeScript terminal coordinator manages a single collection owner
 and an unprivileged HTTPS gateway on a chosen PC, which may also run Nosana. This
-source revision implements development update **0.1.0-dev.6**. Published dev.4
-provides direct private-network browser access. This update completes all setup
-in one terminal before handing the saved fleet to the browser;
+source revision implements development update **0.1.0-dev.7**. Installation ends
+with the dashboard address; computer selection, sign-in and setup results belong
+in the browser. Published dev.4 provides direct private-network browser access;
 earlier published releases remain immutable.
 The source `scripts/modern-start.sh` intentionally refuses to run until the release
 builder supplies a tested executable checksum and pinned GitHub release tag.
 
 ## Operator flow
 
-### Browser access through an existing VPN
+### Install, then open the browser
 
-The opt-in `--vpn-web` mode adds a private HTTP browser address without certificate
-installation. Use it only on your trusted private LAN/existing VPN: the VPN protects
-remote traffic, while the local LAN leg uses HTTP. It creates a separate labeled,
-unprivileged gateway sharing the same collection owner and permissions. It does
-not configure a VPN, expose a public address, or duplicate collection. The existing
-HTTPS endpoint and its certificate remain available for native Android pairing.
+Run the signed release launcher with `--vpn-web` on the chosen backend PC. Docker
+must already be available. Choose its assigned private address and the **Web
+dashboard port**; Enter accepts the shown recommendation. This is the actual HTTP
+port used in the final browser URL. A separate available HTTPS companion port is
+chosen automatically. Existing installations keep their saved addresses and ports.
+The optional `--web-port PORT` selects a port explicitly.
 
-Run the release launcher with `--vpn-web` (optionally `--web-port PORT`). On an
-existing instance it retains the HTTPS address and normally uses the next port
-for the browser gateway. Reruns retain the saved browser port; occupied ports are
-reported without stopping another service. The persistent container uses
-`unless-stopped` and retains its own endpoint metadata. Enabling dev.4 private
-access upgrades an older owner through the matched image/state recovery process,
-then replaces only a verified owned browser gateway, retaining its saved port.
-Changed isolation or an attempted downgrade is refused.
+The terminal uses green for Ready/success, blue for the URL and actionable
+information, amber for work or attention, red for failures, and muted text for
+retained settings. Choices and the final result have spacing for readability.
+Every color has a text meaning; `NO_COLOR` disables ANSI color without hiding status.
+Once the backend is ready, the terminal prints the ordinary dashboard URL and
+returns to the shell. Computer credentials and enrollment are not CLI install steps.
 
-After the terminal wizard completes, setup prints **OPEN GRIDLENS** followed by
-the ordinary dashboard address. Open
-or bookmark that same address on any PC or phone on the existing private network
-or VPN. There is no browser code, pairing step, cookie requirement or sign-in
-expiry in this mode. `--connect` prints the same address. Old `/connect` links
-redirect to Fleet. Anyone able to reach this private address has operator access
-to its configured fleet; network access is the browser's authorization boundary.
+Open or bookmark that URL on PCs and phones using your existing private LAN/VPN.
+There are no browser connection codes, pairing steps or sign-in expiry in this
+mode. `--connect` prints the same address. Anyone who can reach this private
+address has operator access to its configured fleet. The VPN protects its remote
+portion; the local LAN leg is HTTP and is unencrypted, including browser password
+submissions. Saving credentials encrypted does not encrypt that network leg.
 
-The owner records a dedicated revocable grant for this gateway and fleet. Its
-secret is held only in a protected named volume mounted read-only by that gateway;
-the owner retains its hash. The grant follows that fleet's current roster without
-re-pairing browsers. Reruns retain it and cannot revive a revoked grant. Explicit
-monitoring approvals and terminal-only SSH/password entry remain required.
-Native Android's separate HTTPS pairing, device revocation and exact roster
-authorization are unchanged. HTTPS browser access also retains its pairing flow.
+The private web gateway shares the existing collection owner, cache and permissions;
+it does not change VPN settings, expose a public address or duplicate collection.
+The HTTPS endpoint and native Android pairing remain separate. A protected
+server-side grant gives the web gateway access to its fleet's current roster.
+Reruns cannot revive a revoked gateway grant.
 
-### Complete setup in the terminal
+### Manage computers in the browser
 
-Run the installer on the chosen backend PC and finish its numbered steps there.
-There is no required switch to the browser during onboarding. Press Enter to use
-the default shown in brackets, or type another choice.
+Open **Manage computers** above Fleet. Saved PCs show their host counts and
+monitoring status, with **Update sign-in** and **Remove** actions. To add PCs,
+choose **Add computers**, accept or edit the verified network suggestion, and
+choose **Search network**. The page identifies the backend PC doing the search.
+Suggestions come from its actual host interface, never the viewing phone or a
+container bridge. Search retains the existing private-IP or IPv4 /23–/32 limit,
+512-address bound, eight simultaneous probes and per-probe timeout. Progress,
+cancel, retry and partial-IP/name filtering stay on the same page.
 
-1. **Find computers.** Accept or edit the suggested private network and SSH port
-   (default 22). Suggestions come only from the actual assigned host interface;
-   a container bridge or viewing device is not used to guess the LAN. The terminal
-   shows search progress and found counts. Existing limits remain one private IP
-   or IPv4 /23–/32, up to 512 addresses, eight probes at once and the same timeout.
-2. **Choose computers.** Use the one numbered list. Numbers or ranges toggle
-   selections; `/name` or `/IP` filters the list without losing selections. The
-   terminal shows a prominent selected count and confirms **Selection complete**.
-   Confirm new SSH identities once; saved matching identities skip that review.
-3. **Sign in.** Enter the computer username and password or SSH key, optional
-   sudo credentials, and the encrypted-credential retention choice in the same
-   terminal. Passwords and key files are never entered in the browser.
-4. **Choose monitoring and save.** **Inspect + automatic IP** is the recommended
-   default. **Inspect only** is also available. Full rewards/GPU monitoring needs
-   a separate explicit approval and defaults to **No**. The terminal performs
-   inspection and reports saved-host/computer counts and any exclusions.
+Select the computers and enter their computer username and password. One sign-in
+can be applied to the selection; leave the password blank to reuse saved sign-ins
+where available. Choose **Set up selected computers**. That action records new
+selected SSH identities, checks access and performs the required inspection.
+Changed saved SSH identities remain blocked. GridLens first tries ordinary access,
+then fixed sudo read commands when required, using the submitted computer password
+if needed. It does not require passwordless sudo or ask for a separate terminal
+session. Missing optional host Podman is not itself a setup failure.
 
-An existing saved fleet defaults to **Finish**; choose **Add computers** to extend
-it. Empty or failed searches and incomplete inspection results offer retry or stop
-choices. `q` at the offered prompts pauses setup so the same command can resume;
-Ctrl+C during search cancels that search. Saved identities, fleet membership and
-permissions remain. Discovery alone never grants SSH access or changes telemetry
-membership. Only completed setup prints the browser address. Then open Fleet to
-view the saved hosts.
+Successful setup saves verified credentials encrypted in the owner, enables
+automatic IP monitoring and saves every verified Nosana host found. The separate
+**Also enable rewards and GPU monitoring** option is unchecked for new computers;
+existing approvals remain. Inspection does not start, restart or rename Nosana
+workloads, claim rewards or transfer funds. The final report shows per-PC success,
+failures, attention items and saved-host counts. Failed computers can be retried
+without repeating successful setup on the rest.
 
-The browser's **Manage computers** page shows status and the installer command for
-adding or changing computers. It does not ask you to select computers, sign in or
-approve inspection there. Native Android's existing HTTPS workflow is separate.
+**Update sign-in** reuses or changes a PC's credentials. **Remove** explicitly
+stops its monitoring, forgets its saved sign-in and removes its hosts from the
+fleet while retaining other PCs and the safety ledger. Removed computers are
+hidden by default; **Show removed computers** and explicit re-enable selection
+allow a deliberate restore. An ordinary rerun never revives paused or revoked
+monitoring silently. Discovery alone does not grant SSH access.
 
-`--connect` prints the permanent private address and exits; `--no-setup` explicitly
-skips the wizard for automation. `--ssh-sign-in` enters the terminal setup wizard.
+The latest operator requirement explicitly permits browser username/password
+entry and supersedes the earlier terminal-only password workflow. Passwords use
+a bounded same-origin POST and are cleared from the form after submission. They
+are not put in URLs, logs or browser storage. The gateway forwards them only to
+the restricted owner operation; it has no Docker socket, SSH private keys,
+credential volume, terminal-control socket or arbitrary shell interface. Only the
+owner retains verified credentials, using authenticated encryption in its protected
+volume. SSH private-key upload is not part of browser setup.
+
+Advanced terminal commands remain for compatibility, but ordinary PC-list updates
+and sign-in happen entirely in the browser. `--no-setup` is no longer needed for
+the normal install-only flow.
 
 ### HTTPS access
 
@@ -150,11 +155,10 @@ The generated leaf certificate lasts one year; renewal and trust
 rotation require an explicit identity-preserving certificate workflow and remain
 an operational follow-up before a long-lived release.
 
-The terminal creates the initial empty `default` fleet and completes onboarding
-before its HTTPS browser handoff. HTTPS pairing retains its short-lived operator
-connection code; this is separate from the no-code private-VPN browser address.
-Computer selection, identity review and monitoring approval occur in the terminal
-and remain separate from data-cache reads.
+The installer creates the initial empty `default` fleet. Separately paired HTTPS
+access retains its short-lived operator connection code; this is independent of
+the no-code private-VPN browser address. Computer selection, sign-in and monitoring
+approval happen in browser Manage computers and remain separate from cache reads.
 
 Additional coordinator actions reuse the same installed instance:
 
@@ -164,14 +168,14 @@ Additional coordinator actions reuse the same installed instance:
 ./gridlens-coordinator-linux-x64 --ssh-sign-in
 ```
 
-Use only an explicitly chosen network range. Scanning occurs on the backend PC.
-Select computers, confirm new SSH identities, enter credentials and approve
-inspection in the same terminal. Computer sudo passwords also stay there. After
-fleet coverage changes, private-VPN browser access keeps its ordinary address;
-separately paired HTTPS viewers need authorization for the new roster revision.
-Only the owner receives credentials, through a private control socket and Docker
-stdin. Keys and passwords never become process arguments or gateway inputs.
-Remembered credentials stay in the owner's encrypted credential volume.
+These advanced commands remain compatible with the terminal workflow. Use only an
+explicitly chosen network range. Normal setup uses the browser manager described
+above. After fleet coverage changes, private-VPN browser access keeps its ordinary
+address; separately paired HTTPS viewers need authorization for the new roster
+revision. Advanced key/password input travels through Docker stdin to the owner's
+control socket; browser passwords travel through its restricted read/setup socket.
+Neither path puts passwords in process arguments. Verified retained credentials
+stay in the owner's encrypted credential volume.
 
 ## Ownership and recovery
 
@@ -187,10 +191,11 @@ SSH credential volume, state database, control socket or shell API.
 | `config` volume | Installer transaction, chosen address/port and identity | Retain |
 | `tls` volume | HTTPS leaf certificate/key | Retain |
 | `credentials` volume | Owner-only encrypted SSH credential state | Retain |
-| `read-ipc` volume | Restricted owner socket available to the gateway | Retain |
+| `read-ipc` volume | Restricted reads and bounded browser setup operations | Retain |
 | `control-ipc` volume | Terminal-only setup socket | Retain; never mount in gateway |
+| `vpn-auth` volume | Private-network gateway grant, mounted read-only by that gateway | Retain; revocation remains in the current ledger |
 
-Both runtime containers run as UID/GID 1000 with a read-only root filesystem,
+Runtime containers run as UID/GID 1000 with a read-only root filesystem,
 all capabilities dropped, `no-new-privileges`, a PID limit and bounded temporary
 memory. Only the gateway publishes the explicitly selected private IP/port.
 The short-lived initialization helper has no network and uses narrow container

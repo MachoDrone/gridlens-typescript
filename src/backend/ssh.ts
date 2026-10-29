@@ -134,30 +134,62 @@ export function nodeRuntime(binding: PcAssociation["binding"]): string {
   return binding.wrapperId ? `/usr/bin/docker exec ${binding.wrapperId} /usr/bin/podman` : `/usr/bin/${binding.runtime}`;
 }
 export const nodeAddressCommand = (binding: PcAssociation["binding"]): string => `${nodeRuntime(binding)} exec ${binding.nodeContainerId} /usr/bin/env -i /usr/local/bin/node -e ${shellQuote(`(${addressReader.toString()})()` )}`;
-export async function inspectComputer(computer: Computer, credential: SshCredential, now = Date.now): Promise<{ associations: PcAssociation[]; exclusions: string[] }> {
-  return withSsh(computer, credential, async run => {
+export interface ComputerInspection {
+  associations: PcAssociation[]; exclusions: string[]; name?: string; credential?: SshCredential;
+}
+export interface InspectionOptions { autoSudo?: boolean; signal?: AbortSignal }
+/** The injectable runner exercises only the fixed inventory/read commands below. */
+export async function inspectConnectedComputer(computer: Computer, credential: SshCredential, run: SshRun,
+  now = Date.now, options: InspectionOptions = {}): Promise<ComputerInspection> {
     const associations: PcAssociation[] = [], exclusions: string[] = [];
-    const prefix = credential.sudoPassword !== undefined ? "/usr/bin/sudo -S -p '' -- " : "";
-    const options = credential.sudoPassword !== undefined ? { input: credential.sudoPassword + "\n" } : {};
-    const nameResult = await run("/bin/hostname", { maximum: 256 });
+    const used = { ...credential };
+    if (options.autoSudo) delete used.sudoPassword;
+    let prefix = !options.autoSudo && credential.sudoPassword !== undefined ? "/usr/bin/sudo -S -p '' -- " : "";
+    let input = prefix ? credential.sudoPassword + "\n" : undefined;
+    const execute: SshRun = async (command, settings) => { options.signal?.throwIfAborted(); return run(command, settings); };
+    const nameResult = await execute("/bin/hostname", { maximum: 256 });
     const name = nameResult.code === 0 && /^[A-Za-z0-9_.-]{1,128}$/.test(nameResult.stdout.trim()) ? nameResult.stdout.trim() : computer.name;
     const scan = async (runtime: "docker" | "podman", wrapperId: string | null): Promise<void> => {
+      // Native Podman is optional when Docker hosts the Nosana Podman wrapper.
+      // Check existence without sudo so an absent optional runtime is not a failure.
+      if (runtime === "podman" && !wrapperId && (await execute("/usr/bin/test -x /usr/bin/podman", { maximum: 256 })).code !== 0) return;
       const base = wrapperId ? `/usr/bin/docker exec ${wrapperId} /usr/bin/podman` : `/usr/bin/${runtime}`;
-      const listed = await run(`${prefix}${base} ps --no-trunc --format '{{.ID}}\t{{.Image}}\t{{.Names}}'`, { ...options, maximum: 512 * 1024 });
-      if (listed.code !== 0) { exclusions.push(`${name}: ${runtime} inventory unavailable`); return; }
+      const command = `${base} ps --no-trunc --format '{{.ID}}\t{{.Image}}\t{{.Names}}'`;
+      let listed = await execute(prefix + command, { ...(input === undefined ? {} : { input }), maximum: 512 * 1024 });
+      if (listed.code === 127 && !wrapperId) { exclusions.push(`${name}: ${runtime === "docker" ? "Docker" : "Podman"} command is not available on this computer.`); return; }
+      if (listed.code !== 0 && options.autoSudo && !prefix && !wrapperId) {
+        const withoutPassword = await execute(`/usr/bin/sudo -n -- ${command}`, { maximum: 512 * 1024 });
+        if (withoutPassword.code === 0) { listed = withoutPassword; prefix = "/usr/bin/sudo -n -- "; used.sudoPassword = ""; }
+        else {
+          const sudoPassword = credential.password ?? credential.sudoPassword;
+          if (sudoPassword !== undefined) {
+            const withPassword = await execute(`/usr/bin/sudo -S -p '' -- ${command}`, { input: sudoPassword + "\n", maximum: 512 * 1024 });
+            if (withPassword.code === 0) { listed = withPassword; prefix = "/usr/bin/sudo -S -p '' -- "; input = sudoPassword + "\n"; used.sudoPassword = sudoPassword; }
+          }
+        }
+      }
+      if (listed.code !== 0) {
+        exclusions.push(wrapperId ? `${name}: Could not read the Nosana Podman container. Check Docker access and that container's service.`
+          : `${name}: ${runtime === "docker" ? "Docker" : "Podman"} access failed${options.autoSudo ? ", including administrator access" : ""}. Check the computer account's permissions.`);
+        return;
+      }
       for (const container of inventory(listed.stdout)) {
         if (!wrapperId && runtime === "docker" && image(container.image, "podman")) { await scan("podman", container.id); continue; }
         if (!image(container.image, "nosana-node")) continue;
         const binding = { pcId: computer.id, runtime, wrapperId, nodeContainerId: container.id };
-        const result = await run(prefix + nodeAddressCommand(binding), { ...options, maximum: 256 });
+        const result = await execute(prefix + nodeAddressCommand(binding), { ...(input === undefined ? {} : { input }), maximum: 256 });
         const address = result.stdout.trim();
         if (result.code !== 0 || !isMetadataAddress(address)) { exclusions.push(`${name}: ${container.name} public identity unavailable`); continue; }
-        const gpu = await run(`${prefix}${base} exec ${container.id} /usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader`, { ...options, maximum: 8192 });
+        const gpu = await execute(`${prefix}${base} exec ${container.id} /usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader`, { ...(input === undefined ? {} : { input }), maximum: 8192 });
         const gpuUuids = gpu.code === 0 ? gpu.stdout.trim().split(/\r?\n/).map(value => value.trim().toLowerCase().replace(/^gpu-/, "GPU-")).filter(value => GPU_UUID.test(value)) : [];
         associations.push({ address, binding, name, sshFingerprint: computer.fingerprint, verifiedAtMs: now(), privateIp: privateIp(computer.host) ? computer.host : null, gpuUuids });
       }
     };
     await scan("docker", null); await scan("podman", null);
-    return { associations, exclusions };
-  });
+    return { associations, exclusions, name, credential: used };
+}
+export async function inspectComputer(computer: Computer, credential: SshCredential, now = Date.now,
+  options: InspectionOptions = {}): Promise<ComputerInspection> {
+  options.signal?.throwIfAborted();
+  return withSsh(computer, credential, run => inspectConnectedComputer(computer, credential, run, now, options));
 }

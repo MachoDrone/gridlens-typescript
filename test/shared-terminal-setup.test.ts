@@ -44,13 +44,13 @@ test("terminal setup actions reuse bounded discovery, identity and approval vali
   } finally { await service.setup.close(); await state.close(); await rm(directory, { recursive: true }); }
 });
 
-test("deployed setup pages explicitly select terminal onboarding without changing native sign-in HTML", async () => {
+test("deployed setup pages select browser management without changing native sign-in HTML", async () => {
   const html = await readFile(new URL("../src/preview/shared-setup.html", import.meta.url));
   const gateway = createGatewayIntegration("/unused", html, Buffer.from(""));
   let body: Buffer | undefined;
   const handled = await gateway.handleRequest!({ url: "/setup", method: "GET", headers: {} } as never,
     { writeHead() {}, end(value: Buffer) { body = value; } } as never);
   assert.equal(handled, true);
-  assert.match(body!.toString(), /name="gridlens-setup-mode" content="terminal"/);
+  assert.match(body!.toString(), /name="gridlens-setup-mode" content="browser"/);
   assert.match(body!.toString(), /<section id="login">/);
 });

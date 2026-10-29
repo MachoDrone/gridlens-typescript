@@ -8,17 +8,17 @@ import type { PrivateState } from "./access.ts";
 import { SharedHttpError } from "./ipc.ts";
 import { createObservationStore } from "./observations.ts";
 import { createSetup } from "./setup.ts";
-import type { scanComputers } from "./ssh.ts";
+import type { scanComputers, inspectComputer } from "./ssh.ts";
 import type { CredentialVault } from "./credential-vault.ts";
 import type { PcPermission } from "./pc-monitor.ts";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
-  now = Date.now, requestHistory, providerWaits = () => [], vault, scan,
+  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect,
 }: { now?: () => number; requestHistory?: (context: FleetContext, addresses: string[], refresh: boolean) => Promise<void>;
-  providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers } = {}) {
+  providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer } = {}) {
   const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
-  const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}) });
+  const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}), ...(inspect ? { inspect } : {}) });
   async function read(body: Record<string, unknown>): Promise<unknown> {
     try {
       if (body.operation === "pair") {
@@ -64,6 +64,13 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
         return { queued: !!requestHistory };
       }
       access.requireAccess(body.token, "operator");
+      if (body.operation === "setup-configure" || body.operation === "setup-remove") {
+        const allowed = body.operation === "setup-configure"
+          ? ["operation", "token", "revision", "selected", "username", "password", "fullMonitoring", "restorePcIds"]
+          : ["operation", "token", "revision", "pcId"];
+        if (Object.keys(body).some(field => !allowed.includes(field))) throw new SharedHttpError(400);
+        return body.operation === "setup-configure" ? setup.browserConfigure(context.scopeId, body) : setup.browserRemove(context.scopeId, body);
+      }
       if (body.operation === "monitoring") {
         const pcs = new Map(observations.read(context).associations.map(row => [row.binding.pcId, row.name]));
         return { pcs: [...pcs].map(([pcId, name]) => {

@@ -4,6 +4,7 @@ import { createServer, isIP } from "node:net";
 import { InstallerError } from "./release.ts";
 import { checked } from "./docker.ts";
 import type { DockerRunner } from "./docker.ts";
+import { cliSection, cliText } from "./cli-format.ts";
 
 export interface PrivateEndpoint {
   address: string;
@@ -16,7 +17,7 @@ export interface PrivateEndpoints {
   recommendedIndex: number | null;
   exclusions: { interfaceName: string; reason: "container-interface" | "loopback" | "link-local" | "outside-private-range" }[];
 }
-export interface SelectionPrompts { ask(prompt: string): Promise<string>; print(text: string): void }
+export interface SelectionPrompts { color?: boolean; ask(prompt: string): Promise<string>; print(text: string): void }
 export type PortProbeResult = "available" | "busy" | "unavailable";
 export type PortProbe = (address: string, port: number) => Promise<PortProbeResult>;
 export interface NetworkExclusions { blockedInterfaces: readonly string[]; blockedAddresses: readonly string[] }
@@ -103,17 +104,22 @@ export function discoverPrivateEndpoints(interfaces: NodeJS.Dict<NetworkInterfac
 }
 
 export async function choosePrivateEndpoint(terminal: SelectionPrompts, available = discoverPrivateEndpoints()): Promise<PrivateEndpoint> {
-  terminal.print("Choose this PC's dashboard address. These addresses are assigned on this PC; choose the one your browser and phone can reach over your existing private network or VPN.");
-  terminal.print("Localhost, link-local/public addresses and known Docker/Podman/container interfaces are excluded. Container and VPN transport addresses are not inferred as your dashboard address.");
+  cliSection(terminal, "Dashboard address");
+  terminal.print("Choose the address your PC or phone can reach on your existing LAN or VPN.");
+  terminal.print("");
   if (!available.choices.length) throw new InstallerError("No eligible private address is assigned on this PC. Connect this PC to your existing private network or VPN, then run setup again. Public-only installation is not supported yet; GridLens will not invent an address or change networking.");
-  for (const [index, choice] of available.choices.entries()) terminal.print(`${index + 1}) ${choice.address} — ${choice.interfaceName} (${choice.family}${choice.kind === "vpn" ? ", existing VPN interface" : ""})${index === available.recommendedIndex ? " — recommended" : ""}`);
+  for (const [index, choice] of available.choices.entries()) {
+    terminal.print(cliText(terminal, index === available.recommendedIndex ? "success" : "action",
+      `${index + 1}) ${choice.address}${choice.kind === "vpn" ? " · VPN" : ""}${index === available.recommendedIndex ? " — recommended" : ""}`));
+    terminal.print("");
+  }
   const hint = available.recommendedIndex === null ? "Choose address number: " : `Choose address number [${available.recommendedIndex + 1}, recommended]: `;
   for (;;) {
-    const answer = (await terminal.ask(hint)).trim();
+    const answer = (await terminal.ask(cliText(terminal, "action", hint))).trim();
     const number = answer === "" && available.recommendedIndex !== null ? available.recommendedIndex + 1 : /^\d+$/.test(answer) ? Number(answer) : 0;
     const selected = available.choices[number - 1];
     if (Number.isSafeInteger(number) && selected) return selected;
-    terminal.print(`Enter a number from 1 to ${available.choices.length}${available.recommendedIndex === null ? ". No address was selected automatically." : ", or press Enter for the recommended address."}`);
+    terminal.print(cliText(terminal, "pending", `Enter a number from 1 to ${available.choices.length}${available.recommendedIndex === null ? ". No address was selected automatically." : ", or press Enter for the recommended address."}`));
   }
 }
 
@@ -147,20 +153,45 @@ export async function recommendPort(address: string, { preferred = 8789, alterna
   }
   return null;
 }
-export async function chooseDashboardPort(terminal: SelectionPrompts, address: string, { preferred = 8789, probe = probeBindPort }: {
-  preferred?: number; probe?: PortProbe;
+export async function chooseDashboardPort(terminal: SelectionPrompts, address: string, { preferred = 8789, probe = probeBindPort, label = "Dashboard HTTPS port" }: {
+  preferred?: number; probe?: PortProbe; label?: string;
 } = {}): Promise<number> {
   let recommended = await recommendPort(address, { preferred, probe });
-  terminal.print("The port check uses the selected address on this PC. Other services will not be stopped or changed.");
-  if (recommended === null) terminal.print(`No free port was found from ${preferred} through ${Math.min(65535, preferred + 10)}. Choose another unused port.`);
+  terminal.print("");
+  if (recommended === null) terminal.print(cliText(terminal, "pending", `No free port was found from ${preferred} through ${Math.min(65535, preferred + 10)}. Choose another unused port.`));
   for (;;) {
-    const answer = (await terminal.ask(recommended === null ? "Dashboard HTTPS port: " : `Dashboard HTTPS port [${recommended}, recommended]: `)).trim();
+    const answer = (await terminal.ask(cliText(terminal, "action", recommended === null ? `${label}: ` : `${label} [${recommended}, recommended]: `))).trim();
     const port = answer === "" ? recommended : /^\d+$/.test(answer) ? Number(answer) : null;
-    if (port === null || !Number.isInteger(port) || port < 1024 || port > 65535) { terminal.print("Enter a port number from 1024 through 65535."); continue; }
+    if (port === null || !Number.isInteger(port) || port < 1024 || port > 65535) { terminal.print(cliText(terminal, "pending", "Enter a port number from 1024 through 65535.")); continue; }
     const result = await probe(address, port);
     if (result === "available") return port;
     if (result === "unavailable") throw new InstallerError("The selected address cannot be bound on this PC. Check its private network or VPN connection before retrying setup.");
-    terminal.print(`Port ${port} is already in use on ${address}. Choose another port; the existing service will be left running.`);
+    terminal.print(cliText(terminal, "pending", `Port ${port} is already in use on ${address}. Choose another port; the existing service will be left running.`));
     recommended = await recommendPort(address, { preferred, probe });
   }
+}
+
+/** The operator chooses the browser's actual HTTP port. HTTPS gets a separate
+ * available companion port without another normal-install question. */
+export async function choosePrivateWebPorts(terminal: SelectionPrompts, address: string, {
+  requestedWebPort, preferred = 8789, probe = probeBindPort,
+}: { requestedWebPort?: number; preferred?: number; probe?: PortProbe } = {}): Promise<{ webPort: number; httpsPort: number }> {
+  let webPort: number;
+  if (requestedWebPort === undefined) webPort = await chooseDashboardPort(terminal, address, { preferred, probe, label: "Web dashboard port" });
+  else {
+    if (!Number.isInteger(requestedWebPort) || requestedWebPort < 1024 || requestedWebPort > 65535) throw new InstallerError("Use --web-port with a port from 1024 through 65535.");
+    const status = await probe(address, requestedWebPort);
+    if (status !== "available") throw new InstallerError(status === "busy" ? "The requested web dashboard port is already in use. Choose another --web-port."
+      : "The selected private address cannot be used on this PC. Check its network connection.");
+    webPort = requestedWebPort;
+  }
+  const direction = webPort <= 65524 ? 1 : -1;
+  for (let offset = 1; offset <= 11; offset++) {
+    const port = webPort + direction * offset;
+    if (port < 1024 || port > 65535) continue;
+    const status = await probe(address, port);
+    if (status === "available") return { webPort, httpsPort: port };
+    if (status === "unavailable") throw new InstallerError("The selected private address cannot be used on this PC. Check its network connection.");
+  }
+  throw new InstallerError("No free companion port is available near the selected web port. Choose another web dashboard port and rerun installation.");
 }

@@ -41,7 +41,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
   const privateNetwork = privateNetworkToken !== undefined;
   const tokenFor = (request: IncomingMessage): string | null => privateNetworkToken ?? requestToken(request, transport);
   setupHtml = Buffer.from(setupHtml.toString("utf8")
-    .replace("</head>", '<meta name="gridlens-setup-mode" content="terminal"></head>'));
+    .replace("</head>", '<meta name="gridlens-setup-mode" content="browser"></head>'));
   if (privateNetwork) setupHtml = Buffer.from(setupHtml.toString("utf8")
     .replace("</head>", '<meta name="gridlens-private-network" content="1"></head>')
     .replace('<section id="login">', '<section id="login" hidden>'));
@@ -117,16 +117,25 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         const token = tokenFor(request), route = url.pathname.slice("/api/shared/".length);
         if (privateNetwork && ["pair", "login", "pair-code", "devices", "revoke"].includes(route)) throw new SharedHttpError(404);
         const getOperations: Record<string, string> = { status: "status", capabilities: "status", observations: "observations", devices: "devices", setup: "setup", monitoring: "monitoring" };
-        const postOperations: Record<string, string> = { pair: "pair", login: "pair", "pair-code": "pair-code", revoke: "revoke", "setup-action": "setup-action", "gpu-history": "gpu-history", "monitoring-action": "monitoring-action" };
+        const postOperations: Record<string, string> = { pair: "pair", login: "pair", "pair-code": "pair-code", revoke: "revoke", "setup-action": "setup-action",
+          "setup-configure": "setup-configure", "setup-remove": "setup-remove", "gpu-history": "gpu-history", "monitoring-action": "monitoring-action" };
         if (request.method === "GET" && getOperations[route] && !url.search) {
           sendJson(response, 200, await call({ operation: getOperations[route], token })); return true;
         }
         if (request.method !== "POST" || !postOperations[route] || url.search) throw new SharedHttpError(405);
-        const input = await readJson(request);
+        // These browser-only mutations require an Origin. The common server has
+        // already checked it against the configured origin, never a proxy header.
+        const browserSetup = route === "setup-configure" || route === "setup-remove";
+        if (browserSetup && typeof request.headers.origin !== "string") throw new SharedHttpError(403);
+        const input = await readJson(request, browserSetup ? 64 * 1024 : 256 * 1024);
         const allowed: Record<string, string[]> = { pair: ["version", "code", "deviceName"], login: ["version", "code", "deviceName"],
-          "pair-code": [], revoke: ["deviceId"], "setup-action": ["revision", "action", "selected", "automaticIp", "fullMonitoring", "range", "port"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"] };
+          "pair-code": [], revoke: ["deviceId"], "setup-action": ["revision", "action", "selected", "automaticIp", "fullMonitoring", "range", "port"],
+          "setup-configure": ["revision", "selected", "username", "password", "fullMonitoring", "restorePcIds"],
+          "setup-remove": ["revision", "pcId"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"] };
         if (Object.keys(input).some(key => !allowed[route]!.includes(key))) throw new SharedHttpError(400);
-        const result = await call<Record<string, unknown>>({ ...input, operation: postOperations[route], token });
+        let result: Record<string, unknown>;
+        try { result = await call<Record<string, unknown>>({ ...input, operation: postOperations[route], token }); }
+        finally { if (route === "setup-configure") delete input.password; }
         if (route === "login") {
           if (typeof result.token !== "string") throw new SharedHttpError(502);
           response.setHeader("Set-Cookie", `${cookieName(transport)}=${result.token}; Path=/;${transport === "https" ? " Secure;" : ""} HttpOnly; SameSite=Strict`);
