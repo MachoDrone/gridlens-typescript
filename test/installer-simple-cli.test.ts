@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { cliColorEnabled, cliFailure, cliSection, cliText } from "../src/installer/cli-format.ts";
-import { choosePrivateWebPorts } from "../src/installer/network-selection.ts";
+import { choosePrivateEndpoint, choosePrivateWebPorts } from "../src/installer/network-selection.ts";
 import { printBrowserReady } from "../src/installer/terminal.ts";
 
 function terminal(answers: string[] = []) {
@@ -31,7 +31,7 @@ test("Ready output provides one plain URL and browser PC management without anot
   const t = terminal(); cliSection(t, "GridLens installation"); printBrowserReady(t, "http://192.168.42.2:8790");
   assert.deepEqual(t.asked, []);
   assert.deepEqual(t.output.filter(line => line.startsWith("http")), ["http://192.168.42.2:8790/"]);
-  assert.ok(t.output.includes("Ready.")); assert.ok(t.output.includes("Open Manage computers to add or update PCs."));
+  assert.ok(t.output.includes("Ready.")); assert.ok(t.output.includes("Open this address, then choose Manage computers to find, add or update PCs."));
   assert.equal(t.output[0], ""); assert.equal(t.output[2], "");
   assert.ok(t.output.filter(line => line === "").length >= 4);
   assert.doesNotMatch(t.output.join("\n"), /keep.*terminal|computer password|selection complete|monitoring \[|five minutes|#code=/i);
@@ -45,9 +45,23 @@ test("the single port prompt chooses the actual browser port and a separate HTTP
   } });
   assert.deepEqual(result, { webPort: 8790, httpsPort: 8792 });
   assert.equal(t.asked.length, 1); assert.match(t.asked[0]!, /^Web dashboard port \[8790, recommended\]/);
+  assert.ok(t.output.includes("The port is the number after ':' in your dashboard address."));
+  assert.ok(t.output.includes("The suggested port is free. Press Enter to use it, or enter another port."));
   assert.ok(probes.includes(8791) && probes.includes(8792));
   printBrowserReady(t, `http://192.168.42.2:${result.webPort}`);
   assert.ok(t.output.includes("http://192.168.42.2:8790/"));
+});
+
+test("first installation explains both choices without adding questions", async () => {
+  const t = terminal(["", ""]);
+  const address = await choosePrivateEndpoint(t, { choices: [{ address: "192.168.42.2", interfaceName: "enp1s0", family: "IPv4", kind: "lan" }],
+    recommendedIndex: 0, exclusions: [] });
+  const ports = await choosePrivateWebPorts(t, address.address, { probe: async () => "available" });
+  assert.equal(address.address, "192.168.42.2"); assert.equal(ports.webPort, 8789);
+  assert.equal(t.asked.length, 2);
+  assert.ok(t.output.includes("This is this PC's IP address. Choose one your other devices can reach over your LAN or VPN."));
+  assert.ok(t.output.includes("Press Enter to use the recommended address."));
+  assert.ok(t.output.every(line => !line.includes("\u001b")), "Non-color output keeps the same explanations");
 });
 
 test("an explicit browser port needs no question and never becomes the HTTPS companion", async () => {

@@ -19,30 +19,46 @@ Rerunning setup cannot revive revoked access. Anyone who can reach this private
 HTTP address can operate that fleet; the LAN leg is unencrypted. Native Android's
 HTTPS pairing stays separate. No VPN changes or duplicate collection are added.
 
-The dev.7 update follows the operator's revised workflow: the CLI installs the
+The dev.8 update follows the operator's revised workflow: the CLI installs the
 backend and prints its ordinary URL, then the browser manages PCs. The actual web
 port is selected directly on fresh installs; the companion HTTPS port is chosen
 separately without another normal-install question. Green marks Ready/success,
 blue marks the URL/actionable information, amber marks work or attention, red marks
 failure, and muted text marks retained information. Prompts have spacing and
-defaults; `NO_COLOR` keeps the same text meanings without ANSI color.
+defaults; `NO_COLOR` keeps the same text meanings without ANSI color. Brief
+explanations identify the reachable PC address, the port number after the colon
+in the URL, and the next browser action. They add no installation questions.
 
-Manage computers combines saved PCs and bounded discovery, selection, username and
-password entry, saved-sign-in reuse/update, explicit removal/restore and a final
-per-PC report. Setup pins new selected identities, checks SSH/container access and
+Manage computers combines saved PCs and bounded discovery, selection, password or
+SSH-key sign-in, saved-sign-in reuse/update, explicit removal/restore and a final
+per-PC report. A completed search tells users to select PCs and choose **Add
+Selected PCs** below the computer list. This advances to sign-in. Private-key files
+are limited to 64 KiB; encrypted keys can include a passphrase. Key mode also offers
+an optional computer administrator password for sudo when required. The owner
+rejects malformed keys, public-only `.pub` keys, incorrect passphrases and mixed
+password/key submissions without echoing credential contents.
+
+Setup pins new selected identities, checks SSH/container access and
 tries fixed sudo reads when required; changed saved identities remain blocked.
 Automatic IP and encrypted credential retention are enabled for successful setup;
-new rewards/GPU access still needs its separate option, while existing approvals
-are retained. Missing optional host Podman is not reported as a setup failure.
+the visible rewards/GPU option starts checked as requested, and the operator can
+turn it off before submission. Viewing the page does not grant access; setup
+submission supplies the explicit option. Existing approvals remain, and revoked
+monitoring still requires explicit Restore. Missing optional host Podman is not
+reported as a setup failure. Completed results promote **Open Fleet** as the next
+action while keeping failures and retained readings honest.
 
-This latest operator requirement supersedes the earlier terminal-only password
-entry policy. Browser credentials travel in a bounded same-origin POST, not a URL,
-log or browser storage; inputs are cleared after submission. The gateway forwards
-them transiently to the owner and receives no Docker socket, SSH private key,
-credential volume or terminal-control socket. Stored credentials are encrypted in
-the owner's protected volume. The selected HTTP LAN transport is still plaintext;
-encryption at rest does not encrypt that network leg. Native HTTPS access remains
-separate. Search cancellation and setup shutdown fence late work before state
+The latest operator requirements supersede both the earlier terminal-only password
+policy and the exclusion of private-key entry from the browser. Browser credentials
+travel in a bounded same-origin POST, not a URL, log or browser storage; file and
+secret inputs are cleared after submission. The gateway forwards the selected
+password or private key, passphrase and optional administrator password transiently
+to the owner. It retains no computer credentials and has no Docker socket,
+credential volume, terminal-control socket or arbitrary shell interface. Only
+verified credentials are retained in the owner's protected encrypted volume.
+The selected HTTP LAN transport is still plaintext, including SSH-key and
+passphrase submissions; encryption at rest does not encrypt that network leg.
+Native HTTPS access remains separate. Search cancellation and setup shutdown fence late work before state
 closes. Developer-preview sources and provider budgets are unchanged.
 
 ## Toolchain and commands

@@ -127,15 +127,15 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         // already checked it against the configured origin, never a proxy header.
         const browserSetup = route === "setup-configure" || route === "setup-remove";
         if (browserSetup && typeof request.headers.origin !== "string") throw new SharedHttpError(403);
-        const input = await readJson(request, browserSetup ? 64 * 1024 : 256 * 1024);
+        const input = await readJson(request, route === "setup-configure" ? 128 * 1024 : browserSetup ? 64 * 1024 : 256 * 1024);
         const allowed: Record<string, string[]> = { pair: ["version", "code", "deviceName"], login: ["version", "code", "deviceName"],
           "pair-code": [], revoke: ["deviceId"], "setup-action": ["revision", "action", "selected", "automaticIp", "fullMonitoring", "range", "port"],
-          "setup-configure": ["revision", "selected", "username", "password", "fullMonitoring", "restorePcIds"],
+          "setup-configure": ["revision", "selected", "username", "password", "privateKey", "passphrase", "sudoPassword", "fullMonitoring", "restorePcIds"],
           "setup-remove": ["revision", "pcId"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"] };
         if (Object.keys(input).some(key => !allowed[route]!.includes(key))) throw new SharedHttpError(400);
         let result: Record<string, unknown>;
         try { result = await call<Record<string, unknown>>({ ...input, operation: postOperations[route], token }); }
-        finally { if (route === "setup-configure") delete input.password; }
+        finally { if (route === "setup-configure") { delete input.password; delete input.privateKey; delete input.passphrase; delete input.sudoPassword; } }
         if (route === "login") {
           if (typeof result.token !== "string") throw new SharedHttpError(502);
           response.setHeader("Set-Cookie", `${cookieName(transport)}=${result.token}; Path=/;${transport === "https" ? " Secure;" : ""} HttpOnly; SameSite=Strict`);

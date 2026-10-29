@@ -16,16 +16,20 @@ installer and this developer preview. Isolated Docker acceptance passed on an
 authorized Nosana host, including HTTPS, cache sharing and recovery. Development
 release **0.1.0-dev.4** provides private-address choices, installer recovery and
 direct browser access over an existing LAN/VPN (`--vpn-web`): open the ordinary
-dashboard address. The **0.1.0-dev.7** update keeps installation short: choose the
-PC address and actual web port, then open the printed URL. The CLI uses meaningful
-colors and spacing for choices, progress, errors and the final address.
-Browser **Manage computers** handles network search, selection, username/password
-entry, automatic access checks and a per-computer results report. Saved sign-ins
-can be reused or updated; computers can be removed or explicitly restored.
-Anyone who can reach that private
-address has access to its configured fleet. HTTP LAN traffic is unencrypted;
-that includes browser credential submissions on the LAN leg. Credentials are
-retained encrypted only by the backend owner. The existing HTTPS endpoint and
+dashboard address. The **0.1.0-dev.8** update keeps installation short and explains
+what the PC address and web port mean, how to accept their defaults, and what to
+do next. The CLI retains meaningful colors and spacing.
+Browser **Manage computers** leads from search results to computer selection,
+**Add Selected PCs** below the list, and sign-in using a password or SSH private-key
+file. Rewards/GPU monitoring is checked by default and can be turned off before
+submitting setup. Results clearly lead to the primary **Open Fleet** action.
+Saved sign-ins can be reused or updated; computers can be removed or explicitly
+restored. Selecting monitoring options alone changes no permissions until setup
+is submitted. Anyone who can reach that private address has access to its configured
+fleet. HTTP LAN traffic is unencrypted;
+that includes submitted passwords, SSH private keys, passphrases and optional
+administrator passwords on the LAN leg. Credentials are retained encrypted only
+by the backend owner. The existing HTTPS endpoint and
 Android pairing remain available separately.
 Physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
 separate.

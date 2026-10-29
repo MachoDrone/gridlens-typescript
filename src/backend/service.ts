@@ -66,7 +66,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       access.requireAccess(body.token, "operator");
       if (body.operation === "setup-configure" || body.operation === "setup-remove") {
         const allowed = body.operation === "setup-configure"
-          ? ["operation", "token", "revision", "selected", "username", "password", "fullMonitoring", "restorePcIds"]
+          ? ["operation", "token", "revision", "selected", "username", "password", "privateKey", "passphrase", "sudoPassword", "fullMonitoring", "restorePcIds"]
           : ["operation", "token", "revision", "pcId"];
         if (Object.keys(body).some(field => !allowed.includes(field))) throw new SharedHttpError(400);
         return body.operation === "setup-configure" ? setup.browserConfigure(context.scopeId, body) : setup.browserRemove(context.scopeId, body);

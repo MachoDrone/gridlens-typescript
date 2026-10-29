@@ -1,6 +1,7 @@
 import { test, expect, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
+import { generateKeyPairSync } from "node:crypto";
 
 async function connectPage(page: Page): Promise<void> {
   await page.route("**/connect", async route => route.fulfill({ contentType: "text/html", body: await readFile(resolve("dist/shared-setup.html"), "utf8") }));
@@ -366,20 +367,29 @@ for (const width of [1280, 390, 320]) test(`browser PC manager adds, updates and
   await expect(page.locator("#network-search")).toBeHidden();
   await expect(page.locator("#setup")).toBeHidden();
   await expect(page.locator("main")).not.toContainText("Run the latest GridLens installer");
-  await page.getByRole("button", { name: "Add computers", exact: true }).click();
+  await page.getByRole("button", { name: "Find PCs on network", exact: true }).click();
   await page.getByLabel("Network or IP address", { exact: true }).fill("192.168.42.0/30");
   await page.getByRole("button", { name: "Search network", exact: true }).click();
   computers = [a, b]; phase = "select"; scan = { ...scan!, completed: 4, found: 2, status: "complete" }; revision++;
   await page.clock.fastForward(3100);
+  await expect(page.locator("#scan-status")).toContainText("Select the PCs below, then choose Add Selected PCs.");
+  const addSelected = page.getByRole("button", { name: "Add Selected PCs", exact: true });
+  await expect(addSelected).toBeDisabled();
+  expect(await addSelected.evaluate(node => !!(document.querySelector("#pc-list")!.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
   await page.locator(`[data-pc-id="${b.id}"]`).getByRole("checkbox").check();
+  await expect(page.locator("#pc-signin")).toBeHidden();
+  expect(configurations).toHaveLength(0);
+  await addSelected.focus(); await page.keyboard.press("Enter");
+  await expect(page.getByLabel("Computer username", { exact: true })).toBeFocused();
   await page.getByLabel("Computer username", { exact: true }).fill("fixture");
   await page.getByLabel("Computer password", { exact: true }).fill("generated-browser-password");
   await page.clock.fastForward(3100);
   await expect(page.getByLabel("Computer password", { exact: true })).toHaveValue("generated-browser-password");
-  await expect(page.getByLabel("Also enable rewards and GPU monitoring")).not.toBeChecked();
+  await expect(page.getByLabel("Also enable rewards and GPU monitoring")).toBeChecked();
   await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
-  expect(configurations[0]).toEqual({ revision: revision - 1, selected: [b.id], username: "fixture", password: "generated-browser-password", fullMonitoring: false, restorePcIds: [] });
+  await expect(page.locator("#open-fleet-result")).toBeHidden();
+  expect(configurations[0]).toEqual({ revision: revision - 1, selected: [b.id], username: "fixture", password: "generated-browser-password", fullMonitoring: true, restorePcIds: [] });
   await expect(page.getByLabel("Computer password", { exact: true })).toHaveValue("");
   expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain("generated-browser-password");
   managed.push({ ...b, hostCount: 1, username: "fixture", hasSavedCredential: true, status: "approved" });
@@ -388,12 +398,18 @@ for (const width of [1280, 390, 320]) test(`browser PC manager adds, updates and
   await expect(page.getByRole("heading", { name: "Setup results", exact: true })).toBeVisible();
   await expect(page.locator("#pc-report-summary")).toHaveText("1 of 1 computers checked · 3 hosts in the fleet");
   await expect(page.locator("#pc-report-results .success")).toHaveText("Ready · 1 hosts");
+  await expect(page.locator("#pc-report-next")).toContainText("Next: Open Fleet");
+  await expect(page.locator("#open-fleet-result")).toBeVisible();
+  await expect(page.locator("#open-fleet-result")).toHaveClass("primary-link");
+  await expect(page.locator("#open-fleet-result")).toHaveAttribute("href", "/");
   await page.locator(`[data-pc-id="${a.id}"]`).getByRole("button", { name: "Update sign-in" }).click();
   await expect(page.getByLabel("Computer username", { exact: true })).toHaveValue("fixture");
   await expect(page.locator("#pc-signin-help")).toContainText("saved sign-in");
+  await page.getByLabel("Also enable rewards and GPU monitoring").uncheck();
   await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
   expect(configurations[1]).not.toHaveProperty("password");
+  expect(configurations[1]!.fullMonitoring).toBe(false);
   phase = "done"; report = { status: "complete", total: 1, completed: 1, results: [{ pcId: a.id, name: a.name, status: "success", hosts: 2, message: "Saved sign-in verified." }] }; revision++;
   await page.clock.fastForward(3100);
   const oldRow = page.locator(`[data-pc-id="${a.id}"]`);
@@ -431,6 +447,7 @@ test("browser manager clears rejected passwords and presents actionable failed-c
       fullMonitoring: false, exclusions: [], savedHosts: 0, inspectedPcs: 0, monitoringStatus: "Not configured", ...(report ? { report } : {}) } });
   });
   await page.goto("/setup"); await page.locator(`[data-pc-id="${computer.id}"]`).getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Add Selected PCs", exact: true }).click();
   await page.getByLabel("Computer username", { exact: true }).fill("fixture");
   await page.getByLabel("Computer password", { exact: true }).fill("generated-bad-password");
   await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
@@ -444,4 +461,93 @@ test("browser manager clears rejected passwords and presents actionable failed-c
   await expect(page.getByLabel("Computer password", { exact: true })).toBeFocused();
   await expect(page.getByLabel("Computer username", { exact: true })).toHaveValue("fixture");
   expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage } }))).not.toContain("generated-bad-password");
+});
+
+for (const width of [390, 320]) test(`SSH key sign-in is explicit and clears key, passphrase and administrator password at ${width}px`, async ({ page }) => {
+  await page.clock.install(); await page.setViewportSize({ width, height: 900 });
+  const pc = { id: "d".repeat(64), name: "Key computer", host: "192.168.42.5", port: 22, fingerprint: "SHA256:" + "D".repeat(43) };
+  const passphrase = "generated-key-passphrase", sudoPassword = "generated-administrator-password";
+  const privateKey = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs1", format: "pem", cipher: "aes-256-cbc", passphrase },
+    publicKeyEncoding: { type: "pkcs1", format: "pem" } }).privateKey;
+  let phase = "select", revision = 1, report: Record<string, unknown> | undefined, saved = false;
+  const requests: Record<string, unknown>[] = [];
+  const view = () => ({ revision, phase, computers: [pc], managed: saved ? [{ ...pc, hostCount: 1, username: "fixture", hasSavedCredential: true, status: "approved" }] : [],
+    selected: [], trusted: [], automaticIp: true, fullMonitoring: true, exclusions: [], savedHosts: saved ? 1 : 0, inspectedPcs: saved ? 1 : 0,
+    monitoringStatus: saved ? "Monitoring approved." : "Not configured", ...(report ? { report } : {}) });
+  await page.route("**/setup", async route => route.fulfill({ contentType: "text/html", body:
+    (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-private-network" content="1"><meta name="gridlens-setup-mode" content="browser"></head>') }));
+  await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  await page.route("**/api/shared/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/status")) { await route.fulfill({ json: { role: "operator" } }); return; }
+    if (path.endsWith("/setup-configure")) {
+      const body = route.request().postDataJSON(); requests.push(body); expect(body).not.toHaveProperty("password");
+      phase = "inspecting"; report = { status: "running", total: 1, completed: 0, results: [] }; revision++;
+    } else expect(path).toBe("/api/shared/setup");
+    await route.fulfill({ json: view() });
+  });
+  await page.goto("/setup");
+  await page.locator(`[data-pc-id="${pc.id}"]`).getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Add Selected PCs", exact: true }).click();
+  await page.getByLabel("Computer username", { exact: true }).fill("fixture");
+  await page.getByRole("combobox", { name: "Sign-in method", exact: true }).selectOption("key");
+  await expect(page.getByLabel("Computer password", { exact: true })).toBeHidden();
+  await page.getByLabel("SSH private key file", { exact: true }).setInputFiles({ name: "fixture-key.pem", mimeType: "application/octet-stream", buffer: Buffer.from(privateKey) });
+  await page.getByLabel("SSH key passphrase (optional)", { exact: true }).fill(passphrase);
+  await page.getByText("Administrator access", { exact: true }).click();
+  await page.getByLabel("Computer administrator password (if required)", { exact: true }).fill(sudoPassword);
+  await expect(page.getByLabel("Also enable rewards and GPU monitoring")).toBeChecked();
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
+  expect(requests[0]).toEqual({ revision: 1, selected: [pc.id], username: "fixture", privateKey, passphrase, sudoPassword, fullMonitoring: true, restorePcIds: [] });
+  for (const id of ["pc-password", "pc-key-file", "pc-key-passphrase", "pc-key-sudo-password"]) await expect(page.locator(`#${id}`)).toHaveValue("");
+  await expect(page.locator("#open-fleet-result")).toBeHidden();
+  const state = await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, url: location.href, html: document.documentElement.outerHTML }));
+  for (const secret of [privateKey, passphrase, sudoPassword]) expect(state).not.toContain(secret);
+  saved = true; phase = "done"; report = { status: "complete", total: 1, completed: 1, results: [{ pcId: pc.id, name: pc.name, status: "success", hosts: 1, message: "Ready." }] }; revision++;
+  await page.clock.fastForward(3100);
+  await expect(page.locator("#open-fleet-result")).toBeVisible();
+  await expect(page.locator("#pc-report-next")).toContainText("Next: Open Fleet");
+  await page.locator(`[data-pc-id="${pc.id}"]`).getByRole("button", { name: "Update sign-in", exact: true }).click();
+  await expect(page.locator("#pc-signin-help")).toContainText("saved sign-in");
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Setting up computers…" })).toBeVisible();
+  expect(requests[1]).not.toHaveProperty("privateKey"); expect(requests[1]).not.toHaveProperty("passphrase"); expect(requests[1]).not.toHaveProperty("sudoPassword");
+  const bounds = await page.locator("main").boundingBox(); expect(bounds!.x).toBeGreaterThanOrEqual(0); expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(width);
+});
+
+test("SSH key file bounds and method changes prevent an unintended credential upload", async ({ page }) => {
+  const pc = { id: "e".repeat(64), name: "Generated PC", host: "192.168.42.6", port: 22, fingerprint: "SHA256:" + "E".repeat(43) };
+  let configured = 0;
+  await page.route("**/setup", async route => route.fulfill({ contentType: "text/html", body:
+    (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-private-network" content="1"><meta name="gridlens-setup-mode" content="browser"></head>') }));
+  await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  await page.route("**/api/shared/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path.endsWith("/status")) { await route.fulfill({ json: { role: "operator" } }); return; }
+    if (path.endsWith("/setup-configure")) configured++;
+    await route.fulfill({ json: { revision: 1, phase: "select", computers: [pc], managed: [], selected: [], trusted: [], automaticIp: true, fullMonitoring: true,
+      exclusions: [], savedHosts: 0, inspectedPcs: 0, monitoringStatus: "Not configured" } });
+  });
+  await page.goto("/setup"); await page.locator(`[data-pc-id="${pc.id}"]`).getByRole("checkbox").check();
+  await page.getByRole("button", { name: "Add Selected PCs", exact: true }).click();
+  await page.getByLabel("Computer username", { exact: true }).fill("fixture");
+  await page.getByRole("combobox", { name: "Sign-in method", exact: true }).selectOption("key");
+  await page.getByLabel("SSH private key file", { exact: true }).setInputFiles({ name: "oversized.key", mimeType: "application/octet-stream", buffer: Buffer.alloc(64 * 1024 + 1, 65) });
+  await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+  expect(configured).toBe(0); await expect(page.locator("#message")).toContainText("no larger than 64 KB");
+  await page.getByLabel("SSH key passphrase (optional)", { exact: true }).fill("generated-passphrase");
+  await page.getByRole("combobox", { name: "Sign-in method", exact: true }).selectOption("password");
+  await expect(page.locator("#pc-key-file")).toHaveValue(""); await expect(page.locator("#pc-key-passphrase")).toHaveValue("");
+  await expect(page.getByLabel("Computer password", { exact: true })).toBeVisible();
+  expect(configured).toBe(0);
+  await page.getByRole("combobox", { name: "Sign-in method", exact: true }).selectOption("key");
+  for (const file of [{ name: "public.pub", contents: "ssh-ed25519 AAAA generated-public-fixture" },
+    { name: "wallet.json", contents: "[1,2,3,4]" }]) {
+    await page.getByLabel("SSH private key file", { exact: true }).setInputFiles({ name: file.name, mimeType: "application/octet-stream", buffer: Buffer.from(file.contents) });
+    await page.getByRole("button", { name: "Set up selected computers", exact: true }).click();
+    await expect(page.locator("#message")).toContainText("not a .pub public key or wallet file");
+    await expect(page.locator("#pc-key-file")).toHaveValue("");
+    expect(configured).toBe(0);
+  }
 });

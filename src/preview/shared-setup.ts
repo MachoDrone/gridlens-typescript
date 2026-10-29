@@ -1,4 +1,5 @@
-// Setup sends bounded intent and transient credentials to the owner; it has no host shell or Docker bridge.
+// Setup sends bounded, transient credentials to the owner without browser storage,
+// a host shell, or a Docker bridge.
 interface SetupComputer { id: string; host: string; port: number; name: string; fingerprint: string }
 interface ManagedComputer { id: string; name: string; host: string; port: number; hostCount: number; username: string | null;
   hasSavedCredential: boolean; status: "approved" | "paused" | "revoked" | "not-approved" }
@@ -30,6 +31,8 @@ let searchExpanded = false;
 let managerSignature = "";
 let reportSignature = "";
 let reportWasRunning = false;
+let signInExpanded = false;
+let credentialRevision = 0;
 const restoreSelected = new Set<string>();
 const message = (text: string, kind = "pending") => { const node = el("message"); node.textContent = text; node.className = kind; };
 class RequestError extends Error {
@@ -40,6 +43,7 @@ class RequestError extends Error {
     this.status = status;
   }
 }
+class CredentialFileError extends Error {}
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15_000);
   try {
@@ -99,7 +103,8 @@ function renderSearch(view: SetupView): void {
     const counts = `${scan.completed} of ${scan.total} addresses checked · ${scan.found} computers found`;
     updateText("scan-status", searching ? counts : scan.status === "failed" ? "Search could not finish. Check the range and connection, then search again."
       : scan.status === "cancelled" ? `Search cancelled · ${counts}` : scan.found === 0
-        ? "Search complete. No SSH computers found. Check the network or SSH port, then search again." : `Search complete · ${scan.found} computers found.`);
+        ? "Search complete. No SSH computers found. Check the network or SSH port, then search again."
+        : `Search complete · ${scan.found} computers found. ${browserSetup ? "Select the PCs below, then choose Add Selected PCs." : "Select computers below, then choose Selection complete."}`);
     status.className = scan.status === "failed" ? "failure" : searching || scan.status === "cancelled" || scan.found === 0 ? "pending" : "success";
   } else { updateText("scan-status", searching ? "Searching for SSH computers…" : ""); status.className = "pending"; progress.removeAttribute("value"); }
   const searchExclusions = view.phase === "done" || configuring ? [] : view.exclusions;
@@ -159,35 +164,45 @@ function computerRows(view: SetupView): ComputerRow[] {
 function selectedRows(view: SetupView): ComputerRow[] { return computerRows(view).filter(row => selected.has(row.id)); }
 function configuring(view: SetupView): boolean { return view.report?.status === "running" || view.phase === "inspecting"; }
 function clearComputerPassword(): void {
+  credentialRevision++;
   const password = el<HTMLInputElement>("pc-password"); password.value = ""; password.type = "password";
   el("show-pc-password").textContent = "Show"; el("show-pc-password").setAttribute("aria-pressed", "false");
+  const file = el<HTMLInputElement>("pc-key-file"); file.value = ""; file.setCustomValidity("");
+  el<HTMLInputElement>("pc-key-passphrase").value = "";
+  el<HTMLInputElement>("pc-key-sudo-password").value = "";
 }
 function renderManagerControls(view: SetupView): void {
   const rows = selectedRows(view), busy = actionPending || configuring(view) || view.phase === "scanning";
   el<HTMLButtonElement>("configure-computers").disabled = busy || rows.length === 0;
-  el<HTMLButtonElement>("add-computers").disabled = busy;
   for (const input of el("pc-manager").querySelectorAll<HTMLInputElement>("input[type=checkbox]")) input.disabled = busy;
   for (const button of el("pc-manager").querySelectorAll<HTMLButtonElement>("button")) button.disabled = busy;
+  el<HTMLButtonElement>("add-computers").disabled = busy || rows.length === 0;
   for (const input of el("pc-configure-form").querySelectorAll<HTMLInputElement>("input")) input.disabled = busy;
+  el<HTMLSelectElement>("pc-auth-method").disabled = busy;
   el<HTMLButtonElement>("show-pc-password").disabled = busy;
-  el("pc-signin").hidden = rows.length === 0;
+  el("pc-signin").hidden = rows.length === 0 || !signInExpanded;
   const missing = rows.some(row => !row.managed?.hasSavedCredential), password = el<HTMLInputElement>("pc-password");
-  el<HTMLInputElement>("pc-username").required = missing || password.value.length > 0;
-  password.required = missing;
+  const keyMode = el<HTMLSelectElement>("pc-auth-method").value === "key", file = el<HTMLInputElement>("pc-key-file"), passphrase = el<HTMLInputElement>("pc-key-passphrase"), sudo = el<HTMLInputElement>("pc-key-sudo-password");
+  el("pc-password-fields").hidden = keyMode; el("pc-key-fields").hidden = !keyMode;
+  el<HTMLInputElement>("pc-username").required = missing || (keyMode ? !!file.files?.length : password.value.length > 0);
+  password.required = !keyMode && missing;
+  file.required = keyMode && (missing || passphrase.value.length > 0 || sudo.value.length > 0);
   el("pc-signin-help").textContent = rows.length === 0 ? "Choose computers from the list above."
-    : missing ? "Enter the account used on the selected computers. The same sign-in will be used for this selection."
-      : "Leave the password blank to use each computer’s saved sign-in, or enter a new password to update the selection.";
+    : missing ? `Enter the account used on the selected computers and ${keyMode ? "choose its SSH private key" : "its password"}. This sign-in will be used for your selection.`
+      : keyMode ? "Leave the key file and passphrase empty to use each computer’s saved sign-in, or choose a key to update the selection."
+        : "Leave the password blank to use each computer’s saved sign-in, or enter a new password to update the selection.";
   el("pc-signin").setAttribute("aria-busy", String(configuring(view)));
 }
 function selectForUpdate(id: string): void {
   if (!current) return;
   selected = new Set([id]); restoreSelected.clear(); clearComputerPassword();
+  signInExpanded = true;
   const row = computerRows(current).find(row => row.id === id);
   el<HTMLInputElement>("pc-username").value = row?.managed?.username ?? el<HTMLInputElement>("pc-username").value;
   if (row?.managed?.status === "revoked") el<HTMLInputElement>("show-removed").checked = true;
   managerSignature = ""; renderManager(current);
   el("pc-signin").scrollIntoView({ block: "nearest", behavior: "smooth" });
-  el<HTMLInputElement>("pc-password").focus();
+  el<HTMLInputElement>(el<HTMLSelectElement>("pc-auth-method").value === "key" ? "pc-key-file" : "pc-password").focus();
 }
 function paintComputerList(view: SetupView): void {
   const rows = computerRows(view), filter = el<HTMLInputElement>("pc-filter").value.trim().toLowerCase();
@@ -195,7 +210,7 @@ function paintComputerList(view: SetupView): void {
     && `${row.name} ${row.host}`.toLowerCase().includes(filter));
   el("pc-selection-count").textContent = `${selected.size} selected · ${shown.length} matching computers`;
   const list = el("pc-list"); list.replaceChildren();
-  if (!shown.length) list.append(text("p", rows.length ? "No computers match this filter." : "Choose Add computers to search your network.", "pending"));
+  if (!shown.length) list.append(text("p", rows.length ? "No computers match this filter." : "Search your network above to find PCs, then select them here.", "pending"));
   for (const row of shown) {
     const item = document.createElement("div"); item.className = "computer-row"; item.dataset.pcId = row.id;
     const label = document.createElement("label"), checkbox = document.createElement("input"); checkbox.type = "checkbox"; checkbox.checked = selected.has(row.id);
@@ -206,6 +221,7 @@ function paintComputerList(view: SetupView): void {
       : `${managed.hostCount} ${managed.hostCount === 1 ? "host" : "hosts"} saved · ${state === "approved" ? "Monitoring enabled" : "Monitoring not enabled"}`;
     copy.append(text("span", labelText, state === "approved" ? "small success" : "small pending"));
     checkbox.addEventListener("change", () => {
+      signInExpanded = false; clearComputerPassword();
       if (checkbox.checked) selected.add(row.id); else { selected.delete(row.id); restoreSelected.delete(row.id); }
       if (selected.size === 1 && !el<HTMLInputElement>("pc-username").value && managed?.username) el<HTMLInputElement>("pc-username").value = managed.username;
       el("pc-selection-count").textContent = `${selected.size} selected · ${shown.length} matching computers`;
@@ -249,6 +265,12 @@ function renderReport(view: SetupView): void {
   el("pc-report-title").textContent = running ? "Setting up computers…" : "Setup results";
   const summary = el("pc-report-summary"); summary.textContent = `${report.completed} of ${report.total} computers checked · ${view.savedHosts} hosts in the fleet${attention ? ` · ${attention} need attention` : ""}`;
   summary.className = running ? "pending" : report.status === "failed" ? "failure" : attention ? "pending" : "success";
+  el("open-fleet-result").hidden = running || view.savedHosts === 0;
+  el("pc-report-next").textContent = running ? "GridLens is setting up the selected computers. Results will appear here."
+    : view.savedHosts > 0 ? attention || report.status === "failed" ? "Review the items that need attention. Open Fleet to see the hosts already saved."
+      : "Next: Open Fleet to see your hosts and live monitoring."
+      : attention || report.status === "failed" ? "No hosts were saved. Update the sign-in above and retry the PCs that failed."
+        : "Your fleet is empty. Find PCs on the network above to add them.";
   const progress = el<HTMLProgressElement>("pc-report-progress"); progress.hidden = !running; progress.max = Math.max(1, report.total); progress.value = report.completed;
   const list = el("pc-report-results"); list.replaceChildren();
   for (const result of report.results) {
@@ -280,19 +302,35 @@ async function removeComputer(pcId: string): Promise<void> {
   } catch (error) { message(error instanceof RequestError && error.status === 409 ? "The computer list changed. Refresh the page and try again." : "The computer could not be removed. Try again.", "failure"); }
   finally { actionPending = false; if (current) { renderSearch(current); renderManagerControls(current); } }
 }
-el("add-computers").addEventListener("click", () => {
+el("show-network-search").addEventListener("click", () => {
   if (!current) return; searchExpanded = true; renderSearch(current); el("network-search").scrollIntoView({ block: "start", behavior: "smooth" }); el<HTMLInputElement>("network-range").focus();
+});
+el("add-computers").addEventListener("click", () => {
+  if (!current || !selected.size || actionPending || configuring(current)) return;
+  signInExpanded = true; renderManagerControls(current);
+  el("pc-signin").scrollIntoView({ block: "start", behavior: "smooth" });
+  el<HTMLInputElement>("pc-username").focus();
 });
 el("pc-filter").addEventListener("input", () => { if (current) { paintComputerList(current); renderManagerControls(current); } });
 el("show-removed").addEventListener("change", () => { if (current) { paintComputerList(current); renderManagerControls(current); } });
 el("select-matching").addEventListener("click", () => {
   if (!current) return; const filter = el<HTMLInputElement>("pc-filter").value.trim().toLowerCase();
+  signInExpanded = false; clearComputerPassword();
   for (const row of computerRows(current)) if ((row.managed?.status !== "revoked" || el<HTMLInputElement>("show-removed").checked)
     && `${row.name} ${row.host}`.toLowerCase().includes(filter)) selected.add(row.id);
   managerSignature = ""; renderManager(current);
 });
-el("clear-selection").addEventListener("click", () => { selected.clear(); restoreSelected.clear(); managerSignature = ""; if (current) renderManager(current); });
+el("clear-selection").addEventListener("click", () => { selected.clear(); restoreSelected.clear(); signInExpanded = false; clearComputerPassword(); managerSignature = ""; if (current) renderManager(current); });
 el("pc-password").addEventListener("input", () => { if (current) renderManagerControls(current); });
+el("pc-auth-method").addEventListener("change", () => { clearComputerPassword(); if (current) renderManagerControls(current); });
+el("pc-key-file").addEventListener("change", () => {
+  credentialRevision++;
+  const input = el<HTMLInputElement>("pc-key-file"), file = input.files?.[0];
+  input.setCustomValidity(file && file.size > 64 * 1024 ? "Choose an SSH private key file no larger than 64 KB." : "");
+  if (file && file.size > 64 * 1024) message("Choose an SSH private key file no larger than 64 KB.", "failure");
+  if (current) renderManagerControls(current);
+});
+for (const id of ["pc-key-passphrase", "pc-key-sudo-password"]) el(id).addEventListener("input", () => { if (current) renderManagerControls(current); });
 el("show-pc-password").addEventListener("click", () => {
   const input = el<HTMLInputElement>("pc-password"), show = input.type === "password"; input.type = show ? "text" : "password";
   el("show-pc-password").textContent = show ? "Hide" : "Show"; el("show-pc-password").setAttribute("aria-pressed", String(show));
@@ -300,21 +338,39 @@ el("show-pc-password").addEventListener("click", () => {
 el("pc-configure-form").addEventListener("submit", event => {
   event.preventDefault();
   if (!current || actionPending || configuring(current) || !selected.size) return;
-  const username = el<HTMLInputElement>("pc-username").value.trim(), password = el<HTMLInputElement>("pc-password").value;
-  const body = { revision: current.revision, selected: [...selected], ...(username ? { username } : {}), ...(password ? { password } : {}),
+  const username = el<HTMLInputElement>("pc-username").value.trim(), keyMode = el<HTMLSelectElement>("pc-auth-method").value === "key";
+  const password = keyMode ? "" : el<HTMLInputElement>("pc-password").value, file = keyMode ? el<HTMLInputElement>("pc-key-file").files?.[0] : undefined;
+  const passphrase = keyMode ? el<HTMLInputElement>("pc-key-passphrase").value : "";
+  const sudoPassword = keyMode ? el<HTMLInputElement>("pc-key-sudo-password").value : "";
+  const body: Record<string, unknown> = { revision: current.revision, selected: [...selected], ...(username ? { username } : {}), ...(password ? { password } : {}),
     fullMonitoring: el<HTMLInputElement>("pc-full-monitoring").checked, restorePcIds: [...restoreSelected].filter(id => selected.has(id)) };
+  const submission = credentialRevision;
   actionPending = true; actionRevision++; renderManagerControls(current);
-  void api<SetupView>("setup-configure", body).then(view => {
-    clearComputerPassword(); el<HTMLInputElement>("pc-full-monitoring").checked = false;
-    selected.clear(); restoreSelected.clear(); managerSignature = ""; renderManager(view);
+  void (async () => {
+    if (file) {
+      if (file.size > 64 * 1024) throw new CredentialFileError("Choose an SSH private key file no larger than 64 KB.");
+      const privateKey = await file.text();
+      if (submission !== credentialRevision) throw new Error("Sign-in changed");
+      if (new TextEncoder().encode(privateKey).byteLength > 64 * 1024) throw new CredentialFileError("Choose an SSH private key file no larger than 64 KB.");
+      // This is only a file-choice guard. The owner validates the actual private
+      // key and passphrase before making any setup changes.
+      if (!/^\s*-----BEGIN (?:(?:OPENSSH|RSA|EC|DSA|ENCRYPTED) )?PRIVATE KEY-----/.test(privateKey))
+        throw new CredentialFileError("Choose an SSH private key file, not a .pub public key or wallet file.");
+      body.privateKey = privateKey; if (passphrase) body.passphrase = passphrase; if (sudoPassword) body.sudoPassword = sudoPassword;
+    } else if (passphrase || sudoPassword) throw new Error("Choose the key file for this sign-in");
+    return api<SetupView>("setup-configure", body);
+  })().then(view => {
+    clearComputerPassword();
+    selected.clear(); restoreSelected.clear(); signInExpanded = false; managerSignature = ""; renderManager(view);
     message("Setup started. GridLens will check the selected computers and show the results here.", "pending");
     el("pc-report").scrollIntoView({ block: "nearest", behavior: "smooth" });
   }).catch(error => {
     clearComputerPassword();
-    message(error instanceof RequestError && error.status === 400 ? "Check the selected computers, username and password. New computers need a sign-in."
+    message(error instanceof CredentialFileError ? error.message
+      : error instanceof RequestError && error.status === 400 ? "Check the selected computers, username and password or SSH key/passphrase. New computers need a sign-in."
       : error instanceof RequestError && error.status === 409 ? "The computer list changed or setup is already running. Refresh the page and try again."
         : "Setup could not start. Check access and try again.", "failure");
-  }).finally(() => { actionPending = false; if (current) { renderSearch(current); renderManagerControls(current); } });
+  }).finally(() => { delete body.password; delete body.privateKey; delete body.passphrase; delete body.sudoPassword; actionPending = false; if (current) { renderSearch(current); renderManagerControls(current); } });
 });
 
 function render(view: SetupView): void {

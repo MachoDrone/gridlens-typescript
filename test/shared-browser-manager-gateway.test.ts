@@ -4,6 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { request } from "node:http";
+import ssh2 from "ssh2";
 import { createGatewayIntegration } from "../src/backend/gateway.ts";
 import { startOwnerSocket, SharedHttpError } from "../src/backend/ipc.ts";
 import { startFleetServer, closeFleetServer } from "../src/server/application.ts";
@@ -14,7 +15,7 @@ test("browser sign-in setup uses bounded JSON to the owner and rejects foreign o
   let fail = false;
   const owner = await startOwnerSocket(socket, async body => {
     calls.push(body); assert.equal(body.token, grant);
-    if (fail) throw new Error(`An internal failure must not expose ${secret}`);
+    if (fail) throw new Error(`An internal failure must not expose ${[body.password, body.privateKey, body.passphrase, body.sudoPassword].join(" ")}`);
     if (body.operation === "setup-configure") return { revision: 2, phase: "inspecting", report: { status: "running", total: 1, completed: 0, results: [] } };
     if (body.operation === "setup-remove") return { revision: 3, phase: "done", managed: [] };
     throw new SharedHttpError(404);
@@ -34,7 +35,7 @@ test("browser sign-in setup uses bounded JSON to the owner and rejects foreign o
     const body = { revision: 1, selected: ["b".repeat(64)], username: "fixture", password: secret, fullMonitoring: false };
     for (const origin of [null, "http://foreign.invalid", "null"]) assert.equal((await call("/api/shared/setup-configure", body, origin)).status, 403);
     assert.equal((await call("/api/shared/setup-configure", body, "http://127.0.0.1", "foreign.invalid")).status, 403);
-    for (const extra of [{ privateKey: "not-accepted" }, { command: "not-accepted" }, { scopeId: "another-fleet" }, { sudoPassword: secret }])
+    for (const extra of [{ privateKeyPath: "/not-accepted" }, { command: "not-accepted" }, { scopeId: "another-fleet" }, { sudoCommand: "not-accepted" }])
       assert.equal((await call("/api/shared/setup-configure", { ...body, ...extra })).status, 400);
     assert.equal(calls.length, 0);
     const accepted = await call("/api/shared/setup-configure", body);
@@ -42,9 +43,19 @@ test("browser sign-in setup uses bounded JSON to the owner and rejects foreign o
     assert.deepEqual(calls[0], { ...body, operation: "setup-configure", token: grant });
     const removed = await call("/api/shared/setup-remove", { revision: 2, pcId: "b".repeat(64) });
     assert.equal(removed.status, 200);
+    const passphrase = "generated-gateway-key-passphrase", sudoPassword = "generated-gateway-sudo-password";
+    const key = ssh2.utils.generateKeyPairSync("ed25519", { passphrase, cipher: "aes256-cbc", rounds: 16 }).private;
+    const keyBody = { revision: 1, selected: ["b".repeat(64)], username: "fixture", privateKey: key, passphrase, sudoPassword, fullMonitoring: false };
+    const acceptedKey = await call("/api/shared/setup-configure", keyBody);
+    assert.equal(acceptedKey.status, 200);
+    assert.ok(calls.at(-1)?.privateKey === key); assert.equal(calls.at(-1)?.passphrase, passphrase); assert.equal(calls.at(-1)?.sudoPassword, sudoPassword);
+    assert.ok(!acceptedKey.text.includes("PRIVATE KEY") && !acceptedKey.text.includes(passphrase) && !acceptedKey.text.includes(sudoPassword));
     fail = true;
-    const failed = await call("/api/shared/setup-configure", body);
-    assert.equal(failed.status, 502); assert.ok(!failed.text.includes(secret) && !failed.text.includes(grant));
+    for (const input of [body, keyBody]) {
+      const failed = await call("/api/shared/setup-configure", input);
+      assert.equal(failed.status, 502); assert.ok(!failed.text.includes(secret) && !failed.text.includes(grant)
+        && !failed.text.includes("PRIVATE KEY") && !failed.text.includes(passphrase) && !failed.text.includes(sudoPassword));
+    }
   } finally {
     await closeFleetServer(server, integration); owner.closeAllConnections();
     await new Promise<void>(resolve => owner.close(() => resolve())); await rm(directory, { recursive: true });

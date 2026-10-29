@@ -34,10 +34,11 @@ volume. It cannot replenish request allowances or reinstate revoked access.
 See [installation and recovery](MODERN_INSTALL.md) for the named-volume layout.
 
 The HTTPS gateway has the restricted read/setup socket and its TLS leaf certificate/key.
-It receives no Docker socket, SSH private keys, credential volume, state database,
-terminal-control socket or shell operation. Browser passwords are forwarded
-transiently through the bounded setup operation to the owner; the gateway does not
-retain them. The owner validates bearer access against the exact
+It receives no Docker socket, credential volume, state database, terminal-control
+socket or shell operation. Under the revised operator requirement, browser passwords
+or uploaded SSH private keys, passphrases and optional administrator passwords are
+forwarded transiently through the bounded setup operation to the owner; the gateway
+does not retain them. The owner validates bearer access against the exact
 server, fleet and roster revision. The gateway revalidates before returning a
 snapshot and during feeds. Incoming Host and Origin must match the configured
 canonical origin; forwarding headers cannot establish identity.
@@ -72,23 +73,33 @@ Reruns cannot revive a revoked grant. No certificate installation is required fo
 that HTTP browser address. Native Android pairing remains HTTPS and keeps its
 existing device-level access rules.
 
-The dev.7 CLI installs the backend and prints the ordinary URL. It uses the actual
+The dev.8 CLI installs the backend and prints the ordinary URL. It uses the actual
 web port on new installs, meaningful colors and spacing, and preserves saved ports
-on reruns. `/setup` is the browser's **Manage computers** page. It combines saved
-PCs, explicit bounded network search, selection and username/password entry.
+on reruns. Brief prompt explanations identify the reachable PC address, the port
+number in the URL, and the next browser step. `/setup` is the browser's **Manage
+computers** page. It combines saved PCs, explicit bounded network search, selection
+and password or SSH-key sign-in.
 Suggestions come only from verified backend host-interface metadata. Search has
 progress, cancellation and retry, and does not change VPN configuration. SSH
-responses alone are not Nosana identities.
+responses alone are not Nosana identities. Search completion tells the user to
+select PCs and choose **Add Selected PCs** at the bottom of the Computers section;
+that action advances to sign-in.
 
-The operator's latest requirement explicitly moves computer passwords into the
-browser and supersedes the earlier terminal-only password policy. The browser sends
-a bounded same-origin JSON POST, clears the password field and does not store it
-in URLs, logs or local/session storage. The gateway transiently forwards it to the
-owner without gaining Docker, SSH-key or terminal-control authority. Only verified
+The operator's latest requirements explicitly permit computer passwords and SSH
+private-key files in the browser, superseding the earlier terminal-only password
+and no-browser-key policies. A private-key file is limited to 64 KiB; it may have
+a passphrase and an optional computer administrator password for sudo. The owner
+validates private-key material and rejects public-only `.pub` files, malformed keys,
+wrong passphrases and mixed password/key requests. The browser sends a bounded
+same-origin JSON POST, clears the file and secret fields, and stores no secrets
+in URLs, logs or local/session storage. The gateway forwards these credentials
+transiently to the owner, retaining none and receiving no Docker socket, credential
+volume, terminal-control socket or arbitrary shell interface. Only verified
 credentials are retained using authenticated encryption in the owner's separate
 protected volume; a party controlling that volume and its key can still decrypt
-them. The HTTP LAN leg remains unencrypted, including credentials; the existing
-VPN protects its remote portion. Browser SSH private-key upload is unsupported.
+them. The HTTP LAN leg remains unencrypted, including uploaded keys, passphrases
+and passwords; the existing VPN protects its remote portion. Encryption at rest
+does not encrypt that network leg.
 
 **Set up selected computers** accepts the selected initial SSH identities, checks
 access and starts background inspection. Known changed keys remain blocked.
@@ -96,19 +107,23 @@ The owner tries ordinary container access first and then fixed sudo read command
 when required, reusing the provided computer password if necessary. An absent
 optional host Podman binary is not an error; actual access failures remain visible.
 Successful setup enables automatic IP and saves every verified Nosana host found,
-including multiple hosts per PC. The separate rewards/GPU option is unchecked for
-new computers and does not remove existing approvals. No workload is started,
-restarted or renamed, and no rewards are claimed or funds transferred.
+including multiple hosts per PC. The visible rewards/GPU option starts checked as
+requested; it can be unchecked before submission. Viewing the page does not change
+permissions. Existing approvals remain, and revoked monitoring still requires
+explicit Restore. No Nosana workload is started, restarted or renamed, and no
+rewards are claimed or funds transferred.
 
-Progress and final per-PC results distinguish success, attention and failure.
-Users can retry failed PCs, reuse saved credentials with a blank password, update
-sign-in, explicitly remove PCs, or restore selected paused/removed PCs. Removal
+Progress and final per-PC results distinguish success, attention and failure. A
+prominent **Open Fleet** action appears after completion with an explicit next step;
+failed or incomplete checks remain visible. Users can retry failed PCs, reuse saved
+credentials with blank secret fields, update sign-in, explicitly remove PCs, or
+restore selected paused/removed PCs. Removal
 stops monitoring, forgets that PC's credential and removes its nodes while keeping
 other PC grants and the safety ledger. Changed membership advances the roster;
 private-network gateway access follows its configured fleet, while separately
 paired HTTPS clients retain exact-revision authorization. Pauses and revocations
 are not silently undone by ordinary reruns. Interrupted work requires a new setup
-request; unverified passwords are not retained for automatic retry. Reusing an IP
+request; unverified credentials are not retained for automatic retry. Reusing an IP
 address alone cannot transfer SSH or monitoring authority.
 
 ## Verified local readings
@@ -173,7 +188,7 @@ JSON body. Device credentials bind one exact roster revision.
 | `GET /api/fleet/<resource>.json` | The existing normalized public snapshots; job history permits bounded selected hosts. |
 | `GET /api/shared/setup` | Operator-only search/setup state, managed-PC summaries and current per-PC result report; never returns passwords or private keys. |
 | `POST /api/shared/setup-action` | Bounded search, cancel and compatible setup intent. |
-| `POST /api/shared/setup-configure` | Operator-only selected PCs, username/password or saved-sign-in reuse, optional rewards/GPU approval and explicit restore IDs; acknowledges background work. |
+| `POST /api/shared/setup-configure` | Operator-only selected PCs, username with password or private key/passphrase and optional key-mode administrator password, or saved-sign-in reuse; explicit rewards/GPU value and restore IDs; acknowledges background work. |
 | `POST /api/shared/setup-remove` | Operator-only explicit PC removal and credential forgetting, retaining other PCs and durable safety state. |
 | `/api/shared/devices`, `/pair-code`, `/revoke` | Operator-only paired-device administration, separate from private-network browser access. |
 | `/api/shared/monitoring`, `/monitoring-action` | Operator-only PC approval status, durable pause/revoke, and credential forgetting. |
@@ -211,6 +226,6 @@ The test owner used generated identities and synthetic data with no egress;
 existing workloads and VPN configuration were preserved. This does not establish
 physical PC reboot behavior, NVIDIA/GPU recorder lifecycle acceptance, live fleet
 monitoring or physical VPN/phone acceptance. Published installer and live acceptance
-records are version-specific; dev.7 browser credential and PC-management acceptance
+records are version-specific; browser credential and PC-management acceptance
 is recorded separately from those earlier rehearsals. No legacy migration or
 installed-phone data change occurred.

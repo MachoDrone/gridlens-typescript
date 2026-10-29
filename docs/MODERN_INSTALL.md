@@ -3,7 +3,7 @@
 The modern backend is separate from the loopback developer preview and the legacy
 installer. Its TypeScript terminal coordinator manages a single collection owner
 and an unprivileged HTTPS gateway on a chosen PC, which may also run Nosana. This
-source revision implements development update **0.1.0-dev.7**. Installation ends
+source revision implements development update **0.1.0-dev.8**. Installation ends
 with the dashboard address; computer selection, sign-in and setup results belong
 in the browser. Published dev.4 provides direct private-network browser access;
 earlier published releases remain immutable.
@@ -18,7 +18,9 @@ Run the signed release launcher with `--vpn-web` on the chosen backend PC. Docke
 must already be available. Choose its assigned private address and the **Web
 dashboard port**; Enter accepts the shown recommendation. This is the actual HTTP
 port used in the final browser URL. A separate available HTTPS companion port is
-chosen automatically. Existing installations keep their saved addresses and ports.
+chosen automatically. Each prompt briefly explains the choice: the address is
+the reachable IP of this PC, and the port is the number after the colon in the
+dashboard URL. Existing installations keep their saved addresses and ports.
 The optional `--web-port PORT` selects a port explicitly.
 
 The terminal uses green for Ready/success, blue for the URL and actionable
@@ -26,14 +28,16 @@ information, amber for work or attention, red for failures, and muted text for
 retained settings. Choices and the final result have spacing for readability.
 Every color has a text meaning; `NO_COLOR` disables ANSI color without hiding status.
 Once the backend is ready, the terminal prints the ordinary dashboard URL and
-returns to the shell. Computer credentials and enrollment are not CLI install steps.
+returns to the shell, with an explicit instruction to open it and choose Manage
+computers. Computer credentials and enrollment are not CLI install steps.
 
 Open or bookmark that URL on PCs and phones using your existing private LAN/VPN.
 There are no browser connection codes, pairing steps or sign-in expiry in this
 mode. `--connect` prints the same address. Anyone who can reach this private
 address has operator access to its configured fleet. The VPN protects its remote
-portion; the local LAN leg is HTTP and is unencrypted, including browser password
-submissions. Saving credentials encrypted does not encrypt that network leg.
+portion; the local LAN leg is HTTP and is unencrypted, including browser passwords,
+SSH private keys, passphrases and optional administrator-password submissions.
+Saving credentials encrypted does not encrypt that network leg.
 
 The private web gateway shares the existing collection owner, cache and permissions;
 it does not change VPN settings, expose a public address or duplicate collection.
@@ -44,30 +48,42 @@ Reruns cannot revive a revoked gateway grant.
 ### Manage computers in the browser
 
 Open **Manage computers** above Fleet. Saved PCs show their host counts and
-monitoring status, with **Update sign-in** and **Remove** actions. To add PCs,
-choose **Add computers**, accept or edit the verified network suggestion, and
-choose **Search network**. The page identifies the backend PC doing the search.
+monitoring status, with **Update sign-in** and **Remove** actions. To find PCs,
+open **Search network**, accept or edit the verified network suggestion, then
+start the search. The page identifies the backend PC doing the search.
 Suggestions come from its actual host interface, never the viewing phone or a
 container bridge. Search retains the existing private-IP or IPv4 /23–/32 limit,
 512-address bound, eight simultaneous probes and per-probe timeout. Progress,
-cancel, retry and partial-IP/name filtering stay on the same page.
+cancel, retry and partial-IP/name filtering stay on the same page. A completed
+search says what to do next: select PCs below, then choose **Add Selected PCs**.
+That primary button sits below the Computers list and advances to sign-in.
 
-Select the computers and enter their computer username and password. One sign-in
-can be applied to the selection; leave the password blank to reuse saved sign-ins
-where available. Choose **Set up selected computers**. That action records new
-selected SSH identities, checks access and performs the required inspection.
+Enter the computer username and choose **Computer password** or **SSH key**.
+Key mode accepts a private-key file up to 64 KiB, an optional key passphrase, and
+an optional computer administrator password if sudo requires one. The administrator
+password is not the SSH-key passphrase. The owner validates that the uploaded file
+contains a private key; public-only `.pub` files, malformed keys, wrong passphrases
+and mixed password/key submissions are rejected without revealing their contents.
+One sign-in can be applied to the selection; leave its secret fields empty to reuse
+saved sign-ins where available. Choose **Set up selected computers**. That action
+records new selected SSH identities, checks access and performs the required inspection.
 Changed saved SSH identities remain blocked. GridLens first tries ordinary access,
 then fixed sudo read commands when required, using the submitted computer password
-if needed. It does not require passwordless sudo or ask for a separate terminal
+if needed. With a key, it can use the optional administrator password instead.
+It does not require passwordless sudo or ask for a separate terminal
 session. Missing optional host Podman is not itself a setup failure.
 
 Successful setup saves verified credentials encrypted in the owner, enables
 automatic IP monitoring and saves every verified Nosana host found. The separate
-**Also enable rewards and GPU monitoring** option is unchecked for new computers;
-existing approvals remain. Inspection does not start, restart or rename Nosana
+**Also enable rewards and GPU monitoring** option is visible and checked by default;
+the user can uncheck it before submitting setup. Opening the page alone never
+grants monitoring access. Existing approvals remain, and paused or revoked access
+still needs explicit Restore. Inspection does not start, restart or rename Nosana
 workloads, claim rewards or transfer funds. The final report shows per-PC success,
 failures, attention items and saved-host counts. Failed computers can be retried
-without repeating successful setup on the rest.
+without repeating successful setup on the rest. Once setup finishes, a prominent
+green **Open Fleet** action and a next-step explanation lead to the saved fleet.
+Attention items remain visible; incomplete checks are not presented as success.
 
 **Update sign-in** reuses or changes a PC's credentials. **Remove** explicitly
 stops its monitoring, forgets its saved sign-in and removes its hosts from the
@@ -76,14 +92,14 @@ hidden by default; **Show removed computers** and explicit re-enable selection
 allow a deliberate restore. An ordinary rerun never revives paused or revoked
 monitoring silently. Discovery alone does not grant SSH access.
 
-The latest operator requirement explicitly permits browser username/password
-entry and supersedes the earlier terminal-only password workflow. Passwords use
-a bounded same-origin POST and are cleared from the form after submission. They
-are not put in URLs, logs or browser storage. The gateway forwards them only to
-the restricted owner operation; it has no Docker socket, SSH private keys,
-credential volume, terminal-control socket or arbitrary shell interface. Only the
-owner retains verified credentials, using authenticated encryption in its protected
-volume. SSH private-key upload is not part of browser setup.
+The latest operator requirements explicitly permit browser password and SSH-key
+entry, superseding the earlier terminal-only password and no-browser-key policies.
+The selected credentials use a bounded same-origin POST; file, key, password and
+passphrase inputs clear after submission. They are not put in URLs, logs or browser
+storage. The gateway transiently forwards them only to the restricted owner
+operation and retains no computer credentials. It has no Docker socket, credential
+volume, terminal-control socket or arbitrary shell interface. Only the owner
+retains verified credentials, using authenticated encryption in its protected volume.
 
 Advanced terminal commands remain for compatibility, but ordinary PC-list updates
 and sign-in happen entirely in the browser. `--no-setup` is no longer needed for
@@ -173,8 +189,8 @@ explicitly chosen network range. Normal setup uses the browser manager described
 above. After fleet coverage changes, private-VPN browser access keeps its ordinary
 address; separately paired HTTPS viewers need authorization for the new roster
 revision. Advanced key/password input travels through Docker stdin to the owner's
-control socket; browser passwords travel through its restricted read/setup socket.
-Neither path puts passwords in process arguments. Verified retained credentials
+control socket; browser credentials travel through its restricted read/setup socket.
+Neither path puts secret values in process arguments. Verified retained credentials
 stay in the owner's encrypted credential volume.
 
 ## Ownership and recovery

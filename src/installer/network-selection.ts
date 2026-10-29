@@ -105,7 +105,10 @@ export function discoverPrivateEndpoints(interfaces: NodeJS.Dict<NetworkInterfac
 
 export async function choosePrivateEndpoint(terminal: SelectionPrompts, available = discoverPrivateEndpoints()): Promise<PrivateEndpoint> {
   cliSection(terminal, "Dashboard address");
-  terminal.print("Choose the address your PC or phone can reach on your existing LAN or VPN.");
+  terminal.print("This is this PC's IP address. Choose one your other devices can reach over your LAN or VPN.");
+  terminal.print(cliText(terminal, "muted", available.recommendedIndex === null
+    ? "Enter the number beside the address you use to reach this PC."
+    : "Press Enter to use the recommended address."));
   terminal.print("");
   if (!available.choices.length) throw new InstallerError("No eligible private address is assigned on this PC. Connect this PC to your existing private network or VPN, then run setup again. Public-only installation is not supported yet; GridLens will not invent an address or change networking.");
   for (const [index, choice] of available.choices.entries()) {
@@ -157,6 +160,9 @@ export async function chooseDashboardPort(terminal: SelectionPrompts, address: s
   preferred?: number; probe?: PortProbe; label?: string;
 } = {}): Promise<number> {
   let recommended = await recommendPort(address, { preferred, probe });
+  terminal.print("");
+  terminal.print("The port is the number after ':' in your dashboard address.");
+  if (recommended !== null) terminal.print(cliText(terminal, "muted", "The suggested port is free. Press Enter to use it, or enter another port."));
   terminal.print("");
   if (recommended === null) terminal.print(cliText(terminal, "pending", `No free port was found from ${preferred} through ${Math.min(65535, preferred + 10)}. Choose another unused port.`));
   for (;;) {

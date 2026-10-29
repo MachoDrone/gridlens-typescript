@@ -7,6 +7,7 @@ import { SharedHttpError } from "./ipc.ts";
 import type { CredentialVault } from "./credential-vault.ts";
 import type { PcPermission } from "./pc-monitor.ts";
 import { privateIp, sameBinding } from "../fleet/pc-observations.ts";
+import ssh2 from "ssh2";
 
 interface SetupScan {
   range: string; port: number; total: number; completed: number; found: number;
@@ -280,11 +281,26 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
       || new Set(body.selected).size !== body.selected.length || body.selected.some(value => typeof value !== "string" || !/^[a-f0-9]{64}$/.test(value))
       || body.username !== undefined && (typeof body.username !== "string" || body.username !== "" && !/^[A-Za-z0-9_.-]{1,64}$/.test(body.username))
       || body.password !== undefined && (typeof body.password !== "string" || body.password.length > 4096)
+      || body.privateKey !== undefined && (typeof body.privateKey !== "string" || Buffer.byteLength(body.privateKey) > 64 * 1024)
+      || body.passphrase !== undefined && (typeof body.passphrase !== "string" || body.passphrase.length > 4096)
+      || body.sudoPassword !== undefined && (typeof body.sudoPassword !== "string" || body.sudoPassword.length > 4096)
       || body.fullMonitoring !== undefined && typeof body.fullMonitoring !== "boolean"
       || body.restorePcIds !== undefined && (!Array.isArray(body.restorePcIds) || new Set(body.restorePcIds).size !== body.restorePcIds.length
         || body.restorePcIds.some(id => !(body.selected as unknown[]).includes(id)))) throw new SharedHttpError(400);
     const username = typeof body.username === "string" ? body.username : "", password = typeof body.password === "string" ? body.password : "";
-    if (password && !username) throw new SharedHttpError(400);
+    const privateKey = typeof body.privateKey === "string" ? body.privateKey : "";
+    const passphrase = typeof body.passphrase === "string" ? body.passphrase : undefined;
+    const sudoPassword = typeof body.sudoPassword === "string" ? body.sudoPassword : undefined;
+    if ((password || privateKey) && !username || password && privateKey
+      || (passphrase !== undefined || sudoPassword !== undefined) && !privateKey) throw new SharedHttpError(400);
+    if (privateKey) {
+      // Parse only explicitly submitted key contents, never paths. Parser details
+      // can contain key material; return the same bounded validation error.
+      try {
+        const parsed = ssh2.utils.parseKey(privateKey, passphrase);
+        if (parsed instanceof Error || Array.isArray(parsed) || !parsed.isPrivateKey()) throw new Error();
+      } catch { throw new SharedHttpError(400); }
+    }
     const known = state.get<Computer[]>(`ssh-identities:${scopeId}`) ?? [];
     const candidates = new Map(known.map(row => [row.id, row]));
     for (const row of current.computers) candidates.set(row.id, row);
@@ -301,6 +317,8 @@ export function createSetup(state: PrivateState, access: SharedAccess, observati
         failures.set(computer.id, "This computer is paused or removed. Select Restore to enable it again."); continue;
       }
       if (password) credentials.set(computer.id, { username, password });
+      else if (privateKey) credentials.set(computer.id, { username, privateKey, ...(passphrase === undefined ? {} : { passphrase }),
+        ...(sudoPassword === undefined ? {} : { sudoPassword }) });
       else {
         let saved: SshCredential | undefined;
         try { saved = options.vault?.read(scopeId, computer.id); } catch { /* Request fresh credentials instead. */ }
