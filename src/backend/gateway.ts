@@ -7,6 +7,8 @@ import { startFleetServer } from "../server/application.ts";
 import { ownerCall, readJson, sendJson, SharedHttpError } from "./ipc.ts";
 import { join } from "node:path";
 import { isIP } from "node:net";
+import { parseUpdateBuild } from "../contracts/updates.ts";
+import type { UpdateBuild } from "../contracts/updates.ts";
 
 export type GatewayTransport = "https" | "vpn-http";
 const cookieName = (transport: GatewayTransport): string => transport === "vpn-http" ? "gridlens-vpn" : "__Host-gridlens";
@@ -34,7 +36,10 @@ export function requestToken(request: IncomingMessage, transport: GatewayTranspo
   return cookies.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(cookies[0]!.slice(prefix.length)) ? cookies[0]!.slice(prefix.length) : null;
 }
 export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, setupScript: Buffer,
-  { transport = "https", privateNetworkToken }: { transport?: GatewayTransport; privateNetworkToken?: string } = {}): FleetIntegration {
+  { transport = "https", privateNetworkToken, build, updatesEnabled = false }: {
+    transport?: GatewayTransport; privateNetworkToken?: string; build?: UpdateBuild; updatesEnabled?: boolean } = {}): FleetIntegration {
+  if (updatesEnabled && !build) throw new Error("Updater-enabled gateway requires immutable build identity.");
+  if (build) build = parseUpdateBuild(build);
   if (transport !== "https" && transport !== "vpn-http") throw new Error("Unsupported gateway transport.");
   if (privateNetworkToken !== undefined && (transport !== "vpn-http" || !/^[A-Za-z0-9_-]{43}$/.test(privateNetworkToken)))
     throw new Error("Private-network access requires its configured HTTP gateway grant.");
@@ -77,6 +82,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
   return {
     label: "Shared cache · source freshness shown per reading",
     sharedBackend: true,
+    ...(updatesEnabled && build ? { updates: { build } } : {}),
     source: { async read() { throw new Error("Request-bound shared access required."); } }, sourceForRequest: makeSource,
     async resolveAccess(request, signal) {
       try {
@@ -88,6 +94,16 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     },
     async handleRequest(request, response) {
       const url = new URL(request.url ?? "/", "https://gateway.invalid");
+      if (updatesEnabled && build && url.pathname === "/health/ready" && ["GET", "HEAD"].includes(request.method ?? "")) {
+        try {
+          const owner = await ownerCall<{ version: number; status: string; build: unknown }>(socketPath, { operation: "readiness" }, undefined, 5000);
+          const ownerBuild = parseUpdateBuild(owner.build);
+          if (owner.version !== 1 || owner.status !== "ready" || ownerBuild.buildId !== build.buildId
+            || ownerBuild.sequence !== build.sequence || ownerBuild.version !== build.version) throw new Error("Runtime build mismatch.");
+          sendJson(response, 200, { version: 1, status: "ready", build, ownerBuild });
+        } catch { sendJson(response, 503, { version: 1, status: "starting", build }); }
+        return true;
+      }
       if (privateNetwork && url.pathname === "/connect" && (request.method === "GET" || request.method === "HEAD")) {
         // An explicit empty fragment prevents an old sign-in fragment being inherited.
         response.writeHead(302, { Location: "/#", "Content-Length": 0 }); response.end(); return true;
@@ -116,9 +132,10 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
       try {
         const token = tokenFor(request), route = url.pathname.slice("/api/shared/".length);
         if (privateNetwork && ["pair", "login", "pair-code", "devices", "revoke"].includes(route)) throw new SharedHttpError(404);
-        const getOperations: Record<string, string> = { status: "status", capabilities: "status", observations: "observations", devices: "devices", setup: "setup", monitoring: "monitoring" };
+        const getOperations: Record<string, string> = { status: "status", capabilities: "status", observations: "observations", devices: "devices", setup: "setup", monitoring: "monitoring", updates: "updates-status" };
         const postOperations: Record<string, string> = { pair: "pair", login: "pair", "pair-code": "pair-code", revoke: "revoke", "setup-action": "setup-action",
-          "setup-configure": "setup-configure", "setup-remove": "setup-remove", "gpu-history": "gpu-history", "monitoring-action": "monitoring-action" };
+          "setup-configure": "setup-configure", "setup-remove": "setup-remove", "gpu-history": "gpu-history", "monitoring-action": "monitoring-action",
+          "updates/check": "updates-check", "updates/start": "updates-start" };
         if (request.method === "GET" && getOperations[route] && !url.search) {
           sendJson(response, 200, await call({ operation: getOperations[route], token })); return true;
         }
@@ -126,12 +143,14 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         // These browser-only mutations require an Origin. The common server has
         // already checked it against the configured origin, never a proxy header.
         const browserSetup = route === "setup-configure" || route === "setup-remove";
-        if (browserSetup && typeof request.headers.origin !== "string") throw new SharedHttpError(403);
-        const input = await readJson(request, route === "setup-configure" ? 128 * 1024 : browserSetup ? 64 * 1024 : 256 * 1024);
+        const browserUpdate = route === "updates/check" || route === "updates/start";
+        if ((browserSetup || browserUpdate) && typeof request.headers.origin !== "string") throw new SharedHttpError(403);
+        const input = await readJson(request, browserUpdate ? 1024 : route === "setup-configure" ? 128 * 1024 : browserSetup ? 64 * 1024 : 256 * 1024);
         const allowed: Record<string, string[]> = { pair: ["version", "code", "deviceName"], login: ["version", "code", "deviceName"],
           "pair-code": [], revoke: ["deviceId"], "setup-action": ["revision", "action", "selected", "automaticIp", "fullMonitoring", "range", "port"],
           "setup-configure": ["revision", "selected", "username", "password", "privateKey", "passphrase", "sudoPassword", "fullMonitoring", "restorePcIds"],
-          "setup-remove": ["revision", "pcId"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"] };
+          "setup-remove": ["revision", "pcId"], "gpu-history": ["address", "fromAtMs", "toAtMs"], "monitoring-action": ["pcId", "action"],
+          "updates/check": [], "updates/start": ["candidateId", "idempotencyKey"] };
         if (Object.keys(input).some(key => !allowed[route]!.includes(key))) throw new SharedHttpError(400);
         let result: Record<string, unknown>;
         try { result = await call<Record<string, unknown>>({ ...input, operation: postOperations[route], token }); }
@@ -147,7 +166,8 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
   };
 }
 export async function startSharedGateway(options: { socketPath: string; certPath?: string; keyPath?: string; publicOrigin: string;
-  directory: string; host?: string; port?: number; transport?: GatewayTransport; privateNetworkAuthFile?: string; privateNetworkToken?: string }) {
+  directory: string; host?: string; port?: number; transport?: GatewayTransport; privateNetworkAuthFile?: string; privateNetworkToken?: string;
+  build?: UpdateBuild; updatesEnabled?: boolean }) {
   const transport = options.transport ?? "https";
   validateGatewayOrigin(options.publicOrigin, transport);
   if ((options.privateNetworkAuthFile !== undefined || options.privateNetworkToken !== undefined) && transport !== "vpn-http")
@@ -171,7 +191,8 @@ export async function startSharedGateway(options: { socketPath: string; certPath
     transport === "https" ? Promise.all([readFile(options.certPath!), readFile(options.keyPath!)]).then(([cert, key]) => ({ cert, key })) : undefined,
   ]);
   const integration = createGatewayIntegration(options.socketPath, html, script, { transport,
-    ...(privateNetworkToken === undefined ? {} : { privateNetworkToken }) });
+    ...(privateNetworkToken === undefined ? {} : { privateNetworkToken }), ...(options.build ? { build: options.build } : {}),
+    ...(options.updatesEnabled === undefined ? {} : { updatesEnabled: options.updatesEnabled }) });
   const server: FleetServerOptions = { integration, directory: options.directory, host: options.host ?? "0.0.0.0",
     port: options.port ?? 8443, publicOrigin: options.publicOrigin, ...(tls ? { tls } : {}), accessCheckIntervalMs: 1000 };
   return { server: await startFleetServer(server), integration };

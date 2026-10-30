@@ -61,6 +61,27 @@ passphrase submissions; encryption at rest does not encrypt that network leg.
 Native HTTPS access remains separate. Search cancellation and setup shutdown fence late work before state
 closes. Developer-preview sources and provider budgets are unchanged.
 
+The browser-update candidate adds an installed-only Update action below Hosts,
+preserving the existing narrow menu and collapsed rail. A verified newer release
+pulses green (steady under reduced motion). One Update now action downloads,
+verifies, installs and automatically returns to a verified Fleet view. Progress
+uses stages and elapsed time, with durable operation IDs across gateway/browser
+restarts. Release availability and retry deadlines are shared by the separate
+updater, rather than checked independently by browser tabs. The owner authorizes
+bounded requests; the gateway never receives Docker access. Initial enablement
+on an older installation is a maintainer migration, not a browser SSH operation.
+See [browser updates](MODERN_INSTALL.md#browser-controlled-updates) for the
+interfaces, readiness/rollback contract and deployment boundary. The developer
+preview does not acquire update authority or contact the release service.
+
+Updater changes are checked through `npm run check` and the separate
+`npm run test:updater-docker -- --base-image TAG --address PRIVATE_TEST_IP
+--https-port PORT --web-port PORT` acceptance driver. The latter requires an
+explicit isolated Docker test target and generates a unique fixture identity,
+empty fleet, disposable signing identity and fixture-only release transport.
+It removes only its own labeled resources. Normal users update through the
+browser; these commands are development verification, not the operator workflow.
+
 ## Toolchain and commands
 
 Use Node **24.14.1**, npm **11.11.0**, TypeScript **7.0.2**, Node declarations

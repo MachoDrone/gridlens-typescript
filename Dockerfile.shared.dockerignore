@@ -8,3 +8,6 @@
 !src/**
 !scripts/
 !scripts/**
+!docker/
+!docker/DOCKER-CLI-LICENSE
+!docker/DOCKER-CLI-NOTICE

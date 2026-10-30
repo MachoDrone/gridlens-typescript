@@ -1,4 +1,5 @@
 # Runtime image identity is pinned by the signed release manifest after building.
+FROM docker:29.7.2-cli@sha256:3f4743208d2338c934d7b8bcfbe1bb54c0b2355c510ad5e0f31c0c4a54bd704e AS docker-client
 FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -10,9 +11,14 @@ RUN npm run build
 
 FROM node:24.14.1-bookworm-slim@sha256:b506e7321f176aae77317f99d67a24b272c1f09f1d10f1761f2773447d8da26c
 ARG GRIDLENS_VERSION=0.1.0-candidate
-LABEL io.gridlens.product="shared-backend" io.gridlens.version="${GRIDLENS_VERSION}"
+ARG GRIDLENS_SEQUENCE=1
+ARG GRIDLENS_UPDATE_PUBLIC_KEY_BASE64=
+LABEL io.gridlens.product="shared-backend" io.gridlens.version="${GRIDLENS_VERSION}" io.gridlens.updater-protocol="1"
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates openssl && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
+COPY --from=docker-client /usr/local/bin/docker /usr/local/bin/docker
+COPY docker/DOCKER-CLI-LICENSE docker/DOCKER-CLI-NOTICE /usr/local/share/licenses/docker-cli/
+RUN node -e 'const fs=require("node:fs"); const version=process.env.GRIDLENS_VERSION,sequence=Number(process.env.GRIDLENS_SEQUENCE); if(!Number.isSafeInteger(sequence)||sequence<1)throw Error("Invalid sequence"); fs.writeFileSync("build.json",JSON.stringify({version,sequence,buildId:`${sequence}:${version}`})); fs.writeFileSync("update-public-key.pem",Buffer.from(process.env.GRIDLENS_UPDATE_PUBLIC_KEY_BASE64||"","base64"));'
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
 COPY --from=build /app/dist/ dist/

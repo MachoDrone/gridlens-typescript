@@ -46,9 +46,10 @@ function dependencies(runner: DockerRunner, config: InstallationConfig): string 
     })) fail("The saved collection owner must be running with its existing read socket before browser access is added.");
   return network.Id;
 }
-function environment(runtime: Image, origin: string, privateNetwork = false): string[] {
+function environment(runtime: Image, origin: string, privateNetwork = false, updater = false): string[] {
   const overrides = new Map([["GRIDLENS_SOCKET", "/ipc/read.sock"], ["GRIDLENS_PUBLIC_ORIGIN", origin], ["GRIDLENS_TRANSPORT", "vpn-http"]]);
   if(privateNetwork)overrides.set("GRIDLENS_VPN_AUTH_FILE","/vpn-auth/browser.json");
+  if(updater)overrides.set("GRIDLENS_UPDATES","1");
   return [...(runtime.Config.Env ?? []).filter(entry => !overrides.has(entry.split("=", 1)[0]!)),
     ...[...overrides].map(([name, value]) => `${name}=${value}`)].sort();
 }
@@ -65,6 +66,10 @@ function endpoint(config: InstallationConfig, container: Metadata, runtime: Imag
   const origin = originFor(config.bindAddress, port).replace(/^https:/, "http:");
   const mounts = container.Mounts, security = host.SecurityOpt;
   const privateNetwork=Array.isArray(cfg.Env)&&cfg.Env.includes("GRIDLENS_VPN_AUTH_FILE=/vpn-auth/browser.json");
+  const updater=Array.isArray(cfg.Env)&&cfg.Env.includes("GRIDLENS_UPDATES=1");
+  // A deliberate rollback to pre-updater code retains its previous gateway
+  // until this exact recorded image is replaced on the unchanged endpoint.
+  if(updater&&!config.updater&&container.Image!==config.previous?.imageId)fail("The browser gateway updater configuration does not match the installation.");
   const expectedMounts=[{name:resourceName(config.instance,"read-ipc"),target:"/ipc"},
     ...(privateNetwork?[{name:resourceName(config.instance,"vpn-auth"),target:"/vpn-auth"}]:[])];
   if (cfg.User !== "1000:1000" || host.ReadonlyRootfs !== true || host.Privileged !== false
@@ -78,7 +83,7 @@ function endpoint(config: InstallationConfig, container: Metadata, runtime: Imag
       const got=object(value);return got.Type==="volume"&&got.Name===want.name&&got.Destination===want.target&&got.RW===false;
     }))
     || !equal(cfg.Cmd, ["node", "scripts/shared-gateway.ts"]) || !equal(cfg.Entrypoint ?? null, runtime.Config.Entrypoint ?? null)
-    || !Array.isArray(cfg.Env) || cfg.Env.some(value => typeof value !== "string") || !equal([...cfg.Env].sort(), environment(runtime, origin,privateNetwork)))
+    || !Array.isArray(cfg.Env) || cfg.Env.some(value => typeof value !== "string") || !equal([...cfg.Env].sort(), environment(runtime, origin,privateNetwork,updater)))
     fail("An existing browser gateway has changed isolation, mounts, command or origin; it was left unchanged.");
   return { origin, port, imageId: runtime.Id, ...(privateNetwork?{privateNetwork:true}:{}) };
 }
@@ -101,6 +106,22 @@ export function readVpnWebEndpoint(runner: DockerRunner, config: InstallationCon
   const saved = endpoint(config, existing, runtime), networkId = dependencies(runner, config);
   if(saved.privateNetwork&&!inspectOwned(runner,"volume",resourceName(config.instance,"vpn-auth"),config.instance))fail("The saved browser authorization volume is unavailable.");
   effective(config, existing, networkId, saved); return saved;
+}
+/** Recovery may inspect a sibling while the single owner is temporarily absent.
+ * Its recorded image, endpoint and isolation must still match exactly. */
+export function validateVpnWebRecovery(runner: DockerRunner, config: InstallationConfig,
+  expected: { origin: string; port: number; images: readonly string[] } | null): void {
+  const existing = inspectOwned(runner, "container", resourceName(config.instance, "vpn-web"), config.instance);
+  if (!existing) return;
+  if (!expected || typeof existing.Image !== "string" || !expected.images.includes(existing.Image)) fail("The browser gateway is outside the recorded update transaction.");
+  const runtime = image(runner, existing.Image, object(object(existing.Config).Labels)[VERSION_LABEL]);
+  const saved = endpoint(config, existing, runtime);
+  if (saved.origin !== expected.origin || saved.port !== expected.port) fail("The browser gateway endpoint changed during update recovery.");
+  if (object(existing.State).Running === true) {
+    const network = inspectOwned(runner, "network", resourceName(config.instance, "network"), config.instance);
+    if (!network || typeof network.Id !== "string") fail("The recorded browser network is unavailable.");
+    effective(config, existing, network.Id, saved);
+  }
 }
 
 function provisionAuthorization(runner: DockerRunner, config: InstallationConfig, runtime: Image): void {
@@ -156,6 +177,7 @@ export function ensureVpnWeb(runner: DockerRunner, config: InstallationConfig, r
       ...mount(resourceName(config.instance,"vpn-auth"),"/vpn-auth",true),
       "--publish", `${bind}:${selectedPort}:8443/tcp`, "--env", "GRIDLENS_SOCKET=/ipc/read.sock",
       "--env", `GRIDLENS_PUBLIC_ORIGIN=${origin}`, "--env", "GRIDLENS_TRANSPORT=vpn-http", "--env", "GRIDLENS_VPN_AUTH_FILE=/vpn-auth/browser.json",
+      ...(config.updater ? ["--env", "GRIDLENS_UPDATES=1"] : []),
       runtime.Id, "node", "scripts/shared-gateway.ts"]);
   }
   existing = inspectOwned(runner, "container", name, config.instance);

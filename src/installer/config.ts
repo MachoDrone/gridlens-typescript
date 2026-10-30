@@ -11,6 +11,8 @@ export interface InstallationConfig {
   phase: "prepared" | "applying" | "ready";
   active: InstalledImage;
   previous?: InstalledImage;
+  /** Provisioned installer-owned update service; absent on older installations. */
+  updater?: { protocol: 1 };
   /** Explicit endpoint-repair intent; old port/origin remain until replacement verifies. */
   pendingPort?: number;
 }
@@ -33,6 +35,8 @@ export function validateInstallation(value: unknown): InstallationConfig {
     || !["prepared", "applying", "ready"].includes(c.phase)) throw new InstallerError("The saved installation configuration is unsupported or invalid.");
   if (c.pendingPort !== undefined && (!Number.isInteger(c.pendingPort) || c.pendingPort < 1024 || c.pendingPort > 65535 || c.pendingPort === c.port))
     throw new InstallerError("The saved endpoint recovery is invalid.");
+  if (c.updater !== undefined && (!c.updater || c.updater.protocol !== 1 || Object.keys(c.updater).some(key => key !== "protocol")))
+    throw new InstallerError("The saved updater configuration is unsupported.");
   for (const image of [c.active, ...(c.previous ? [c.previous] : [])]) {
     if (!image || !/^sha256:[a-f0-9]{64}$/.test(image.imageId) || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(image.version)
       || !Number.isSafeInteger(image.sequence) || image.sequence < 1 || !/^gridlens-modern-[a-z0-9-]+-state-[a-z0-9-]+$/.test(image.stateVolume)

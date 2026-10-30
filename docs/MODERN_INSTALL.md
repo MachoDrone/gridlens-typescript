@@ -193,6 +193,108 @@ control socket; browser credentials travel through its restricted read/setup soc
 Neither path puts secret values in process arguments. Verified retained credentials
 stay in the owner's encrypted credential volume.
 
+## Browser-controlled updates
+
+The update-enabled installation offers **Update** below Hosts in the existing
+narrow sidebar. The collapsed rail keeps the same icon. A slow green pulse means
+a verified newer development release is available; reduced motion uses steady
+green. The panel separates the installed version, latest verified release and
+last successful check. Failed checks retain previously verified information with
+their error, rather than claiming the installation is current.
+
+**Update now** is the one explicit installation action. It downloads and verifies
+the release, then replaces this installation's collection owner and configured
+HTTPS/private-web gateways together. It does not update Nosana software, restart
+Nosana workloads or update other GridLens installations. Routine operation needs
+no terminal commands. Closing the panel or browser does not cancel accepted work;
+reopening reads the existing durable operation. Duplicate submissions are
+idempotent, and one installation admits only one active transaction.
+
+Progress shows actual download bytes and percentage, followed by named stages
+and elapsed time. During gateway replacement, the already loaded page shows
+Reconnecting and retries the same URL. There is no estimated countdown or
+success inferred from elapsed time. Readiness requires matching installed build
+identities, working owner communication and valid cached Fleet reads. The browser
+reloads once per completed operation, then verifies its build and renders an
+authorized roster and initial snapshot before returning to Fleet. An empty fleet
+or dated/unknown host values remain usable. Browser disconnection, tab closure and
+revoked user access do not cause server rollback.
+
+The updater retains the previous matched image/state and gateway configuration.
+Failed application readiness triggers automatic recovery with the original
+failure preserved. A recovered previous version is reported as a failed update
+with successful restoration, never a successful installation. A browser-only
+loading problem offers Retry loading Fleet without resubmitting installation.
+
+The owner exposes bounded, same-origin `/api/shared/updates` status plus
+`/api/shared/updates/check` and `/api/shared/updates/start` actions. Viewers can read
+status; mutations require an operator and exact Origin. The browser selects only
+a verified candidate ID and supplies an idempotency key. It cannot select a URL,
+image, filesystem path or command. Private-network mode retains its existing
+network-access authorization boundary.
+
+One labeled updater container owns the Docker connection and communicates with
+the owner through a separate named-volume socket. The gateways retain their
+restricted owner connection and receive no Docker access. The updater has no
+published port, uses a read-only root filesystem, and stores its journal and
+staged archives in an owned named volume. Its temporary replacement helper has
+the same bounded installation role. Docker socket access is significant host
+authority; code restricts mutations to validated resources for this installation.
+It adds no host packages, services, VPN configuration or general shell endpoint.
+
+The signed `modern-development` channel points to immutable modern release
+artifacts. The shared worker checks every 15 minutes with jitter, coalesces manual
+checks with a 60-second minimum interval, and retains retry deadlines across
+restart. Platform, release sequence, worker compatibility, Ed25519 signatures,
+archive size and SHA-256 must verify before replacement. A lower channel sequence
+or changed identity at an already accepted sequence is rejected. Browsers poll
+the local status only, once per minute while visible and every two seconds during
+active checks/updates; hidden pages stop polling while accepted server work continues.
+
+Existing releases have neither an updater endpoint nor Docker authority in the
+owner/gateway, so they cannot enable this feature through their old web page.
+The first rollout requires a maintainer-handled enabling migration on the
+verified existing installation. This is separate from the subsequent browser
+update journey and from source publication. Preserve existing addresses,
+identities, credentials, fleet access and safety ledger during migration; never
+use an old browser's SSH setup path as an updater bootstrap.
+
+Updater support is advertised by the verified image's
+`io.gridlens.updater-protocol=1` label. A rollback selects the actual saved image
+for the owner, gateways and updater. Rolling back to pre-updater code removes its
+updater integration and stops only the validated updater container, retaining the
+journal and named volumes. An older public release reports the newer installed
+version and existing dashboard URL without replacing or reconfiguring its services.
+The installer streams runtime archives into an exclusive temporary file and
+verifies the signed size and checksum before loading them into Docker.
+
+Automated interface/browser tests and real Docker acceptance are separate checks.
+Use isolated fixture installations for signed update, restart, rollback and
+worker replacement testing; never use live fleet state as test data. Publication
+and physical enabling are reported separately from implementation.
+
+The 2026-10-29 candidate passed strict typechecking, 1,019 isolated Node tests and
+371 browser tests. The exact source image passed an uncached Docker build and a
+real browser-triggered update with signed fixture releases: cold archive loading,
+owner/both-gateway replacement, updater self-replacement, automatic return to
+Fleet, and automatic rollback after an intentionally broken owner startup.
+Those fixture resources were removed without cleanup errors. Release downloads
+used an explicitly isolated signed transport fixture; this does not establish
+publication or a live rollout. Build RUN containers were verified at 2 GiB RAM
+with no additional swap allowance and one CPU; Docker daemon and image-transfer
+work remain outside those limits.
+
+The exact generated launchers also passed ordinary first setup, explicit
+`--upgrade`, and both ordinary/upgrade invocations of an older release against
+the newer installation. These checks used signed disposable releases through a
+process-scoped HTTPS proxy and temporary trust certificate; no public release
+was published for the test. Both configured gateways and the authorized empty
+roster returned successfully, identities/addresses remained stable, and older
+release attempts retained the existing container identities. Test resources,
+proxy, tunnel and disposable keys were cleaned up. This verifies the generated
+entrypoint with fixture transport, not a published download or physical enablement
+of an operator's installation.
+
 ## Ownership and recovery
 
 Every managed resource has `io.gridlens.product=shared-backend` and the exact
@@ -210,13 +312,18 @@ SSH credential volume, state database, control socket or shell API.
 | `read-ipc` volume | Restricted reads and bounded browser setup operations | Retain |
 | `control-ipc` volume | Terminal-only setup socket | Retain; never mount in gateway |
 | `vpn-auth` volume | Private-network gateway grant, mounted read-only by that gateway | Retain; revocation remains in the current ledger |
+| `updates-ipc` volume | Restricted owner-to-updater socket | Retain; never mount in a gateway |
+| `update-state` volume | Durable update journal, recovery intent and bounded staged archives | Retain across application and updater replacement |
 
-Runtime containers run as UID/GID 1000 with a read-only root filesystem,
+The collection owner and gateways run as UID/GID 1000 with a read-only root filesystem,
 all capabilities dropped, `no-new-privileges`, a PID limit and bounded temporary
-memory. Only the gateway publishes the explicitly selected private IP/port.
+memory. Only gateways publish the explicitly selected private IP/ports.
 The short-lived initialization helper has no network and uses narrow container
-capabilities to initialize ownership of these named volumes. No host filesystem
-bind mounts, host networking, privileged containers or workload control are used.
+capabilities to initialize ownership of these named volumes. The updater runs as
+UID 0/GID 1000 with the same root-filesystem/capability restrictions; its sole
+host bind mount is the fixed Docker socket. Its replacement helper also receives
+that socket. No host networking, privileged container mode or Nosana workload
+control is added. The collection owner and gateways receive no host bind mounts.
 
 Rerun preserves configuration, ports, identity and data. Containers use Docker's
 `unless-stopped` restart policy. A later public release with a lower sequence

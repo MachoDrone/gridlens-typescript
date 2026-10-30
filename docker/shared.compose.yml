@@ -1,5 +1,8 @@
 # Review/reference topology. The signed terminal coordinator owns lifecycle and
 # persists its selected image, address, ports and matched state recovery pairs.
+# This core owner/HTTPS example omits the installer-provisioned private-web and
+# updater services. Use the signed installer for the full update-enabled topology;
+# see docs/MODERN_INSTALL.md. This file is not an enabling migration.
 services:
   owner:
     image: ${GRIDLENS_IMAGE:?Use the verified release image digest}

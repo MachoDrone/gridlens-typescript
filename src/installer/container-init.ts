@@ -63,6 +63,14 @@ function copyDirectory(source: string, destination: string): void {
   const fd=openSync(destination,"r");try{fsyncSync(fd);}finally{closeSync(fd);}
 }
 export function containerOperation(operation: string, body: unknown): unknown {
+  if (operation === "updater-initialize") {
+    for (const directory of ["/updates", "/update-state"]) {
+      mkdirSync(directory, { recursive: true, mode: 0o755 });
+      chownSync(directory, 0, directory === "/updates" ? 1000 : 0);
+      chmodSync(directory, directory === "/updates" ? 0o750 : 0o700);
+    }
+    return { initialized: true };
+  }
   if(operation==="vpn-web-auth")return vpnWebAuthorization();
   if(operation==="read")return existsSync("/config/installation.json")?validateInstallation(JSON.parse(readFileSync("/config/installation.json","utf8"))):null;
   if(operation==="save") {const config=validateInstallation(body);atomic("/config/installation.json",JSON.stringify(config));return {saved:true};}

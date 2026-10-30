@@ -3,7 +3,8 @@ import { fileURLToPath } from "node:url";
 import { openSharedState } from "../src/backend/sqlite-state.ts";
 import { createSharedCollector } from "../src/backend/collector.ts";
 import { createSharedService } from "../src/backend/service.ts";
-import { startOwnerSocket } from "../src/backend/ipc.ts";
+import { startOwnerSocket, ownerCall } from "../src/backend/ipc.ts";
+import { readInstalledBuild } from "../src/backend/build.ts";
 import { openCredentialVault } from "../src/backend/credential-vault.ts";
 import { createPcMonitor } from "../src/backend/pc-monitor.ts";
 import type { Server } from "node:http";
@@ -23,9 +24,13 @@ export async function startSharedOwner(environment: Readonly<Record<string, stri
     try { await state.close(); } finally { vault?.close(); }
   })();
   try {
+    const updateSocket = environment.GRIDLENS_UPDATE_SOCKET;
+    if (updateSocket !== undefined && updateSocket !== "/updates/updater.sock") throw new Error("Use the owned updater socket.");
+    const build = readInstalledBuild("/app/build.json", updateSocket !== undefined);
     vault = openCredentialVault(environment.GRIDLENS_CREDENTIAL_DIR ?? "/credentials");
     service = createSharedService(state, { vault, requestHistory: (...args) => collector!.requestHistory(...args),
-      providerWaits: () => [...collector!.providerWaits(), ...monitor!.providerWaits()] });
+      providerWaits: () => [...collector!.providerWaits(), ...monitor!.providerWaits()], ...(build ? { build } : {}),
+      ...(updateSocket ? { updates: (body: Record<string, unknown>) => ownerCall(updateSocket, body, undefined, 10_000) } : {}) });
     collector = createSharedCollector({ state, contexts: service.access.contexts,
       onError: () => console.error("A shared collection cycle could not complete; dated cache retained.") });
     monitor = createPcMonitor({ state, vault, observations: service.observations, contexts: service.access.contexts });

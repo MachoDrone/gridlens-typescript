@@ -19,7 +19,7 @@ import { emptyStaking } from "./fixtures/staking.ts";
 import { blankStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../src/fleet/staking.ts";
 
 const fixtureFiles = [
-  "contracts/fleet.js", "contracts/shared.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "preview/shared-telemetry.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",
+  "contracts/fleet.js", "contracts/shared.js", "contracts/updates.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "preview/shared-telemetry.js", "preview/updates.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",
   "preview/evidence-clock.js", "preview/refresh-deadline.js", "preview/sidebar.js", "preview/viewport.js", "preview/table-scroll.js", "preview/connection.js",
   "index.html", "styles.css", "preview/main.js", "preview/fixtures.js", "fleet/freshness.js", "fleet/sort.js", "fleet/ip-display.js", "fleet/duration.js", "fleet/market-display.js", "fleet/hardware-display.js", "fleet/host-metadata.js",
   "fleet/node-info.js", "fleet/node-state.js", "fleet/node-api.js", "fleet/status-display.js", "fleet/country-display.js", "preview/state-refresh.js", "preview/info-content.js", "preview/column-help.js",

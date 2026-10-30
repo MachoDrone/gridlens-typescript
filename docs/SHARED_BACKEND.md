@@ -49,6 +49,16 @@ reads do not initiate duplicate routine collection. Explicit job-history request
 enter the same bounded provider scheduler. GPU detail reads use bounded stored
 history. Cache availability does not establish fresh or complete readings.
 
+Updater-enabled installations add a separate Docker-authorized updater behind a
+dedicated owner-only socket. The owner forwards only authenticated fixed
+status/check/start operations; the gateways keep their existing limited mounts.
+The browser's Update panel and restart recovery use a versioned public status
+contract with no commands, paths or download URLs. Application readiness checks
+match the owner/gateway build identities and validate cached roster data without
+requesting fresh upstream measurements. See
+[browser updates](MODERN_INSTALL.md#browser-controlled-updates) for the durable
+transaction, rollback and one-time enabling migration.
+
 ## Pairing and setup
 
 For separately paired HTTPS clients, the terminal creates a five-minute,

@@ -23,9 +23,11 @@
     "shared:owner": "node scripts/shared-owner.ts",
     "shared:gateway": "node scripts/shared-gateway.ts",
     "shared:control": "node scripts/shared-control.ts",
+    "shared:updater": "node scripts/shared-updater.ts",
     "build:coordinator": "node scripts/build-coordinator.ts",
     "build:modern": "node scripts/build-modern-release.ts",
-    "test:shared-docker": "node scripts/test-shared-docker.ts"
+    "test:shared-docker": "node scripts/test-shared-docker.ts",
+    "test:updater-docker": "node scripts/test-updater-docker.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

@@ -5,6 +5,13 @@ import { originFor, validateInstallation } from "./config.ts";
 import type { InstallationConfig, InstalledImage } from "./config.ts";
 import { InstallerError } from "./release.ts";
 import type { ModernRelease } from "./release.ts";
+import { stopUpdater } from "../updater/deployment.ts";
+
+export const UPDATER_PROTOCOL_LABEL = "io.gridlens.updater-protocol";
+const updaterConfiguration = (config: InstallationConfig, enabled: boolean): InstallationConfig => {
+  const { updater: _updater, ...rest } = config;
+  return enabled ? { ...rest, updater: { protocol: 1 } } : rest;
+};
 
 export interface InstallOptions {
   instance: string;
@@ -15,12 +22,24 @@ export interface InstallOptions {
   certificate?: { certificate: string; privateKey: string };
   /** Explicit operator choice for an endpoint that is not effectively published. */
   repairPort?: number;
+  enableUpdater?: boolean;
 }
 export interface InstallResult { config: InstallationConfig; retainedNewer: boolean; certificate: string }
 export interface EndpointStatus { state: "healthy" | "missing" | "stopped" | "detached" | "unpublished"; repairRequired: boolean }
 export class Coordinator {
   readonly runner: DockerRunner;
   constructor(runner: DockerRunner) { this.runner = runner; }
+  /** The signed image ID binds this capability; release sequence is not a feature flag. */
+  supportsUpdater(selected: Pick<InstalledImage, "imageId" | "version">): boolean {
+    let image: { Id?: string; Config?: { Labels?: Record<string, string> } };
+    try { image = JSON.parse(checked(this.runner, ["image", "inspect", selected.imageId]))[0]; }
+    catch { throw new InstallerError("The selected image capability could not be verified."); }
+    if (image?.Id !== selected.imageId || image.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT
+      || image.Config.Labels["io.gridlens.version"] !== selected.version) throw new InstallerError("The selected image identity does not match its saved release.");
+    const protocol = image.Config.Labels[UPDATER_PROTOCOL_LABEL];
+    if (protocol !== undefined && protocol !== "1") throw new InstallerError("The selected image requires an unsupported updater protocol.");
+    return protocol === "1";
+  }
   private helper(instance: string, imageId: string, operation: string, body: unknown = {}, extra: string[] = []): string {
     return checked(this.runner, ["run", "--rm", "-i", ...labels(instance), ...restrictions,
       "--network", "none", "--user", "0:0", "--cap-add", "CHOWN", "--cap-add", "FOWNER", "--cap-add", "DAC_OVERRIDE",
@@ -44,6 +63,7 @@ export class Coordinator {
       ...mount(active.stateVolume, "/state"), ...mount(resourceName(instance, "ledger"), "/ledger"),
       ...mount(resourceName(instance, "read-ipc"), "/ipc"), ...mount(resourceName(instance, "control-ipc"), "/control"),
       ...mount(resourceName(instance, "credentials"), "/credentials"),
+      ...(config.updater ? [...mount(resourceName(instance, "updates-ipc"), "/updates", true), "--env", "GRIDLENS_UPDATE_SOCKET=/updates/updater.sock"] : []),
       "--env", "GRIDLENS_STATE_DIR=/state", "--env", "GRIDLENS_LEDGER_DIR=/ledger", "--env", "GRIDLENS_SOCKET_DIR=/ipc",
       "--env", "GRIDLENS_CONTROL_DIR=/control", "--env", "GRIDLENS_CREDENTIAL_DIR=/credentials",
       active.imageId, "node", "scripts/shared-owner.ts"];
@@ -52,6 +72,7 @@ export class Coordinator {
       ...mount(resourceName(instance, "read-ipc"), "/ipc", true), ...mount(resourceName(instance, "tls"), "/tls", true),
       "--publish", `${bind}:${config.port}:8443/tcp`, "--env", "GRIDLENS_SOCKET=/ipc/read.sock",
       "--env", "GRIDLENS_TLS_CERT=/tls/server.crt", "--env", "GRIDLENS_TLS_KEY=/tls/server.key",
+      ...(config.updater ? ["--env", "GRIDLENS_UPDATES=1"] : []),
       "--env", `GRIDLENS_PUBLIC_ORIGIN=${origin}`, active.imageId, "node", "scripts/shared-gateway.ts"];
     return { owner: ownerArgs, gateway: gatewayArgs };
   }
@@ -105,6 +126,25 @@ export class Coordinator {
     if (!gateway) return { state: "missing", repairRequired: true };
     this.validateGateway(config, gateway);
     return this.effectiveEndpoint(this.targetConfiguration(config), gateway);
+  }
+  /** Validate the exact current resources before a transaction removes anything. */
+  validateManagedRuntime(config: InstallationConfig): void {
+    for (const role of ["owner", "gateway"] as const) {
+      const existing = inspectOwned(this.runner, "container", resourceName(config.instance, role), config.instance);
+      if (existing) { if (role === "gateway") this.validateGateway(config, existing); else this.validateRuntime(config, role, existing); }
+    }
+  }
+  /** Restore an internally recorded image/state pair; never accepts browser input. */
+  restore(current: InstallationConfig, previous: InstallationConfig): InstallResult {
+    validateInstallation(current); validateInstallation(previous);
+    if (current.instance !== previous.instance || current.origin !== previous.origin || current.certificateSha256 !== previous.certificateSha256)
+      throw new InstallerError("Recovery cannot change the saved installation identity or endpoint.");
+    this.validateManagedRuntime(current);
+    this.removeRuntime(current.instance);
+    this.save({ ...previous, phase: "applying" });
+    this.startRuntime(previous);
+    const config = { ...previous, phase: "ready" as const }; this.save(config);
+    return { config, retainedNewer: false, certificate: this.helper(config.instance, config.active.imageId, "certificate") };
   }
   private removeGateway(config: InstallationConfig, gateway: Record<string, unknown>): void {
     this.validateGateway(config, gateway);
@@ -183,9 +223,14 @@ export class Coordinator {
     if (config && (options.bindAddress !== undefined && options.bindAddress !== config.bindAddress || options.port !== undefined && options.port !== config.port || options.certificate !== undefined)) {
       throw new InstallerError("Reruns preserve the saved address, port and TLS identity. Use the saved configuration.");
     }
-    let retainedNewer = false;
+    const retainedNewer = !!config && options.action !== "rollback" && release.sequence < config.active.sequence;
+    if (retainedNewer && config!.phase === "ready") {
+      this.validateManagedRuntime(config!);
+      return { config: config!, retainedNewer: true, certificate: this.helper(instance, config!.active.imageId, "certificate") };
+    }
     if (!config && options.repairPort !== undefined) throw new InstallerError("Endpoint repair requires an existing installation.");
     if (config && config.phase !== "applying") {
+      this.validateManagedRuntime(config);
       if (options.action === "rollback" && !config.previous) throw new InstallerError("No matched image/state recovery pair is available.");
       if (options.action !== "rollback" && release.sequence === config.active.sequence && release.imageId !== config.active.imageId)
         throw new InstallerError("The same release sequence identifies a different image; setup stopped.");
@@ -207,23 +252,39 @@ export class Coordinator {
     } else if (options.action === "rollback") {
       if (!config.previous) throw new InstallerError("No matched image/state recovery pair is available.");
       const prior = config.active;
-      config={...config,active:config.previous,previous:prior,phase:"applying"};
-      this.save(config);
+      const enabled = !!(config.updater || options.enableUpdater) && this.supportsUpdater(config.previous);
+      if (config.updater && !enabled) stopUpdater(this.runner, instance);
       this.removeRuntime(instance);
+      config=updaterConfiguration({...config,active:config.previous,previous:prior,phase:"applying"}, enabled);
+      this.save(config);
     } else if (release.sequence > config.active.sequence && options.action === "upgrade") {
       const previous=config.active;
+      const enabled = !!(config.updater || options.enableUpdater) && this.supportsUpdater(release);
+      if (config.updater && !enabled) stopUpdater(this.runner, instance);
       const stateVolume=resourceName(instance,`state-${release.sequence}-${randomBytes(6).toString("hex")}`);
       ensureVolume(this.runner,stateVolume,instance);
       // Stop the single writer before copying SQLite and its WAL as one matched recovery point.
       this.removeRuntime(instance);
       this.helper(instance,release.imageId,"copy-state",{},[...mount(previous.stateVolume,"/source",true),...mount(stateVolume,"/destination")]);
       const active: InstalledImage={imageId:release.imageId,version:release.version,sequence:release.sequence,stateVolume};
-      config={...config,active,previous,phase:"applying"};
+      config=updaterConfiguration({...config,active,previous,phase:"applying"}, enabled);
       this.save(config);
-    } else if (release.sequence < config.active.sequence) {
-      retainedNewer=true;
     } else if (release.sequence === config.active.sequence && release.imageId !== config.active.imageId) {
       throw new InstallerError("The same release sequence identifies a different image; setup stopped.");
+    }
+    const updaterEnabled = !!(config.updater || options.enableUpdater && !retainedNewer) && this.supportsUpdater(config.active);
+    if (config.updater && !updaterEnabled) {
+      stopUpdater(this.runner, instance);
+      this.removeRuntime(instance);
+      config = updaterConfiguration({ ...config, phase: "applying" }, false); this.save(config);
+    }
+    if (updaterEnabled) for (const suffix of ["updates-ipc", "update-state"]) ensureVolume(this.runner, resourceName(instance, suffix), instance);
+    if (updaterEnabled && !config.updater) {
+      // First enablement is an explicit installer operation. Existing runtimes
+      // were validated above; replace them with the narrow socket composition.
+      this.removeRuntime(instance);
+      config = { ...config, updater: { protocol: 1 }, phase: "applying" };
+      this.save(config);
     }
     const target = this.targetConfiguration(config);
     this.startRuntime(target);

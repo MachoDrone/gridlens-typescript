@@ -41,6 +41,17 @@ octet. Changing it redraws only IP cells and starts no requests. Compact Jobs ce
 show the job link and expansion control; lifecycle and observation times remain
 in accessible labels and expanded details.
 
+The browser-update candidate adds **Update** below Hosts without widening the
+sidebar. Its icon pulses green for a verified newer release, or stays green with
+reduced motion. **Update now** downloads, verifies and installs the development
+release for this GridLens installation. Progress survives dashboard restarts and
+browser closure; the browser returns to Fleet after the installed build and its
+data path verify. Unknown or stale host readings do not delay readiness. This
+requires the separate updater provisioned by the modern installer; existing
+installations need a maintainer-handled enabling migration first. This source
+feature is not evidence of publication or live enablement. See
+[browser updates](docs/MODERN_INSTALL.md#browser-controlled-updates).
+
 **Country** appears after System at the right edge of Fleet. It reuses the country
 reported in existing Nosana metrics, with a saved header toggle between compact
 codes and full English names. Missing values remain unknown; this is reported

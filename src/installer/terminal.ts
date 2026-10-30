@@ -9,15 +9,17 @@ import { verifyGateway } from "./health.ts";
 import { checked, inspectOwned, localDockerRunner, resourceName } from "./docker.ts";
 import type { DockerRunner } from "./docker.ts";
 import { browserConnectionText, privateBrowserConnectionText, verifyPrivateWeb } from "./browser-connection.ts";
-import { ensureVpnWeb, readVpnWebEndpoint } from "./vpn-web.ts";
+import { readVpnWebEndpoint } from "./vpn-web.ts";
+import { reconcileInstalledServices } from "./installed-services.ts";
 import { runTerminalSetup, verifiedSetupNetwork } from "./setup-session.ts";
 import type { SetupControl } from "./setup-session.ts";
-import { InstallerError, releaseURL, verifyArtifact, verifyRelease } from "./release.ts";
-import type { ReleaseArtifact } from "./release.ts";
+import { InstallerError, releaseURL, verifyRelease } from "./release.ts";
+import { downloadArtifactToFile } from "./artifact-download.ts";
 import { assertLocalDockerForSelection, chooseDashboardPort, choosePrivateEndpoint, choosePrivateWebPorts, discoverPrivateEndpoints, dockerNetworkExclusions, probeBindPort } from "./network-selection.ts";
 import type { PortProbe, SelectionPrompts } from "./network-selection.ts";
 import type { InstallationConfig } from "./config.ts";
 import { cliColorEnabled, cliSection, cliText } from "./cli-format.ts";
+import { acquireMaintenanceLock, guardTerminalUpdate } from "../updater/deployment.ts";
 
 declare const GRIDLENS_RELEASE_PUBLIC_KEY: string;
 
@@ -212,9 +214,6 @@ async function download(url: URL, limit: number): Promise<Uint8Array> {
   for await(const part of response.body){total+=part.byteLength;if(total>limit){await response.body.cancel().catch(()=>{});throw new InstallerError("Release download exceeded its declared size.");}parts.push(part);}
   return Buffer.concat(parts);
 }
-async function downloadArtifact(base: string, artifact: ReleaseArtifact): Promise<Uint8Array> {
-  const bytes=await download(releaseURL(base,artifact.name),artifact.bytes);verifyArtifact(bytes,artifact);return bytes;
-}
 function option(args: readonly string[], name: string): string | undefined {const at=args.indexOf(name);if(at<0)return undefined;const value=args[at+1];if(!value||value.startsWith("--"))throw new InstallerError(`Missing ${name} value.`);return value;}
 function savedConfiguration(coordinator: Coordinator, runner: DockerRunner, instance: string): InstallationConfig {
   const gateway = inspectOwned(runner, "container", resourceName(instance, "gateway"), instance);
@@ -259,6 +258,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
   if(args.includes("--version")){console.log("gridlens-modern-coordinator 1 / Node "+process.versions.node);return;}
   process.umask(0o077);
   const terminal=suppliedTerminal??controllingTerminal(),runner=localDockerRunner();
+  let releaseMaintenanceLock: (() => Promise<void>) | undefined;
   try{
     const instance=option(args,"--instance")??"default";resourceName(instance,"owner");
     const webPortInput=option(args,"--web-port");
@@ -290,12 +290,23 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     if(image.status!==0){
       terminal.print("");
       terminal.print(cliText(terminal,"pending","Downloading and verifying GridLens…"));
-      const bytes=await downloadArtifact(base,release.runtime),directory=mkdtempSync(join(tmpdir(),"gridlens-modern-"));
-      try{const file=join(directory,"runtime.tar");writeFileSync(file,bytes,{mode:0o600});checked(runner,["load","--input",file]);}finally{rmSync(directory,{recursive:true,force:true});}
+      const directory=mkdtempSync(join(tmpdir(),"gridlens-modern-"));
+      try{const file=await downloadArtifactToFile(base,release.runtime,directory);checked(runner,["load","--input",file]);}finally{rmSync(directory,{recursive:true,force:true});}
     }
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
+    const observed=coordinator.configuration(instance,release.imageId);
+    if(observed&&observed.phase==="ready"&&!args.includes("--rollback")&&release.sequence<observed.active.sequence){
+      coordinator.validateManagedRuntime(observed);
+      const saved=readVpnWebEndpoint(runner,observed);
+      terminal.print(cliText(terminal,"muted",`The newer installed version ${observed.active.version} was retained. No public release was applied.`));
+      terminal.print(cliText(terminal,"action",`Dashboard: ${saved?.origin??observed.origin}`));
+      return;
+    }
+    releaseMaintenanceLock=await acquireMaintenanceLock(runner,instance,observed?.updater?observed.active.imageId:release.imageId);
     const previous=coordinator.configuration(instance,release.imageId);
-    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||args.includes("--vpn-web")&&previous&&previous.active.sequence<9?"upgrade":"setup";
+    if(previous)guardTerminalUpdate(runner,previous);
+    const action=args.includes("--rollback")?"rollback":args.includes("--upgrade")||previous&&!previous.updater&&release.sequence>previous.active.sequence
+      ||args.includes("--vpn-web")&&previous&&previous.active.sequence<9?"upgrade":"setup";
     if(!previous){
       assertLocalDockerForSelection(runner);
       const selected=await choosePrivateEndpoint(terminal,discoverPrivateEndpoints(networkInterfaces(),dockerNetworkExclusions(runner)));
@@ -310,15 +321,19 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       return endpoint;
     });
     terminal.print("");terminal.print(cliText(terminal,"pending","Preparing GridLens…"));
-    const result=coordinator.install({instance,release,action,...(bindAddress?{bindAddress}:{}),...(port?{port}:{}),...(repairPort?{repairPort}:{}),...(certificate?{certificate}:{})});
+    const result=coordinator.install({instance,release,action,enableUpdater:true,...(bindAddress?{bindAddress}:{}),...(port?{port}:{}),...(repairPort?{repairPort}:{}),...(certificate?{certificate}:{})});
     await verifyGateway(result.config.origin,result.certificate);
-    if(result.retainedNewer)terminal.print(cliText(terminal,"muted","The newer installed version was retained."));
+    if(result.retainedNewer){
+      const saved=readVpnWebEndpoint(runner,result.config);
+      terminal.print(cliText(terminal,"muted",`The newer installed version ${result.config.active.version} was retained. No public release was applied.`));
+      terminal.print(cliText(terminal,"action",`Dashboard: ${saved?.origin??result.config.origin}`));
+      return;
+    }
     if(args.includes("--vpn-web")&&webPort===undefined&&!inspectOwned(runner,"container",resourceName(instance,"vpn-web"),instance)){
       assertLocalDockerForSelection(runner);
       webPort=await chooseDashboardPort(terminal,result.config.bindAddress,{preferred:result.config.port===65535?65534:result.config.port+1,label:"Web dashboard port"});
     }
-    const web=args.includes("--vpn-web")?ensureVpnWeb(runner,result.config,release,webPort,{upgrade:true})
-      :readVpnWebEndpoint(runner,result.config);
+    const web=reconcileInstalledServices(runner,result,release,{action,vpnWeb:args.includes("--vpn-web"),...(webPort===undefined?{}:{webPort})});
     if(web){
       if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
       await verifyPrivateWeb(web.origin,true);
@@ -330,5 +345,5 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     await offerPublicCertificateExport(terminal,instance,result.certificate,{existingTrusted:certificate!==undefined});
     if(result.config.active.sequence>=5)publishSetupNetwork(runner,result.config);
     terminal.print(browserConnectionText(result.config.origin,coordinator.operatorCode(instance),result.config.active.sequence>=3));
-  }finally{terminal.close();}
+  }finally{await releaseMaintenanceLock?.();terminal.close();}
 }

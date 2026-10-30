@@ -827,6 +827,9 @@ let inputError: string | null = null;
 let inputLoading = true;
 let rosterEstablished = false;
 let rosterReadPending = false;
+const updatesEnabled = document.querySelector('meta[name="gridlens-updates"]')?.getAttribute("content") === "1";
+let initialFleetSnapshotAccepted = false;
+let fleetReadyAnnounced = false;
 let metadataRecords = new Map<string, HostMetadataRecord>();
 let metadataLoading = false;
 let metadataAttempted = false;
@@ -1054,6 +1057,10 @@ async function readProgressive<T extends { address: string }>(
       const records: unknown[] = snapshot.hosts;
       if (!records.every(valid)) throw new Error("Invalid Fleet observations.");
       apply(records, complete, payload);
+      if (updatesEnabled && fleetConfig.sourceMode === "snapshot" && resource === "metadata" && !initialFleetSnapshotAccepted) {
+        initialFleetSnapshotAccepted = true;
+        queueMicrotask(() => { if (visibleStateView()) renderSupplied(); });
+      }
     },
   });
 }
@@ -2624,6 +2631,14 @@ function renderSupplied(): void {
   scheduleSolExpiry();
   scheduleNosExpiry();
   scheduleStakingExpiry();
+  if (updatesEnabled && fleetConfig.sourceMode === "snapshot" && rosterEstablished && !inputError && initialFleetSnapshotAccepted && !fleetReadyAnnounced) {
+    const buildId = document.querySelector('meta[name="gridlens-build-id"]')?.getAttribute("content");
+    if (buildId) {
+      fleetReadyAnnounced = true;
+      document.documentElement.dataset.gridlensFleetReady = buildId;
+      document.dispatchEvent(new Event("gridlens:fleet-ready"));
+    }
+  }
 }
 
 function render(): void {
@@ -2802,7 +2817,7 @@ window.addEventListener("pageshow", () => {
 render();
 
 async function loadMetadata(): Promise<void> {
-  if (metadataLoading || inputLoading || inputError || suppliedAddresses.length === 0 || !visibleStateView()) return;
+  if (metadataLoading || inputLoading || inputError || suppliedAddresses.length === 0 && !(updatesEnabled && !initialFleetSnapshotAccepted) || !visibleStateView()) return;
   metadataAttempted = true;
   metadataLoading = true;
   const controller = startRead("metadata");

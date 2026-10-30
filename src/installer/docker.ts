@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import type { SpawnSyncOptionsWithStringEncoding, SpawnSyncReturns } from "node:child_process";
 import { InstallerError } from "./release.ts";
 
@@ -6,7 +6,11 @@ export const PRODUCT_LABEL = "io.gridlens.product";
 export const PRODUCT = "shared-backend";
 export const INSTANCE_LABEL = "io.gridlens.instance";
 export interface CommandResult { status: number; stdout: string; stderr: string }
-export interface DockerRunner { run(args: readonly string[], input?: string | Uint8Array): CommandResult }
+export interface DockerRunner {
+  run(args: readonly string[], input?: string | Uint8Array): CommandResult;
+  /** Holds a fixed helper's stdin open until release; used for an OS-owned lock. */
+  hold?(args: readonly string[]): Promise<() => Promise<void>>;
+}
 type ProcessRunner = (command: string, args: readonly string[], options: SpawnSyncOptionsWithStringEncoding) => SpawnSyncReturns<string>;
 const DIAGNOSTIC_LIMIT = 4096;
 
@@ -66,15 +70,30 @@ export class DockerCommandError extends InstallerError {
     this.name = "DockerCommandError"; this.operation = operation; this.kind = kind; this.exitCode = result.status; this.processCode = code; this.diagnostic = detail;
   }
 }
-export function localDockerRunner({ execute = spawnSync, environment = process.env }: { execute?: ProcessRunner; environment?: NodeJS.ProcessEnv } = {}): DockerRunner {
+export function localDockerRunner({ execute = spawnSync, environment = process.env, allowSudo = true }: { execute?: ProcessRunner; environment?: NodeJS.ProcessEnv; allowSudo?: boolean } = {}): DockerRunner {
   let sudo = false;
+  let maintenance: { name: string; id?: string; lost: boolean; released: boolean } | undefined;
   return { run(args, input) {
+    if (maintenance && !maintenance.released) {
+      if (maintenance.lost) throw new InstallerError("The installation lock was lost. No further runtime changes were attempted.");
+      const guarded = execute(sudo ? "sudo" : "docker", [...(sudo ? ["--", "docker"] : []), "container", "inspect", maintenance.name],
+        { encoding: "utf8", shell: false, env: { ...environment, DOCKER_CLI_HINTS: "false" }, timeout: 10_000, maxBuffer: 64 * 1024 });
+      try {
+        const values = JSON.parse(guarded.stdout), item = values?.[0];
+        if (guarded.status !== 0 || values.length !== 1 || item?.State?.Running !== true || typeof item.Id !== "string"
+          || maintenance.id !== undefined && maintenance.id !== item.Id) throw new Error();
+        maintenance.id = item.Id;
+      } catch {
+        maintenance.lost = true;
+        throw new InstallerError("The installation lock was lost. No further runtime changes were attempted.");
+      }
+    }
     const options: SpawnSyncOptionsWithStringEncoding = { encoding: "utf8", ...(input === undefined ? {} : { input }), shell: false,
       maxBuffer: 16 * 1024 * 1024, env: { ...environment, DOCKER_CLI_HINTS: "false" }, timeout: dockerCommandTimeoutMs(args) };
     let result = execute(sudo ? "sudo" : "docker", sudo ? ["--", "docker", ...args] : [...args], options);
     const remote = !!environment.DOCKER_HOST && !environment.DOCKER_HOST.startsWith("unix:")
       || !!environment.DOCKER_CONTEXT && environment.DOCKER_CONTEXT !== "default";
-    if (!sudo && !remote && result.status !== 0 && /permission denied.*(?:docker|socket)|(?:docker|socket).*permission denied/i.test(result.stderr ?? "")) {
+    if (allowSudo && !sudo && !remote && result.status !== 0 && /permission denied.*(?:docker|socket)|(?:docker|socket).*permission denied/i.test(result.stderr ?? "")) {
       process.stderr.write("Docker access requires administrator approval; sudo will prompt in this terminal.\n");
       const approval = execute("sudo", ["-v"], { encoding: "utf8", stdio: "inherit", shell: false });
       if (approval.status !== 0) throw new InstallerError("Docker administrator approval was not completed.");
@@ -87,6 +106,31 @@ export function localDockerRunner({ execute = spawnSync, environment = process.e
     }
     if (result.status === null && result.signal) throw new DockerCommandError(args, "signal", result, input, result.signal);
     return { status: result.status ?? 1, stdout: result.stdout ?? "", stderr: result.stderr ?? "" };
+  }, hold(args) {
+    return new Promise((resolve, reject) => {
+      if (maintenance && !maintenance.released) { reject(new InstallerError("Another installation lock is held.")); return; }
+      const nameAt = args.indexOf("--name"), name = args[nameAt + 1];
+      if (nameAt < 0 || !name || !/^gridlens-modern-[a-z0-9-]+-maintenance-[a-f0-9]{16}$/.test(name)) { reject(new InstallerError("The installation lock helper requires its unique owned name.")); return; }
+      const held = { name, lost: false, released: false };
+      const child = spawn(sudo ? "sudo" : "docker", sudo ? ["--", "docker", ...args] : [...args], {
+        shell: false, env: { ...environment, DOCKER_CLI_HINTS: "false" }, stdio: ["pipe", "pipe", "pipe"],
+      });
+      let ready = false, output = "", finished = false;
+      const completion = new Promise<void>(done => child.once("close", () => { finished = true; done(); }));
+      const timeout = setTimeout(() => { child.kill("SIGTERM"); reject(new InstallerError("The installation lock helper did not become ready.")); }, 20_000);
+      child.stderr.on("data", () => {});
+      child.once("error", () => { clearTimeout(timeout); reject(new InstallerError("The installation lock helper could not start.")); });
+      child.once("close", () => { clearTimeout(timeout); if (ready && !held.released) held.lost = true;
+        if (!ready) reject(new InstallerError("Another installation or update is running. Retry after it finishes.")); });
+      child.stdout.on("data", (chunk: Buffer) => {
+        output += chunk.toString("utf8");
+        if (output.length > 4096) { child.kill("SIGTERM"); return; }
+        if (!ready && output.includes("GRIDLENS_LOCK_READY\n")) {
+          ready = true; maintenance = held; clearTimeout(timeout);
+          resolve(async () => { held.released = true; if (maintenance === held) maintenance = undefined; if (!finished) child.stdin.end(); await completion; });
+        }
+      });
+    });
   } };
 }
 export function checked(runner: DockerRunner, args: readonly string[], input?: string | Uint8Array): string {

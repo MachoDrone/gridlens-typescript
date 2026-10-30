@@ -1,5 +1,7 @@
 import type { FleetContext, FleetResource } from "../contracts/fleet.ts";
-import { FLEET_RESOURCES } from "../contracts/fleet.ts";
+import { FLEET_RESOURCES, isFleetSnapshot } from "../contracts/fleet.ts";
+import { parseUpdateStatus, isUpdateRequestKey } from "../contracts/updates.ts";
+import type { UpdateBuild, UpdateStatus } from "../contracts/updates.ts";
 import { SHARED_CAPABILITIES } from "../contracts/shared.ts";
 import type { FleetSnapshotStore } from "../server/snapshot-store.ts";
 import { createSnapshotSource } from "../server/snapshot-source.ts";
@@ -13,23 +15,59 @@ import type { CredentialVault } from "./credential-vault.ts";
 import type { PcPermission } from "./pc-monitor.ts";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
-  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect,
+  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates,
 }: { now?: () => number; requestHistory?: (context: FleetContext, addresses: string[], refresh: boolean) => Promise<void>;
-  providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer } = {}) {
+  providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer;
+  build?: UpdateBuild; updates?: (body: Record<string, unknown>) => Promise<unknown> } = {}) {
   const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
   const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}), ...(inspect ? { inspect } : {}) });
+  const capabilities = [...SHARED_CAPABILITIES, ...(updates && build ? ["browser-updates-v1"] : [])];
+  async function readiness(): Promise<unknown> {
+    if (!build) throw new SharedHttpError(503);
+    // Cache/roster integrity, never a provider probe or a freshness requirement.
+    for (const context of access.contexts()) {
+      for (const resource of ["metadata", "node-info"] as const) {
+        const snapshot = await source.read(resource, context, new AbortController().signal);
+        if (!isFleetSnapshot(resource, snapshot, context.addresses)) throw new SharedHttpError(503);
+      }
+    }
+    return { version: 1, status: "ready", build, serverId: access.serverId };
+  }
+  async function updateRequest(body: Record<string, unknown>, role: "operator" | "viewer"): Promise<UpdateStatus> {
+    const operation = body.operation === "updates-status" ? "status" : body.operation === "updates-check" ? "check" : "start";
+    const allowed = operation === "start" ? ["operation", "token", "candidateId", "idempotencyKey"] : ["operation", "token"];
+    if (Object.keys(body).some(field => !allowed.includes(field))) throw new SharedHttpError(400);
+    if (operation !== "status") access.requireAccess(body.token, "operator");
+    if (!updates || !build) {
+      if (operation !== "status") throw new SharedHttpError(503);
+      return { version: 1, supported: false, canUpdate: false, checking: false, current: build ?? null, candidate: null,
+        checkedAtMs: null, nextCheckAtMs: null, checkError: null, operation: null };
+    }
+    if (operation === "start" && (typeof body.candidateId !== "string" || !/^[a-f0-9]{64}$/.test(body.candidateId)
+      || !isUpdateRequestKey(body.idempotencyKey))) throw new SharedHttpError(400);
+    const value = parseUpdateStatus(await updates({ operation, ...(operation === "start"
+      ? { candidateId: body.candidateId, idempotencyKey: body.idempotencyKey } : {}) }));
+    // The owner knows the code actually serving this fleet. A worker journal is
+    // not permitted to substitute a hoped-for version during replacement.
+    return { ...value, current: build, canUpdate: value.supported && role === "operator" };
+  }
   async function read(body: Record<string, unknown>): Promise<unknown> {
     try {
+      if (body.operation === "readiness") {
+        if (Object.keys(body).some(field => field !== "operation")) throw new SharedHttpError(400);
+        return await readiness();
+      }
       if (body.operation === "pair") {
         if (body.version !== 1) throw new SharedHttpError(400);
-        return { ...access.pair(body.code, body.deviceName), capabilities: SHARED_CAPABILITIES };
+        return { ...access.pair(body.code, body.deviceName), capabilities };
       }
       const device = access.requireAccess(body.token);
       const context = device.context;
+      if (["updates-status", "updates-check", "updates-start"].includes(String(body.operation))) return await updateRequest(body, device.role);
       if (body.operation === "resolve") return context;
       if (body.operation === "status") return { version: 1, serverId: access.serverId, context,
-        capabilities: SHARED_CAPABILITIES, providerWaits: providerWaits(), serverTimeMs: now(), mode: "shared-cache", role: device.role };
+        capabilities, providerWaits: providerWaits(), serverTimeMs: now(), mode: "shared-cache", role: device.role, ...(build ? { build } : {}) };
       if (body.operation === "snapshot") {
         const resource = body.resource as FleetResource;
         if (!FLEET_RESOURCES.includes(resource) || body.scopeId !== context.scopeId || body.rosterRevision !== context.rosterRevision)
@@ -102,6 +140,10 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
     }
   }
   async function control(body: Record<string, unknown>): Promise<unknown> {
+    if (body.operation === "readiness") {
+      if (Object.keys(body).some(field => field !== "operation")) throw new SharedHttpError(400);
+      return readiness();
+    }
     if (body.operation === "status") return { version: 1, serverId: access.serverId, contexts: access.contexts() };
     if (body.operation === "register-vpn-web" || body.operation === "revoke-vpn-web") {
       if (typeof body.scopeId !== "string") throw new SharedHttpError(400);

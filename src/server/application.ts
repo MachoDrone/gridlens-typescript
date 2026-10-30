@@ -10,6 +10,7 @@ import type { FleetContext, FleetResource, FleetSnapshots } from "../contracts/f
 import type { FleetSource } from "./snapshot-source.ts";
 import { normalizeFleetSnapshot } from "./snapshot-store.ts";
 import { selectJobHistoryHosts } from "./job-history-selection.ts";
+import type { UpdateBuild } from "../contracts/updates.ts";
 
 /** The platform verifies its own sessions and returns only their authorized roster.
  * GridLens deliberately defines no login, token format, or trusted proxy header. */
@@ -26,6 +27,8 @@ export interface FleetIntegration {
   demonstration?: boolean;
   /** Only the installed shared owner supplies the optional verified PC telemetry API. */
   sharedBackend?: boolean;
+  /** Only a configured installed updater enables the update controls. */
+  updates?: { build: UpdateBuild };
 }
 
 export interface FleetServerOptions {
@@ -107,10 +110,13 @@ export async function startFleetServer({ integration, directory = defaultDirecto
         if (!html.includes("</head>")) throw new Error("Missing document head");
         const configured = html.replace("<title>GridLens Fleet · Local preview</title>", "<title>GridLens Fleet</title>")
           .replace('href="/styles.css"', `href="${basePath}/styles.css"`)
-          .replace('src="/preview/main.js"', `src="${basePath}/preview/main.js"`).replace("</head>", [
+          .replace('src="/preview/main.js"', `src="${basePath}/preview/main.js"`)
+          .replace('src="/preview/updates.js"', `src="${basePath}/preview/updates.js"`).replace("</head>", [
           `<meta name="gridlens-api-base" content="${basePath}/api/fleet">`,
           '<meta name="gridlens-source-mode" content="snapshot">',
           ...(integration.sharedBackend ? ['<meta name="gridlens-shared-backend" content="1">'] : []),
+          ...(integration.updates ? ['<meta name="gridlens-updates" content="1">',
+            `<meta name="gridlens-build-id" content="${escapeAttribute(integration.updates.build.buildId)}">`] : []),
           `<meta name="gridlens-source-label" content="${escapeAttribute(label)}">`, "</head>",
         ].join("\n"));
         body = Buffer.from(integration.demonstration

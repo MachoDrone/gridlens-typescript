@@ -8,6 +8,7 @@
     <title>GridLens Fleet · Local preview</title>
     <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/preview/updates.js"></script>
     <script type="module" src="/preview/main.js"></script>
   </head>
   <body>
@@ -41,6 +42,12 @@
             </svg>
             <span class="sidebar-label">Hosts</span>
           </a>
+          <button id="sidebar-update" class="sidebar-item sidebar-update" type="button" aria-label="Update" title="Update" hidden>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5M12 16V8m-3 3 3-3 3 3"></path>
+            </svg>
+            <span class="sidebar-label">Update</span>
+          </button>
           <button class="sidebar-item" type="button" disabled aria-label="Alerts (unavailable)" title="Alerts is not available yet">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"></path>
@@ -149,6 +156,21 @@
         </div>
       </details>
     </main>
+    <dialog id="update-dialog" aria-labelledby="update-title" aria-describedby="update-description">
+      <header class="dialog-heading"><h2 id="update-title">GridLens Update</h2><button id="update-close" type="button" aria-label="Close update"><span aria-hidden="true">×</span></button></header>
+      <div class="update-body">
+        <p id="update-description">Update this GridLens dashboard and its backend.</p>
+        <dl class="update-versions"><div><dt>Installed</dt><dd id="update-installed">Checking…</dd></div><div><dt>Available</dt><dd id="update-available">Not checked</dd></div></dl>
+        <p id="update-last-check" class="update-muted">No successful check yet.</p>
+        <p id="update-status" role="status" aria-live="polite" aria-atomic="true">Checking for updates…</p>
+        <progress id="update-download" aria-label="Update download" hidden></progress>
+        <p id="update-transfer" hidden></p>
+        <p id="update-elapsed" class="update-muted" hidden></p>
+        <p id="update-error" role="status" aria-live="polite" hidden></p>
+        <p id="update-running-note" class="update-muted" hidden>The update continues if you close this window. Fleet will return automatically when it is ready.</p>
+        <div class="update-actions"><button id="update-check" type="button">Check for updates</button><button id="update-start" type="button" hidden>Update now</button><button id="update-retry-fleet" type="button" hidden>Retry loading Fleet</button></div>
+      </div>
+    </dialog>
     <dialog id="info-dialog" aria-labelledby="info-title">
       <header class="dialog-heading"><h2 id="info-title"></h2><button id="close-info" type="button" aria-label="Close"><span class="close-info-label">Close</span><svg class="close-info-icon" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="m3 3 6 6m0-6-6 6"></path></svg></button></header>
       <div id="info-body"></div>
