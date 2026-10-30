@@ -20,6 +20,7 @@ import type { PortProbe, SelectionPrompts } from "./network-selection.ts";
 import type { InstallationConfig } from "./config.ts";
 import { cliColorEnabled, cliSection, cliText } from "./cli-format.ts";
 import { acquireMaintenanceLock, guardTerminalUpdate } from "../updater/deployment.ts";
+import { findReleaseImage, requireReleaseImage, runtimeRelease } from "./image-identity.ts";
 
 declare const GRIDLENS_RELEASE_PUBLIC_KEY: string;
 
@@ -283,16 +284,18 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     const base=option(args,"--release");if(!base)throw new InstallerError("Use the signed release launcher or provide its pinned --release URL.");
     const manifest=await download(releaseURL(base,"modern-release.json"),16_384);
     const signature=await download(releaseURL(base,"modern-release.sig"),64);
-    const release=verifyRelease(manifest,signature,GRIDLENS_RELEASE_PUBLIC_KEY);
+    let release=verifyRelease(manifest,signature,GRIDLENS_RELEASE_PUBLIC_KEY);
     if(release.platform!==`${process.platform}-${process.arch}`)throw new InstallerError("This release does not support this platform.");
     checked(runner,["version","--format","{{.Server.Version}}"]);
-    const image=runner.run(["image","inspect",release.imageId]);
-    if(image.status!==0){
+    if(findReleaseImage(runner,release)===undefined){
       terminal.print("");
       terminal.print(cliText(terminal,"pending","Downloading and verifying GridLens…"));
       const directory=mkdtempSync(join(tmpdir(),"gridlens-modern-"));
       try{const file=await downloadArtifactToFile(base,release.runtime,directory);checked(runner,["load","--input",file]);}finally{rmSync(directory,{recursive:true,force:true});}
     }
+    // Resolve the signed manifest/config identity on this Docker store before
+    // any helper container or installation lock is started.
+    release=runtimeRelease(release,requireReleaseImage(runner,release));
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
     const observed=coordinator.configuration(instance,release.imageId);
     if(observed&&observed.phase==="ready"&&!args.includes("--rollback")&&release.sequence<observed.active.sequence){

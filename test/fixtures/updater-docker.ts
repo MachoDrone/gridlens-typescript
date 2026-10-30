@@ -19,8 +19,10 @@ export class UpdateDockerFixture implements DockerRunner {
     const release = (id: string) => this.images.find(value => value.imageId === id)!;
     if (args[0] === "version" || args[0] === "load") return ok("29.7.2");
     if (args[0] === "image" && args[1] === "inspect") {
-      const image = release(name); return image ? ok([{ Id: image.imageId, Config: { Labels: { [PRODUCT_LABEL]: PRODUCT, "io.gridlens.version": image.version,
-        ...(this.updaterImages.has(image.imageId) ? { "io.gridlens.updater-protocol": "1" } : {}) }, Env: ["PATH=/fixture"], Entrypoint: null } }]) : missing;
+      const image = release(name); return image ? ok([{ Id: image.imageId, Os: "linux", Architecture: image.platform === "linux-arm64" ? "arm64" : "amd64",
+        Config: { Labels: { [PRODUCT_LABEL]: PRODUCT, "io.gridlens.version": image.version,
+        ...(this.updaterImages.has(image.imageId) ? { "io.gridlens.updater-protocol": "1" } : {}) }, Env: ["PATH=/fixture"], Entrypoint: null } }])
+        : { ...missing, stderr: `Error response from daemon: No such image: ${name}` };
     }
     if (["volume", "network", "container"].includes(args[0]!) && args[1] === "inspect") {
       const item = this.objects.get(`${args[0]}:${name}`); return item ? ok([item]) : missing;

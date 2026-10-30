@@ -4,7 +4,8 @@ import { chmodSync, lstatSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checked, ensureVolume, inspectOwned, labels, mount, resourceName, restrictions } from "../installer/docker.ts";
+import { checked, ensureVolume, inspectOwned, labels, mount, resourceName, restrictions,
+  MAINTENANCE_LOCK_READY, MAINTENANCE_LOCK_BUSY, MAINTENANCE_LOCK_BUSY_EXIT } from "../installer/docker.ts";
 import type { DockerRunner } from "../installer/docker.ts";
 import type { InstallationConfig } from "../installer/config.ts";
 import { InstallerError } from "../installer/release.ts";
@@ -118,10 +119,23 @@ export async function holdMaintenanceLock(path = "/config/maintenance.sqlite"): 
   const database = new DatabaseSync(path);
   try {
     chmodSync(path, 0o600); database.exec("PRAGMA busy_timeout=0; BEGIN EXCLUSIVE");
-    process.stdout.write("GRIDLENS_LOCK_READY\n");
+    process.stdout.write(`${MAINTENANCE_LOCK_READY}\n`);
     await new Promise<void>(done => { process.stdin.resume(); process.stdin.once("end", done); process.stdin.once("error", done); process.once("SIGTERM", done); process.once("SIGINT", done); });
     database.exec("ROLLBACK");
   } finally { database.close(); process.stdin.pause(); process.stdin.destroy(); }
+}
+/** Only a real SQLite BUSY/LOCKED result establishes competing lock ownership.
+ * Other startup errors expose bounded codes, never arbitrary exception text. */
+export function maintenanceLockFailure(error: unknown): { exitCode: number; message: string } {
+  const value = object(error), sqliteCode = value.code === "ERR_SQLITE_ERROR" && Number.isSafeInteger(value.errcode) && Number(value.errcode) > 0 ? Number(value.errcode) : null;
+  const base = sqliteCode === null ? null : sqliteCode & 0xff;
+  if (base === 5 || base === 6) return { exitCode: MAINTENANCE_LOCK_BUSY_EXIT, message: MAINTENANCE_LOCK_BUSY };
+  const code = typeof value.code === "string" && /^[A-Z][A-Z0-9_]{0,63}$/.test(value.code) ? value.code : null;
+  const reasons: Record<number, string> = { 7: "Not enough memory to open the lock database.", 8: "The lock database is read-only.",
+    10: "The lock database encountered an I/O error.", 11: "The lock database is corrupt.", 13: "The lock database storage is full.",
+    14: "The lock database could not be opened.", 23: "Access to the lock database was denied." };
+  const detail = [code, sqliteCode === null ? null : `SQLite ${sqliteCode}`].filter(Boolean).join(", ");
+  return { exitCode: 1, message: `Installation lock helper failed${detail ? ` (${detail})` : ""}.${base !== null && reasons[base] ? ` ${reasons[base]}` : ""}` };
 }
 export async function launchWorkerReplacement(runner: DockerRunner, instance: string, image: string, operationId: string): Promise<void> {
   if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(operationId)) throw new InstallerError("Invalid update operation.");
@@ -140,7 +154,9 @@ export async function launchWorkerReplacement(runner: DockerRunner, instance: st
   validateReplacement(instance, created, image, operationId);
 }
 if (typeof import.meta.url === "string" && process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  if (process.argv[2] === "--hold-lock") void holdMaintenanceLock().catch(() => { process.stderr.write("Installation lock unavailable.\n"); process.exitCode = 1; });
+  if (process.argv[2] === "--hold-lock") void holdMaintenanceLock().catch(error => {
+    const failure = maintenanceLockFailure(error); process.stderr.write(`${failure.message}\n`); process.exitCode = failure.exitCode;
+  });
   else if (process.argv[2] === "--terminal-guard") {
     try { assertNoActiveUpdate(); process.stdout.write("No active browser update.\n"); }
     catch (error) { console.error(error instanceof InstallerError ? error.message : "The updater journal cannot be verified. Existing runtime was retained."); process.exitCode = 1; }

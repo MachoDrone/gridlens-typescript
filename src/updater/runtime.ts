@@ -10,8 +10,9 @@ import { isMainThread, parentPort, Worker, workerData } from "node:worker_thread
 import { Coordinator } from "../installer/coordinator.ts";
 import { validateInstallation } from "../installer/config.ts";
 import type { InstallationConfig } from "../installer/config.ts";
-import { checked, inspectOwned, localDockerRunner, resourceName, PRODUCT, PRODUCT_LABEL, labels, restrictions, DockerCommandError } from "../installer/docker.ts";
+import { checked, inspectOwned, localDockerRunner, resourceName, labels, restrictions, DockerCommandError } from "../installer/docker.ts";
 import type { DockerRunner } from "../installer/docker.ts";
+import { isReleaseImageId, requireReleaseImage, runtimeRelease } from "../installer/image-identity.ts";
 import { ensureVpnWeb, readVpnWebEndpoint, validateVpnWebRecovery } from "../installer/vpn-web.ts";
 import type { VpnWebEndpoint } from "../installer/vpn-web.ts";
 import type { ModernRelease } from "../installer/release.ts";
@@ -28,6 +29,8 @@ interface Transaction {
   schema: 1; operationId: string; candidate: VerifiedCandidate; previous: InstallationConfig;
   previousWeb: (VpnWebEndpoint & { version: string; sequence: number }) | null;
   previousWorkerImage: string; serverId: string; rollback: boolean;
+  /** Actual local Docker ID, restricted to the identities in the signed release. */
+  targetImageId: string;
   failure?: string;
 }
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
@@ -54,6 +57,9 @@ function readTransaction(path: string, instance: string): Transaction | undefine
   if (item.failure !== undefined && (typeof item.failure !== "string" || item.failure.length > 400 || /[\u0000-\u001f\u007f]/.test(item.failure)))
     throw new UpdateError("The saved update failure record is invalid.");
   item.previous = validateInstallation(item.previous); item.candidate = parseVerifiedCandidate(item.candidate);
+  // Earlier containerd-only journals stored the signed primary as their local ID.
+  if (item.targetImageId === undefined) item.targetImageId = item.candidate.release.imageId;
+  if (!isReleaseImageId(item.candidate.release, item.targetImageId)) throw new UpdateError("The saved update image is outside its signed identities.");
   if (item.previous.instance !== instance) throw new UpdateError("The saved update belongs to another installation.");
   if (item.previousWeb !== null) {
     const web = item.previousWeb, origin = new URL(web.origin);
@@ -139,13 +145,13 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
   const assertTransactionPair = (transaction: Transaction): void => {
     const current = config(), previous = transaction.previous.active;
     const original = current.active.imageId === previous.imageId && current.active.stateVolume === previous.stateVolume;
-    const selected = current.active.imageId === transaction.candidate.release.imageId && JSON.stringify(current.previous) === JSON.stringify(previous);
+    const selected = current.active.imageId === transaction.targetImageId && JSON.stringify(current.previous) === JSON.stringify(previous);
     if ((!original && !selected) || current.origin !== transaction.previous.origin || current.certificateSha256 !== transaction.previous.certificateSha256
       || current.pendingPort !== transaction.previous.pendingPort)
       throw new UpdateError("The installation changed outside this update. Its newer state was retained for review.");
     coordinator.validateManagedRuntime(current);
     validateVpnWebRecovery(runner, current, transaction.previousWeb ? { origin: transaction.previousWeb.origin, port: transaction.previousWeb.port,
-      images: [transaction.previousWeb.imageId, transaction.candidate.release.imageId] } : null);
+      images: [transaction.previousWeb.imageId, transaction.targetImageId] } : null);
   };
   const release = async (): Promise<void> => { const held = unlock; unlock = undefined; await held?.(); };
   const hold = async (image: string, signal?: AbortSignal): Promise<void> => {
@@ -167,7 +173,8 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
       signal?.throwIfAborted();
       try {
         const current = config(), owner = readiness();
-        if (!sameBuild(buildOf(current), candidate) || !sameBuild(owner.build, candidate) || owner.serverId !== transaction.serverId)
+        const expectedImage = sameBuild(candidate, transaction.candidate) ? transaction.targetImageId : transaction.previous.active.imageId;
+        if (current.active.imageId !== expectedImage || !sameBuild(buildOf(current), candidate) || !sameBuild(owner.build, candidate) || owner.serverId !== transaction.serverId)
           throw new UpdateError("The updated runtime identity has not been verified.");
         coordinator.validateManagedRuntime(current);
         if (coordinator.endpointStatus(current).repairRequired) throw new UpdateError("The saved dashboard endpoint is not ready.");
@@ -211,26 +218,26 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
       if (resolve(archivePath) !== resolve(stateDirectory, "downloads", `${candidate.id}.tar`)) throw new UpdateError("The staged update path is invalid.");
       await archiveVerified(archivePath, candidate, signal);
       checked(runner, ["load", "--input", archivePath]);
-      const images = JSON.parse(checked(runner, ["image", "inspect", candidate.release.imageId]));
-      if (images?.length !== 1 || images[0].Id !== candidate.release.imageId || images[0].Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT
-        || images[0].Config?.Labels?.["io.gridlens.version"] !== candidate.version) throw new UpdateError("The loaded image does not match the signed release.");
+      const targetImageId = requireReleaseImage(runner, candidate.release);
       const baked = parseUpdateBuild(JSON.parse(checked(runner, ["run", "--rm", ...labels(instance), ...restrictions, "--network", "none", "--user", "1000:1000",
-        candidate.release.imageId, "node", "-e", 'process.stdout.write(require("node:fs").readFileSync("/app/build.json","utf8"))'])));
+        targetImageId, "node", "-e", 'process.stdout.write(require("node:fs").readFileSync("/app/build.json","utf8"))'])));
       if (!sameBuild(baked, candidate)) throw new UpdateError("The image build identity does not match the signed update.");
       coordinator.validateManagedRuntime(current);
       const web = readVpnWebEndpoint(runner, current), owner = readiness();
       if (!sameBuild(owner.build, buildOf(current))) throw new UpdateError("The installed owner and runtime versions do not match.");
       mkdirSync(stateDirectory, { recursive: true, mode: 0o700 });
-      saveTransaction(journalPath, { schema: 1, operationId: job.id, candidate, previous: current,
+      saveTransaction(journalPath, { schema: 1, operationId: job.id, candidate, targetImageId, previous: current,
         previousWeb: web ? { ...web, version: current.active.version, sequence: current.active.sequence } : null,
         previousWorkerImage: currentWorker.Image as string, serverId: owner.serverId, rollback: false });
     },
     async apply(candidate, job, signal) {
       signal?.throwIfAborted(); const transaction = journal(job);
       if (transaction.rollback) throw new UpdateError("This update is already restoring its previous installation.");
+      if (candidate.id !== transaction.candidate.id) throw new UpdateError("The selected update identity changed.");
       assertTransactionPair(transaction);
-      const result = coordinator.install({ instance, release: candidate.release, action: "upgrade", enableUpdater: true });
-      if (transaction.previousWeb) ensureVpnWeb(runner, result.config, candidate.release, transaction.previousWeb.port, { upgrade: true });
+      const selected = runtimeRelease(transaction.candidate.release, transaction.targetImageId);
+      const result = coordinator.install({ instance, release: selected, action: "upgrade", enableUpdater: true });
+      if (transaction.previousWeb) ensureVpnWeb(runner, result.config, selected, transaction.previousWeb.port, { upgrade: true });
     },
     async verify(candidate, job, signal) { await verify(candidate, journal(job), signal); },
     async rollback(job, signal) {
@@ -249,10 +256,11 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
     },
     async replaceWorker(candidate, job, signal) {
       const transaction = journal(job), current = worker();
-      if (current.Image === candidate.release.imageId) return;
+      if (candidate.id !== transaction.candidate.id) throw new UpdateError("The selected update identity changed.");
+      if (current.Image === transaction.targetImageId) return;
       if (current.Image !== transaction.previousWorkerImage) throw new UpdateError("The updater changed identity during installation.");
       await release();
-      await launchWorkerReplacement(runner, instance, candidate.release.imageId, job.id);
+      await launchWorkerReplacement(runner, instance, transaction.targetImageId, job.id);
       // The detached helper owns replacement after this point. Process shutdown
       // must leave the durable updating-updater phase for its successor.
       for (;;) { signal?.throwIfAborted(); await wait(1000, signal); }
@@ -323,7 +331,7 @@ export async function replaceWorkerMain(instance: string, operationId: string, o
   const acquire = async (): Promise<() => Promise<void>> => {
     const deadline = now() + 300_000;
     for (let attempt = 0; ; attempt++) {
-      try { return await acquireMaintenanceLock(runner, instance, transaction.candidate.release.imageId); }
+      try { return await acquireMaintenanceLock(runner, instance, transaction.targetImageId); }
       catch (error) { if (now() >= deadline || attempt >= 299 || !(error instanceof Error) || !/another installation|lock held/i.test(error.message)) throw error; await wait(1000); }
     }
   };
@@ -331,14 +339,14 @@ export async function replaceWorkerMain(instance: string, operationId: string, o
   let unlock: (() => Promise<void>) | undefined = await acquire();
   try {
     const current = validateInstallation(JSON.parse(readFileSync(configurationPath, "utf8")));
-    if (current.active.imageId !== transaction.candidate.release.imageId) throw new UpdateError("The application has not reached the updater replacement target.");
+    if (current.active.imageId !== transaction.targetImageId) throw new UpdateError("The application has not reached the updater replacement target.");
     ensureUpdater(runner, current, { replace: true });
     await unlock(); unlock = undefined;
     const deadline = now() + 12 * 60_000;
     for (let attempt = 0; attempt < 720 && now() < deadline; attempt++) {
       try {
         const installed = inspectOwned(runner, "container", resourceName(instance, "updater"), instance);
-        if (!installed || object(installed.State).Running !== true) throw new Error(); validateUpdater(instance, installed, transaction.candidate.release.imageId);
+        if (!installed || object(installed.State).Running !== true) throw new Error(); validateUpdater(instance, installed, transaction.targetImageId);
         const state = await status();
         if (state.operation?.id === operationId && ["failed", "rolled-back"].includes(state.operation.phase))
           throw new UpdateError(state.operation.error ?? "The replacement updater could not verify the updated dashboard.");
@@ -355,7 +363,7 @@ export async function replaceWorkerMain(instance: string, operationId: string, o
     const installed = inspectOwned(runner, "container", resourceName(instance, "updater"), instance);
     if (installed) {
       validateUpdater(instance, installed);
-      if (installed.Image !== transaction.candidate.release.imageId && installed.Image !== transaction.previousWorkerImage)
+      if (installed.Image !== transaction.targetImageId && installed.Image !== transaction.previousWorkerImage)
         throw new UpdateError("An unexpected updater identity prevented recovery.");
       if (object(installed.State).Running === true) checked(runner, ["stop", "--time", "30", resourceName(instance, "updater")]);
     }

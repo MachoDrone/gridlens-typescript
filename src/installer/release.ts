@@ -9,6 +9,8 @@ export interface ModernRelease {
   platform: "linux-x64" | "linux-arm64";
   minimumCoordinator: number;
   imageId: string;
+  /** The same signed image's config digest, used by Docker's classic image store. */
+  configImageId?: string;
   runtime: ReleaseArtifact;
 }
 export class InstallerError extends Error {}
@@ -19,13 +21,15 @@ export function parseRelease(value: unknown): ModernRelease {
     || !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 1
     || !["linux-x64", "linux-arm64"].includes(String(value.platform)) || value.minimumCoordinator !== 1
     || typeof value.imageId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.imageId)
+    || value.configImageId !== undefined && (typeof value.configImageId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.configImageId))
     || !object(value.runtime) || typeof value.runtime.name !== "string" || !/^gridlens-runtime-[a-z0-9.-]+\.tar$/.test(value.runtime.name)
     || !Number.isSafeInteger(value.runtime.bytes) || Number(value.runtime.bytes) < 1 || Number(value.runtime.bytes) > 1024 * 1024 * 1024
     || typeof value.runtime.sha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.runtime.sha256)) {
     throw new InstallerError("The signed release manifest is unsupported or invalid.");
   }
   return { format: RELEASE_FORMAT, version: value.version, sequence: Number(value.sequence), platform: value.platform as ModernRelease["platform"],
-    minimumCoordinator: 1, imageId: value.imageId, runtime: { name: value.runtime.name, bytes: Number(value.runtime.bytes), sha256: value.runtime.sha256 } };
+    minimumCoordinator: 1, imageId: value.imageId, ...(typeof value.configImageId === "string" ? { configImageId: value.configImageId } : {}),
+    runtime: { name: value.runtime.name, bytes: Number(value.runtime.bytes), sha256: value.runtime.sha256 } };
 }
 export function verifyRelease(bytes: Uint8Array, signature: Uint8Array, publicKey: string): ModernRelease {
   if (bytes.byteLength > 16_384 || signature.byteLength !== 64) throw new InstallerError("Release signature verification failed.");

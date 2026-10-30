@@ -268,6 +268,21 @@ version and existing dashboard URL without replacing or reconfiguring its servic
 The installer streams runtime archives into an exclusive temporary file and
 verifies the signed size and checksum before loading them into Docker.
 
+Signed releases can include both the OCI manifest digest and its verified image
+configuration digest. The installer resolves the exact signed identity exposed
+by the target Docker store before starting any helper. Classic `overlay2` stores
+and the containerd image store use different IDs for the same exported image;
+installation does not require changing Docker's storage backend. Installed
+configuration and recovery records retain the actual local Docker ID, while
+update journals also preserve the original signed release. Mutable image tags
+are not an identity fallback.
+
+The maintenance helper reports an existing installation lock only for an actual
+SQLite busy/locked result. Image lookup, Docker permission, filesystem and other
+startup errors retain their bounded diagnostic instead of being mislabeled as
+another installation. A downloaded image and an empty configuration volume do
+not establish that GridLens has been installed.
+
 Automated interface/browser tests and real Docker acceptance are separate checks.
 Use isolated fixture installations for signed update, restart, rollback and
 worker replacement testing; never use live fleet state as test data. Publication
@@ -387,6 +402,10 @@ npm run build:modern -- \
 
 `build:modern` builds an uncached Docker image, exports it, writes its signed
 manifest and includes the signed standalone coordinator plus generated launcher.
+The release producer currently requires a single-platform OCI Docker export;
+the builder verifies its manifest, configuration and every layer blob before
+signing both image identities. This producer requirement does not restrict the
+classic or containerd store used by an installation receiving that release.
 It publishes nothing. The launcher pins the binary SHA-256; the binary embeds the
 release verification public key. Detached binary signatures and a coordinator
 manifest accompany it. New release sequences must increase monotonically; the

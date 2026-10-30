@@ -20,34 +20,64 @@ const release = (sequence: number): ModernRelease => ({ format: "gridlens-modern
   platform: "linux-x64", minimumCoordinator: 1, imageId: `sha256:${String(sequence).repeat(64)}`,
   runtime: { name: `gridlens-runtime-${sequence}.tar`, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") } });
 const build = (sequence: number) => ({ version: release(sequence).version, sequence, buildId: `${sequence}:${release(sequence).version}` });
-function fixture(t: TestContext) {
+function fixture(t: TestContext, classic = false) {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-update-runtime-")), configPath = join(directory, "config.json"), instance = "fixture-update";
   t.after(() => rmSync(directory, { recursive: true, force: true }));
-  const runner = new UpdateDockerFixture(instance, configPath, [release(1), release(2)]), coordinator = new Coordinator(runner);
+  const target = { ...release(2), ...(classic ? { configImageId: `sha256:${"c".repeat(64)}` } : {}) };
+  const localTarget = classic ? { ...target, imageId: target.configImageId! } : target;
+  const runner = new UpdateDockerFixture(instance, configPath, [release(1), localTarget]), coordinator = new Coordinator(runner);
   const initial = coordinator.install({ instance, release: release(1), action: "setup", enableUpdater: true, bindAddress: "10.70.0.8" }).config;
   ensureVpnWeb(runner, initial, release(1), 8790); ensureUpdater(runner, initial);
-  const candidate: VerifiedCandidate = { ...build(2), id: "a".repeat(64), sizeBytes: bytes.length, release: release(2), releaseTag: "modern-v0.1.0-fixture.2", workerProtocol: 1 };
+  const candidate: VerifiedCandidate = { ...build(2), id: "a".repeat(64), sizeBytes: bytes.length, release: target, releaseTag: "modern-v0.1.0-fixture.2", workerProtocol: 1 };
   const operation: UpdateOperation = { id: "generated-operation", revision: 1, target: build(2), previous: build(1), phase: "preparing", startedAtMs: 1, updatedAtMs: 1,
     downloadedBytes: bytes.length, totalBytes: bytes.length, error: null, result: null };
   mkdirSync(join(directory, "downloads")); const archive = join(directory, "downloads", `${candidate.id}.tar`); writeFileSync(archive, bytes);
   const probes: string[] = [], runtime = createUpdateRuntime({ instance, stateDirectory: directory, configurationPath: configPath, runner,
     probe: async origin => { probes.push(origin); }, sleep: async () => {} });
   t.after(() => runtime.release());
-  return { directory, configPath, initial, runner, runtime, candidate, operation, archive, probes, instance };
+  return { directory, configPath, initial, runner, runtime, candidate, operation, archive, probes, instance, localTarget };
 }
-test("verified runtime update replaces owner and both gateways, then restores exact prior state and endpoints", async t => {
-  const f = fixture(t); await f.runtime.prepare(f.candidate, f.archive, f.operation);
+for (const classic of [false, true]) test(`verified ${classic ? "classic" : "containerd"} runtime update replaces owner and both gateways, then restores exact prior state and endpoints`, async t => {
+  const f = fixture(t, classic); const signed = structuredClone(f.candidate.release); await f.runtime.prepare(f.candidate, f.archive, f.operation);
   assert.equal(f.runner.held, true); await f.runtime.apply(f.candidate, f.operation); await f.runtime.verify(f.candidate, f.operation);
   assert.deepEqual(await f.runtime.current(), build(2));
   assert.notEqual(f.runner.config!.active.stateVolume, f.initial.active.stateVolume);
+  assert.equal(f.runner.config!.active.imageId, f.localTarget.imageId);
+  const recorded = JSON.parse(readFileSync(join(f.directory, "runtime-transaction.json"), "utf8"));
+  assert.equal(recorded.targetImageId, f.localTarget.imageId); assert.deepEqual(recorded.candidate.release, signed);
+  assert.deepEqual(f.candidate.release, signed, "resolution does not rewrite the signed candidate");
   assert.deepEqual(f.probes, [f.initial.origin, "http://10.70.0.8:8790"]);
-  assert.equal(f.runner.objects.get(`container:gridlens-modern-${f.instance}-vpn-web`)!.Image, release(2).imageId);
+  assert.equal(f.runner.objects.get(`container:gridlens-modern-${f.instance}-vpn-web`)!.Image, f.localTarget.imageId);
   const restored = await f.runtime.rollback(f.operation);
   assert.deepEqual(restored, build(1)); assert.deepEqual(f.runner.config!.active, f.initial.active);
   assert.equal(f.runner.config!.certificateSha256, f.initial.certificateSha256);
   assert.equal(f.runner.objects.get(`container:gridlens-modern-${f.instance}-vpn-web`)!.Image, release(1).imageId);
   assert.ok(!f.runner.calls.some(args => args.includes("volume") && args.includes("rm")));
   await f.runtime.release(); assert.equal(f.runner.held, false);
+});
+test("classic store recovery and updater replacement keep the resolved local image identity", async t => {
+  const f = fixture(t, true); await f.runtime.prepare(f.candidate, f.archive, f.operation); await f.runtime.apply(f.candidate, f.operation); await f.runtime.release();
+  const before = f.runner.calls.length;
+  const resumed = createUpdateRuntime({ instance: f.instance, stateDirectory: f.directory, configurationPath: f.configPath,
+    runner: f.runner, probe: async () => {}, sleep: async () => {} });
+  t.after(() => resumed.release());
+  await resumed.prepare(f.candidate, f.archive, f.operation); await resumed.verify(f.candidate, f.operation); await resumed.release();
+  assert.ok(!f.runner.calls.slice(before).some(args => args[0] === "load"), "recorded target resumes without reapplying");
+  await replaceWorkerMain(f.instance, f.operation.id, { runner: f.runner, stateDirectory: f.directory, configurationPath: f.configPath,
+    probe: async () => {}, sleep: async () => {}, workerStatus: async () => ({ current: build(2), operation: { ...f.operation, phase: "complete", result: build(2) } }) });
+  assert.equal(f.runner.objects.get(`container:gridlens-modern-${f.instance}-updater`)!.Image, f.localTarget.imageId);
+  assert.ok(f.runner.calls.some(args => args[0] === "run" && args.includes("scripts/shared-updater.ts") && args.includes(f.localTarget.imageId)));
+  assert.ok(!f.runner.calls.slice(before).some(args => args[0] === "run" && args.includes(f.candidate.release.imageId)));
+});
+test("legacy recovery journals retain primary identity while unsigned target substitutions reject before mutation", async t => {
+  const f = fixture(t), path = join(f.directory, "runtime-transaction.json");
+  await f.runtime.prepare(f.candidate, f.archive, f.operation);
+  const recorded = JSON.parse(readFileSync(path, "utf8")); delete recorded.targetImageId; writeFileSync(path, JSON.stringify(recorded));
+  await f.runtime.apply(f.candidate, f.operation); await f.runtime.verify(f.candidate, f.operation);
+  recorded.targetImageId = `sha256:${"f".repeat(64)}`; writeFileSync(path, JSON.stringify(recorded));
+  const before = f.runner.calls.length;
+  await assert.rejects(f.runtime.apply(f.candidate, f.operation), /outside its signed identities/);
+  assert.equal(f.runner.calls.length, before);
 });
 test("corrupt staged archive and changed previous version reject before stopping the runtime", async t => {
   const f = fixture(t); const before = f.runner.calls.length;

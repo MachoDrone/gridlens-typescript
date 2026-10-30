@@ -13,6 +13,10 @@ export interface DockerRunner {
 }
 type ProcessRunner = (command: string, args: readonly string[], options: SpawnSyncOptionsWithStringEncoding) => SpawnSyncReturns<string>;
 const DIAGNOSTIC_LIMIT = 4096;
+const LOCK_OUTPUT_LIMIT = 64 * 1024;
+export const MAINTENANCE_LOCK_READY = "GRIDLENS_LOCK_READY";
+export const MAINTENANCE_LOCK_BUSY = "GRIDLENS_LOCK_BUSY";
+export const MAINTENANCE_LOCK_BUSY_EXIT = 75;
 
 /** Uncached dependency/image builds get their own bounded allowance. Ordinary
  * operations and terminal SSH inspection retain their existing shorter limits. */
@@ -42,7 +46,7 @@ function diagnostic(result: Pick<CommandResult, "stdout" | "stderr">, input?: st
   for (const secret of [...secrets].sort((a, b) => b.length - a.length)) output = output.replaceAll(secret, "[redacted]");
   output = output
     .replace(/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)/g, "[private key redacted]")
-    .replace(/("(?:password|passphrase|privateKey|sudoPassword|token|authorization|code)"\s*:\s*)"(?:\\.|[^"\\])*"/gi, "$1\"[redacted]\"")
+    .replace(/("(?:password|passphrase|privateKey|sudoPassword|token|authorization|code)"\s*:\s*)"(?:\\.|[^"\\])*(?:"|\\?$)/gi, "$1\"[redacted]\"")
     .replace(/((?:proxy-authorization|authorization|x-gridlens-token)\s*[:=]\s*)[^\r\n]+/gi, "$1[redacted]")
     .replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+=*/gi, "Bearer [redacted]")
     .replace(/https?:\/\/[^\s<>"']+/gi, "[URL redacted]")
@@ -115,17 +119,41 @@ export function localDockerRunner({ execute = spawnSync, environment = process.e
       const child = spawn(sudo ? "sudo" : "docker", sudo ? ["--", "docker", ...args] : [...args], {
         shell: false, env: { ...environment, DOCKER_CLI_HINTS: "false" }, stdio: ["pipe", "pipe", "pipe"],
       });
-      let ready = false, output = "", finished = false;
+      let ready = false, output = "", stderr = "", captured = 0, finished = false, failed = false;
       const completion = new Promise<void>(done => child.once("close", () => { finished = true; done(); }));
-      const timeout = setTimeout(() => { child.kill("SIGTERM"); reject(new InstallerError("The installation lock helper did not become ready.")); }, 20_000);
-      child.stderr.on("data", () => {});
-      child.once("error", () => { clearTimeout(timeout); reject(new InstallerError("The installation lock helper could not start.")); });
-      child.once("close", () => { clearTimeout(timeout); if (ready && !held.released) held.lost = true;
-        if (!ready) reject(new InstallerError("Another installation or update is running. Retry after it finishes.")); });
+      const timeout = setTimeout(() => {
+        failed = true; child.kill("SIGTERM");
+        const detail = diagnostic({ stdout: output, stderr });
+        reject(new InstallerError(`The installation lock helper did not become ready within 20 seconds.${detail ? `\n${detail}` : ""}`));
+      }, 20_000);
+      const capture = (chunk: Buffer, target: "stdout" | "stderr"): void => {
+        if (failed) return;
+        const available = Math.max(0, LOCK_OUTPUT_LIMIT - captured);
+        const part = chunk.subarray(0, available).toString("utf8"); captured += chunk.byteLength;
+        if (target === "stdout") output += part; else stderr += part;
+        if (captured > LOCK_OUTPUT_LIMIT) {
+          failed = true; clearTimeout(timeout); child.kill("SIGTERM");
+          reject(new DockerCommandError(args, "output-limit", { status: null, stdout: output, stderr }));
+        }
+      };
+      child.stderr.on("data", (chunk: Buffer) => capture(chunk, "stderr"));
+      child.once("error", error => {
+        failed = true; clearTimeout(timeout);
+        reject(new DockerCommandError(args, "unavailable", { status: null, stdout: output, stderr }, undefined,
+          "code" in error ? error.code : undefined));
+      });
+      child.once("close", (code, signal) => {
+        clearTimeout(timeout); if (ready && !held.released) held.lost = true;
+        if (ready || failed) return;
+        if (code === MAINTENANCE_LOCK_BUSY_EXIT && stderr.split(/\r?\n/).includes(MAINTENANCE_LOCK_BUSY)) {
+          reject(new InstallerError("Another installation or update is running. Retry after it finishes."));
+        } else {
+          reject(new DockerCommandError(args, signal ? "signal" : "exit", { status: code, stdout: output, stderr }, undefined, signal));
+        }
+      });
       child.stdout.on("data", (chunk: Buffer) => {
-        output += chunk.toString("utf8");
-        if (output.length > 4096) { child.kill("SIGTERM"); return; }
-        if (!ready && output.includes("GRIDLENS_LOCK_READY\n")) {
+        capture(chunk, "stdout");
+        if (!failed && !ready && output.includes(`${MAINTENANCE_LOCK_READY}\n`)) {
           ready = true; maintenance = held; clearTimeout(timeout);
           resolve(async () => { held.released = true; if (maintenance === held) maintenance = undefined; if (!finished) child.stdin.end(); await completion; });
         }

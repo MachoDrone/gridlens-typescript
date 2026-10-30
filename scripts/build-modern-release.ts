@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { buildCoordinator } from "./build-coordinator.ts";
 import { parseRelease } from "../src/installer/release.ts";
 import { checked, localDockerRunner } from "../src/installer/docker.ts";
+import { archiveImageIdentity } from "./release-image-identity.ts";
 
 /** Build/publish preparation only: this command never pushes an image or uploads a release. */
 export async function buildModernRelease(options:{output:string;version:string;sequence:number;tag:string;signingKey:string;publicKey:string}):Promise<string>{
@@ -25,7 +26,10 @@ export async function buildModernRelease(options:{output:string;version:string;s
   const artifactName=`gridlens-runtime-${process.platform}-${process.arch}-${options.version}.tar`,artifact=join(output,artifactName);
   docker(["save","--output",artifact,imageName]);
   const bytes=readFileSync(artifact);
-  const manifest=parseRelease({format:"gridlens-modern-release-v1",version:options.version,sequence:options.sequence,platform:`${process.platform}-${process.arch}`,minimumCoordinator:1,imageId,
+  const platform=`${process.platform}-${process.arch}`;
+  if(platform!=="linux-x64"&&platform!=="linux-arm64")throw new Error("Build the release on a supported Linux architecture.");
+  const identity=archiveImageIdentity(bytes,{imageId,version:options.version,platform,imageTag:imageName});
+  const manifest=parseRelease({format:"gridlens-modern-release-v1",version:options.version,sequence:options.sequence,platform,minimumCoordinator:1,...identity,
     runtime:{name:artifactName,bytes:statSync(artifact).size,sha256:createHash("sha256").update(bytes).digest("hex")}});
   const manifestBytes=Buffer.from(JSON.stringify(manifest,null,2)+"\n"),key=createPrivateKey(readFileSync(options.signingKey)),publicKey=createPublicKey(readFileSync(options.publicKey));
   if(key.asymmetricKeyType!=="ed25519")throw new Error("Modern releases require an Ed25519 signing identity.");
