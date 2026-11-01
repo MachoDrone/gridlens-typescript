@@ -4,11 +4,14 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=0.1">
     <meta name="color-scheme" content="dark">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; base-uri 'none'; form-action 'none'">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; base-uri 'none'; form-action 'none'">
     <title>GridLens Fleet · Local preview</title>
-    <link rel="icon" href="data:,">
+    <link rel="manifest" href="./manifest.webmanifest">
+    <link rel="icon" href="./icons/gridlens-192.png">
+    <meta name="theme-color" content="#10151c">
     <link rel="stylesheet" href="/styles.css">
     <script type="module" src="/preview/updates.js"></script>
+    <script type="module" src="/preview/webapp.js"></script>
     <script type="module" src="/preview/main.js"></script>
   </head>
   <body>
@@ -47,6 +50,16 @@
               <path d="M20 8a8 8 0 0 0-14-3L3 8m0-5v5h5M4 16a8 8 0 0 0 14 3l3-3m0 5v-5h-5M12 16V8m-3 3 3-3 3 3"></path>
             </svg>
             <span class="sidebar-label">Update</span>
+          </button>
+          <a id="sidebar-secure" class="sidebar-item sidebar-secure" href="/secure-setup" aria-label="Secure this device" title="Secure this device" hidden>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
+              <rect x="5" y="10" width="14" height="11" rx="2"></rect><path d="M8 10V7a4 4 0 0 1 8 0v3M12 14v3"></path>
+            </svg>
+            <span class="sidebar-label">Secure</span>
+          </a>
+          <button id="sidebar-install-app" class="sidebar-item" type="button" aria-label="Install GridLens" title="Install GridLens" hidden>
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v5h16v-5"></path></svg>
+            <span class="sidebar-label">Install</span>
           </button>
           <button class="sidebar-item" type="button" disabled aria-label="Alerts (unavailable)" title="Alerts is not available yet">
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">

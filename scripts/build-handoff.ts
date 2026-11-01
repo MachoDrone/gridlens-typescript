@@ -4,6 +4,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSy
   renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeWebappAssets } from "./webapp-assets.ts";
 
 const projectDirectory = resolve(fileURLToPath(new URL("../", import.meta.url)));
 const artifactFormat = "gridlens-nosana-handoff-v1";
@@ -83,6 +84,7 @@ export function buildHandoff({ outputDirectory = join(projectDirectory, ".tools/
     for (const name of ["index.html", "styles.css"]) {
       copyFileSync(join(projectDirectory, "src/preview", name), join(staging, "dist", name));
     }
+    writeWebappAssets(join(staging, "dist"));
     const package_: JsonObject = { name: sourcePackage.name, version: sourcePackage.version,
       private: true, description: "GridLens hosted runtime handoff", license: sourcePackage.license,
       type: "module", engines, packageManager: sourcePackage.packageManager,

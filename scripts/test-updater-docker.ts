@@ -2,13 +2,16 @@
  * injects only its signed download transport in derived test images; normal
  * updater/owner/gateway code and deployment arguments perform every update. */
 import assert from "node:assert/strict";
-import { createHash, generateKeyPairSync, randomBytes, sign } from "node:crypto";
+import { createHash, generateKeyPairSync, randomBytes, sign, X509Certificate } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { request as httpsRequest } from "node:https";
 import { chromium } from "@playwright/test";
 import type { Browser } from "@playwright/test";
 import { Coordinator } from "../src/installer/coordinator.ts";
+import { parseBrowserSecurityStatus } from "../src/contracts/browser-security.ts";
+import { verifyGateway } from "../src/installer/health.ts";
 import { privateAddress } from "../src/installer/config.ts";
 import { ensureVpnWeb } from "../src/installer/vpn-web.ts";
 import { localDockerRunner, checked, inspectOwned, resourceName, labels, mount, restrictions, PRODUCT, PRODUCT_LABEL, INSTANCE_LABEL } from "../src/installer/docker.ts";
@@ -69,6 +72,27 @@ async function call(origin: string, path: string, body?: unknown): Promise<Recor
     parts.push(Buffer.from(chunk));
   }
   return JSON.parse(Buffer.concat(parts).toString("utf8")) as Record<string, unknown>;
+}
+/** Real certificate validation, with fixture session material retained only in memory. */
+async function secureCall(origin: string, path: string, ca: string, { body, cookie }: { body?: unknown; cookie?: string } = {}): Promise<{
+  status: number; value: Record<string, unknown>; cookie?: string;
+}> {
+  return new Promise((resolve, reject) => {
+    const encoded = body === undefined ? undefined : JSON.stringify(body);
+    const req = httpsRequest(new URL(path, origin), { ca, rejectUnauthorized: true, agent: false, method: encoded ? "POST" : "GET",
+      headers: { Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}),
+        ...(encoded ? { Origin: origin, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(encoded) } : {}) } }, response => {
+      let size = 0; const chunks: Buffer[] = [];
+      response.on("data", (chunk: Buffer) => { size += chunk.length; if (size > 1024 * 1024) req.destroy(new Error("Fixture HTTPS response exceeded its bound.")); else chunks.push(chunk); });
+      response.on("error", reject); response.on("end", () => {
+        try { const setCookie = response.headers["set-cookie"]?.[0]; resolve({ status: response.statusCode ?? 0,
+          value: JSON.parse(Buffer.concat(chunks).toString("utf8")), ...(setCookie ? { cookie: setCookie } : {}) }); }
+        catch { reject(new Error("Fixture HTTPS response was invalid.")); }
+      });
+    });
+    const timer = setTimeout(() => req.destroy(new Error("Fixture HTTPS request timed out.")), 8000);
+    req.on("error", reject); req.on("close", () => clearTimeout(timer)); req.end(encoded);
+  });
 }
 async function until<T>(read: () => Promise<T>, ready: (value: T) => boolean, timeout = 180_000): Promise<T> {
   const end = Date.now() + timeout; let last: unknown;
@@ -136,6 +160,39 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const installed = coordinator.install({ instance, release: firstRelease, action: "setup", bindAddress: options.address, port: options.httpsPort, enableUpdater: true });
     const web = ensureVpnWeb(runner, installed.config, firstRelease, options.webPort, { upgrade: true });
     evidence.origins = { https: installed.config.origin, browser: web.origin };
+    const publication = coordinator.publishBrowserSecurity(installed.config);
+    assert.ok(publication, "The candidate must advertise guided browser setup");
+    const publicCertificateSha256 = hash(new X509Certificate(publication.certificatePem).raw);
+    const checkBrowserSecurity = async () => {
+      const status = parseBrowserSecurityStatus(await call(web.origin, "/secure-setup/status.json"));
+      assert.equal(status.available, true);
+      if (!status.available) throw new Error("Guided browser setup metadata is unavailable.");
+      assert.equal(status.httpsOrigin, installed.config.origin); assert.equal(status.httpOrigin, web.origin);
+      assert.equal(status.certificateSha256, publicCertificateSha256);
+      assert.equal(status.serverCertificateSha256, installed.config.certificateSha256);
+      const response = await fetch(new URL("/secure-setup/ca.crt", web.origin), { signal: AbortSignal.timeout(8000) });
+      assert.equal(response.status, 200); assert.equal(response.headers.get("cache-control"), "no-store");
+      const certificate = await response.text(); assert.ok(!certificate.includes("PRIVATE KEY"));
+      assert.equal(hash(new X509Certificate(certificate).raw), publicCertificateSha256);
+      await verifyGateway(installed.config.origin, installed.certificate);
+      return { serverId: status.serverId, certificateSha256: status.certificateSha256,
+        serverCertificateSha256: status.serverCertificateSha256, httpsOrigin: status.httpsOrigin, httpOrigin: status.httpOrigin };
+    };
+    const initialBrowserSecurity = await checkBrowserSecurity(); evidence.browserSecurityInitial = initialBrowserSecurity;
+    const handoff = await call(web.origin, "/secure-setup/connect-code", {});
+    assert.equal(handoff.version, 1); assert.match(String(handoff.code), /^[A-Za-z0-9_-]{43}$/);
+    const connected = await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } });
+    assert.equal(connected.status, 200); assert.equal(connected.value.connected, true);
+    assert.equal(connected.value.token, undefined); assert.ok(connected.cookie);
+    assert.match(connected.cookie, /Secure/); assert.match(connected.cookie, /HttpOnly/); assert.match(connected.cookie, /SameSite=Strict/);
+    const browserCookie = connected.cookie.split(";", 1)[0]!;
+    const checkSecureBrowser = async () => {
+      const result = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie });
+      assert.equal(result.status, 200); assert.equal(result.value.serverId, initialBrowserSecurity.serverId); assert.equal(result.value.role, "operator");
+    };
+    await checkSecureBrowser();
+    assert.notEqual((await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } })).status, 200);
+    evidence.secureBrowserHandoff = "Verified HTTPS browser connected once without a terminal code; no bearer in JSON";
     const createRelease = (target: typeof first, sequence: number): FixtureRelease => {
       const artifact = `gridlens-runtime-fixture-${sequence}.tar`;
       const recorded = JSON.parse(helper(first.imageId, `import{mkdirSync,statSync,createReadStream}from"node:fs";import{createHash}from"node:crypto";import{spawnSync}from"node:child_process";
@@ -203,6 +260,9 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     assert.notEqual(upgraded.config.active.stateVolume, initial.config.active.stateVolume);
     assert.equal(upgraded.config.certificateSha256, initial.config.certificateSha256);
+    assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity);
+    await checkSecureBrowser();
+    evidence.browserSecurityAfterUpgrade = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
     evidence.update = { operation: completed.operation, observedPhases: [...phases], disconnectedReads: disconnected, automaticBrowserReturn: true, ...upgraded };
     progress("publishing a signed fixture with an intentionally failing owner");
@@ -220,6 +280,9 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     assert.equal(rolledBack.config.active.stateVolume, upgraded.config.active.stateVolume);
     for (const role of ["owner", "gateway", "vpn-web", "updater"]) assert.equal(rolledBack.roles[role]!.image, second.imageId);
     assert.equal(rolledBack.config.certificateSha256, initial.config.certificateSha256);
+    assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity);
+    await checkSecureBrowser();
+    evidence.browserSecurityAfterRollback = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
     await page.waitForFunction(() => document.querySelector("#update-status")?.textContent === "Update failed; previous version restored", undefined, { timeout: 60_000 });
     await page.getByRole("button", { name: "Close update", exact: true }).click();
@@ -227,6 +290,11 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.rollback = { operation: restored.operation, usableBrowser: true, ...rolledBack };
     evidence.browserPageErrors = pageErrors;
     assert.deepEqual(pageErrors, []);
+    await page.close();
+    checked(runner, ["exec", "-i", resourceName(instance, "owner"), "node", "scripts/shared-control.ts", "json"],
+      JSON.stringify({ operation: "revoke-vpn-web", scopeId: "default" }));
+    assert.equal((await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie })).status, 401);
+    evidence.secureBrowserParentRevocation = "Derived browser access revoked with its private-network gateway grant";
     evidence.passed = true; progress("real worker upgrade, self-replacement, browser return and rollback passed");
   } catch (error) {
     failure = error; evidence.passed = false; evidence.failure = error instanceof Error ? error.message : "Updater acceptance failed.";

@@ -238,6 +238,7 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
       const selected = runtimeRelease(transaction.candidate.release, transaction.targetImageId);
       const result = coordinator.install({ instance, release: selected, action: "upgrade", enableUpdater: true });
       if (transaction.previousWeb) ensureVpnWeb(runner, result.config, selected, transaction.previousWeb.port, { upgrade: true });
+      coordinator.publishBrowserSecurity(result.config);
     },
     async verify(candidate, job, signal) { await verify(candidate, journal(job), signal); },
     async rollback(job, signal) {
@@ -252,6 +253,7 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
       if (current.active.imageId !== transaction.previous.active.imageId || current.active.stateVolume !== transaction.previous.active.stateVolume || current.phase !== "ready")
         coordinator.restore(current, transaction.previous);
       if (transaction.previousWeb) ensureVpnWeb(runner, transaction.previous, releaseFor(transaction.previousWeb), transaction.previousWeb.port, { upgrade: true });
+      coordinator.publishBrowserSecurity(config());
       const previous = buildOf(transaction.previous); await verify(previous, transaction, signal); return previous;
     },
     async replaceWorker(candidate, job, signal) {

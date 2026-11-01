@@ -4,6 +4,66 @@ Read `README.md` and `docs/DEVELOPMENT.md` first. They describe the current
 application, architecture, implemented fields and remaining work. User
 instructions take precedence. Use this repository as the working directory.
 
+Platform decision — October 30, 2026:
+
+- Cloudflare Workers and the earlier Cloudflare Workers application are abandoned
+  and unsupported. The operator has zero intent to use them. Do not restore them,
+  request Cloudflare access, or propose them for deployment, testing or fallback.
+- GridLens remains the local application reached at the PC's LAN/VPN IP over
+  HTTP or HTTPS. Phone web-app installation must use that local application;
+  do not substitute an externally hosted frontend or ask for a public hosting
+  address as if that were the agreed architecture.
+- Browser certificate trust is separate from app installation metadata. Report
+  any actual local-HTTPS trust or access blocker honestly; do not claim that app
+  code silently makes a private-IP certificate trusted on a phone.
+- Historical references to the old Cloudflare app are archival evidence only.
+  Browser service workers are a different technology and are not Cloudflare Workers.
+
+HTTPS scope decision — October 31, 2026, revised by the guided-setup request:
+
+- The operator subsequently authorized an explicit **Secure this device** guide
+  for local HTTPS on Windows, macOS, Linux and Android. Keep ordinary LAN/VPN HTTP
+  usable; offer the guide in setup and terminal completion without forced redirects.
+  No domain, hosted address service, public port forwarding or host package is added.
+- Reuse the installation's existing public CA and actual saved HTTPS endpoint.
+  Initial HTTP enrollment assumes a trusted local network; neither its download
+  nor a fingerprint shown by that same page proves authenticity against interception.
+  Keep optional independent installer verification and never bypass TLS warnings.
+  Android/OS trust approval remains an explicit system step, not a webpage action.
+  Keep certificate trust, HTTPS browser pairing and future Wallet authorization separate.
+- The operator requested **Secure** directly in the sidebar, including a collapsed
+  lock icon, without widening the menu. The normal private-network flow completes
+  browser connection from that guide, with no follow-up CLI flags or copied code.
+  Handoffs require the existing private HTTP gateway grant and actual HTTPS
+  redemption. Derived sessions remain bound to that grant and cannot create
+  independent device access or acquire financial ownership. Keep their hashed
+  state separate so older code rejects them, and retain terminal pairing only
+  as recovery or for HTTPS-only installations.
+- Keep the guide concise: search for **Manage certificates** in Chrome; use
+  current Certificate Manager labels with older variants in optional help.
+  Detect device/browser and keep changes optional. Samsung is an Android
+  variant, not a separate device choice. After the explicit import/continue
+  action, valid HTTPS handoffs check secure context, saved identity and access
+  and open Fleet without another checkbox or Ready-page click. No-code signed-out
+  HTTPS entry resumes the guide; explicit terminal-code links retain their own
+  errors. Never describe this as inspecting or proving OS trust installation.
+- Operator-facing UI review demos must not offer installable certificate
+  downloads or device enrollment. Use static instructions or screenshots for
+  layout review. Real certificate walkthroughs must identify the actual backend
+  and its released version before asking the operator to install trust.
+- Retain standard same-origin manifest/icons and browser-offered installation
+  where they help an operator who already has correctly configured trusted HTTPS,
+  including an operator-owned domain. Show Install only when the browser offers it.
+- Preserve preexisting paired HTTPS, native Android access, certificates and
+  saved identities; this withdrawal does not authorize dismantling those systems.
+- A domain or port-forward alone is not trusted HTTPS. The managed installer is
+  still private-IP based; domain provisioning and public deployment are not
+  implemented or verified. Do not bypass exact Host/Origin checks or expose the
+  no-login private HTTP operator gateway publicly. This guide authorizes no public
+  port opening, DNS changes, automatic trust installation, CA regeneration or service.
+  Certificate renewal/pin rotation and financial operations remain separate work.
+  See docs/SECURE_BROWSER_SETUP.md for the implemented boundary and verification.
+
 Communication requirements apply by default, without a special "Truth Mode":
 
 - Before giving wording to relay to developers, verify each consequential claim

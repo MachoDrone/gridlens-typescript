@@ -34,6 +34,32 @@ Android pairing remain available separately.
 Physical reboot, GPU recorder lifecycle and physical-phone acceptance remain
 separate.
 
+**Secure** in the left sidebar opens the optional guided local HTTPS setup; its
+lock icon remains visible when the menu is collapsed. It supplies the existing public certificate
+directly to the device, guides Windows/macOS/Linux/Android system approval, then
+checks the saved HTTPS address and connects the browser using a one-use handoff
+from its existing private-network access. Normal setup needs no extra CLI command
+or manually copied connection code. Initial HTTP
+enrollment assumes a trusted private network; it does not authenticate the
+certificate against an active attacker on that network. No domain or hosted
+service is needed. Ordinary HTTP access and existing paired clients remain intact.
+The new browser connection stays tied to the private-network grant and stops
+working if it is revoked; it grants no Wallet ownership.
+The guide uses the detected device/browser by default, with optional Change
+controls. Samsung phones use Android instructions. After import, **I've imported
+it — Open GridLens** checks the saved HTTPS identity and browser access and opens
+Fleet directly; normal signed-out HTTPS bookmarks resume the guide instead of a
+manual connection-code screen.
+See [guided secure browser setup](docs/SECURE_BROWSER_SETUP.md) for platform
+instructions, limitations and verification coverage.
+
+Standard web-app metadata and icons remain an **optional capability for trusted
+HTTPS**. **Install GridLens** appears only when the browser offers installation;
+installing the web app and trusting the local certificate are different steps.
+Domain provisioning, public exposure, automatic certificate renewal and native
+pin rotation are not part of this guide. See
+[installation and deployment boundaries](docs/HOSTING_HANDOFF.md#local-web-app-installation).
+
 The dev.9 display update keeps Hosts inside the existing sidebar width, including
 its icon-only collapsed state. IP display follows Android's six views: hidden,
 both full addresses, public full, public last octet, private full, private last

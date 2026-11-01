@@ -182,13 +182,19 @@ rehearsal did not touch existing Nosana Podman workloads or their GPU resources.
 
 ## Version 1 endpoints
 
-All endpoints enforce the configured canonical Host/Origin checks. Except pairing,
+All endpoints enforce the configured canonical Host/Origin checks. Except pairing
+and the public certificate-guide routes below,
 requests require a valid device session or the explicitly enabled private-network
 gateway grant. Browser credential POSTs require a matching Origin and bounded
 JSON body. Device credentials bind one exact roster revision.
 
 | Endpoint | Contract |
 | --- | --- |
+| `GET /secure-setup` | Optional local certificate/HTTPS guide; no device or financial authority. |
+| `GET /secure-setup/status.json` | Bounded public installation/certificate metadata from terminal-owned ledger state; no fleet readings or secrets. |
+| `GET /secure-setup/ca.crt` | One validated existing public CA download; no caller-supplied path or key material. |
+| `POST /secure-setup/connect-code` | Explicit private-HTTP gateway-grant handoff; exact Origin, bounded body, one-use five-minute code. |
+| `POST /secure-setup/connect` | Actual HTTPS-only handoff redemption; sets a Secure/HttpOnly/SameSite cookie for access bound to the parent gateway, never a financial owner. |
 | `POST /api/shared/pair` | `{version:1, code, deviceName}` → server/device identity, bearer, role, context and capabilities. |
 | `POST /api/shared/login` | Browser pairing; returns public pairing metadata and sets the protected cookie. |
 | `GET /api/shared/status` | Server/context, emission time, shared-cache mode, role, capabilities and known provider/budget waits. |
@@ -200,7 +206,7 @@ JSON body. Device credentials bind one exact roster revision.
 | `POST /api/shared/setup-action` | Bounded search, cancel and compatible setup intent. |
 | `POST /api/shared/setup-configure` | Operator-only selected PCs, username with password or private key/passphrase and optional key-mode administrator password, or saved-sign-in reuse; explicit rewards/GPU value and restore IDs; acknowledges background work. |
 | `POST /api/shared/setup-remove` | Operator-only explicit PC removal and credential forgetting, retaining other PCs and durable safety state. |
-| `/api/shared/devices`, `/pair-code`, `/revoke` | Operator-only paired-device administration, separate from private-network browser access. |
+| `/api/shared/devices`, `/pair-code`, `/revoke` | Independently paired operator device administration; derived private-network browsers cannot create independent access. |
 | `/api/shared/monitoring`, `/monitoring-action` | Operator-only PC approval status, durable pause/revoke, and credential forgetting. |
 
 On Fleet snapshot requests, optional `X-GridLens-Scope` and

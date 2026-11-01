@@ -62,18 +62,25 @@ button:hover, select:hover { background: #222; }
    the panel measured from the established menu/header contents. */
 .sidebar-hosts { contain: inline-size; min-width: 0; max-width: calc(var(--sidebar-width) - 17px); min-height: 44px; gap: 8px; border: 1px solid #30a75d; background: #18783e; color: white; font-weight: 600; text-decoration: none; }
 .sidebar-hosts[hidden] { display: none; }
+#sidebar-install-app[hidden] { display: none; }
 .sidebar-hosts:hover { background: #1d8b49; }
 .sidebar-hosts .sidebar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-update { contain: inline-size; min-width: 0; max-width: calc(var(--sidebar-width) - 17px); min-height: 44px; gap: 6px; padding-inline: 8px; margin-top: 4px; font-size: 13px; }
 .sidebar-update[hidden] { display: none; }
 .sidebar-update:hover { background: #292929; }
 .sidebar-update .sidebar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sidebar-secure { contain: inline-size; min-width: 0; max-width: calc(var(--sidebar-width) - 17px); min-height: 44px; gap: 6px; padding-inline: 8px; margin-top: 4px; font-size: 13px; color: var(--text); text-decoration: none; }
+.sidebar-secure[hidden] { display: none; }
+.sidebar-secure:hover { background: #292929; }
+.sidebar-secure .sidebar-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .sidebar-update[data-update-state="available"] svg { color: var(--nosana-green); animation: update-available 2s ease-in-out infinite; }
 .sidebar-update[data-update-state="active"] svg { color: var(--state-amber); }
 .sidebar-update[data-update-state="failed"] svg { color: #ff6666; }
 @keyframes update-available { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 :root[data-sidebar="collapsed"] .sidebar-update { justify-content: center; padding-inline: 0; gap: 0; }
 :root[data-sidebar="collapsed"] .sidebar-update .sidebar-label { display: none; }
+:root[data-sidebar="collapsed"] .sidebar-secure { justify-content: center; padding-inline: 0; gap: 0; }
+:root[data-sidebar="collapsed"] .sidebar-secure .sidebar-label { display: none; }
 :root[data-sidebar="collapsed"] .sidebar-hosts { justify-content: center; padding-inline: 0; gap: 0; }
 :root[data-sidebar="collapsed"] .sidebar-hosts .sidebar-label { display: none; }
 .sidebar-footer { margin-top: auto; width: 100%; min-width: 0; padding: 16px 4px 4px; font-size: 11px; color: #929292; white-space: normal; }
@@ -91,6 +98,8 @@ button:hover, select:hover { background: #222; }
   :root:not([data-sidebar="expanded"]) .sidebar-hosts .sidebar-label { display: none; }
   :root:not([data-sidebar="expanded"]) .sidebar-update { justify-content: center; padding-inline: 0; gap: 0; }
   :root:not([data-sidebar="expanded"]) .sidebar-update .sidebar-label { display: none; }
+  :root:not([data-sidebar="expanded"]) .sidebar-secure { justify-content: center; padding-inline: 0; gap: 0; }
+  :root:not([data-sidebar="expanded"]) .sidebar-secure .sidebar-label { display: none; }
 }
 /* Compact navigation applies to an actually small layout, not the visual window
    exposed by a pinch. Pinched content keeps its original CSS dimensions. */
@@ -103,6 +112,7 @@ button:hover, select:hover { background: #222; }
 :root[data-compact-viewport="true"] .sidebar-item .sidebar-label { white-space: normal; overflow-wrap: anywhere; }
 :root[data-compact-viewport="true"] .sidebar-hosts { max-width: 100%; }
 :root[data-compact-viewport="true"] .sidebar-update { max-width: 100%; }
+:root[data-compact-viewport="true"] .sidebar-secure { max-width: 100%; }
 :root[data-compact-viewport="true"] .sidebar-footer { padding-inline: 0; }
 :root[data-compact-viewport="true"] .sidebar-links a { display: block; padding-inline: 0; min-width: 24px; }
 :root[data-compact-viewport="true"] .sidebar-external { display: none; }

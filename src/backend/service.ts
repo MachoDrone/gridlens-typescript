@@ -13,6 +13,8 @@ import { createSetup } from "./setup.ts";
 import type { scanComputers, inspectComputer } from "./ssh.ts";
 import type { CredentialVault } from "./credential-vault.ts";
 import type { PcPermission } from "./pc-monitor.ts";
+import { createBrowserSecurity } from "./browser-security.ts";
+import { createHash } from "node:crypto";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
   now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates,
@@ -20,9 +22,16 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
   providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer;
   build?: UpdateBuild; updates?: (body: Record<string, unknown>) => Promise<unknown> } = {}) {
   const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
+  const browserSecurity = createBrowserSecurity(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
   const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}), ...(inspect ? { inspect } : {}) });
-  const capabilities = [...SHARED_CAPABILITIES, ...(updates && build ? ["browser-updates-v1"] : [])];
+  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : [])];
+  function browserSecurityBinding() {
+    const { status } = browserSecurity.read();
+    if (!status.available || status.status !== "ready" || status.httpOrigin === null) throw new SharedHttpError(409);
+    return { status, hash: createHash("sha256").update(JSON.stringify([status.serverId, status.instance, status.httpOrigin,
+      status.httpsOrigin, status.certificateSha256, status.serverCertificateSha256])).digest("hex") };
+  }
   async function readiness(): Promise<unknown> {
     if (!build) throw new SharedHttpError(503);
     // Cache/roster integrity, never a provider probe or a freshness requirement.
@@ -54,6 +63,23 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
   }
   async function read(body: Record<string, unknown>): Promise<unknown> {
     try {
+      if (body.operation === "browser-security") {
+        if (Object.keys(body).some(field => field !== "operation")) throw new SharedHttpError(400);
+        return browserSecurity.read();
+      }
+      if (body.operation === "browser-security-connect-code") {
+        if (Object.keys(body).some(field => !["operation", "token"].includes(field))) throw new SharedHttpError(400);
+        return access.createSecureBrowserCode(body.token, browserSecurityBinding().hash);
+      }
+      if (body.operation === "browser-security-connect") {
+        if (Object.keys(body).some(field => !["operation", "version", "code", "httpsOrigin", "serverCertificateSha256"].includes(field)) || body.version !== 1)
+          throw new SharedHttpError(400);
+        const binding = browserSecurityBinding();
+        // These facts come only from the configured TLS gateway, never browser fields.
+        if (body.httpsOrigin !== binding.status.httpsOrigin || body.serverCertificateSha256 !== binding.status.serverCertificateSha256)
+          throw new SharedHttpError(409);
+        return access.redeemSecureBrowserCode(body.code, binding.hash);
+      }
       if (body.operation === "readiness") {
         if (Object.keys(body).some(field => field !== "operation")) throw new SharedHttpError(400);
         return await readiness();
@@ -67,7 +93,8 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       if (["updates-status", "updates-check", "updates-start"].includes(String(body.operation))) return await updateRequest(body, device.role);
       if (body.operation === "resolve") return context;
       if (body.operation === "status") return { version: 1, serverId: access.serverId, context,
-        capabilities, providerWaits: providerWaits(), serverTimeMs: now(), mode: "shared-cache", role: device.role, ...(build ? { build } : {}) };
+        capabilities, providerWaits: providerWaits(), serverTimeMs: now(), mode: "shared-cache", role: device.role, ...(build ? { build } : {}),
+        ...(access.isDerivedSecureBrowser(body.token) ? { canManageDevices: false } : {}) };
       if (body.operation === "snapshot") {
         const resource = body.resource as FleetResource;
         if (!FLEET_RESOURCES.includes(resource) || body.scopeId !== context.scopeId || body.rosterRevision !== context.rosterRevision)
@@ -130,7 +157,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       }
       if (body.operation === "devices") return { devices: access.devices(body.token) };
       if (body.operation === "revoke") { access.revoke(body.token, body.deviceId); return { revoked: true }; }
-      if (body.operation === "pair-code") return access.createCode(context.scopeId, "viewer");
+      if (body.operation === "pair-code") { access.requireDeviceAdministration(body.token); return access.createCode(context.scopeId, "viewer"); }
       if (body.operation === "setup") return setup.read(context.scopeId);
       if (body.operation === "setup-action") return setup.action(context.scopeId, body);
       throw new SharedHttpError(404);
@@ -140,11 +167,16 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
     }
   }
   async function control(body: Record<string, unknown>): Promise<unknown> {
+    if (body.operation === "browser-security-publish") {
+      const { operation: _operation, ...publication } = body;
+      try { browserSecurity.publish(publication); return { published: true }; }
+      catch { throw new SharedHttpError(400); }
+    }
     if (body.operation === "readiness") {
       if (Object.keys(body).some(field => field !== "operation")) throw new SharedHttpError(400);
       return readiness();
     }
-    if (body.operation === "status") return { version: 1, serverId: access.serverId, contexts: access.contexts() };
+    if (body.operation === "status") return { version: 1, serverId: access.serverId, contexts: access.contexts(), capabilities };
     if (body.operation === "register-vpn-web" || body.operation === "revoke-vpn-web") {
       if (typeof body.scopeId !== "string") throw new SharedHttpError(400);
       try {

@@ -5,6 +5,7 @@ import { dirname, basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { ReadStream, WriteStream } from "node:tty";
 import { Coordinator } from "./coordinator.ts";
+import type { BrowserSecurityPublication } from "./coordinator.ts";
 import { verifyGateway } from "./health.ts";
 import { checked, inspectOwned, localDockerRunner, resourceName } from "./docker.ts";
 import type { DockerRunner } from "./docker.ts";
@@ -18,6 +19,7 @@ import { downloadArtifactToFile } from "./artifact-download.ts";
 import { assertLocalDockerForSelection, chooseDashboardPort, choosePrivateEndpoint, choosePrivateWebPorts, discoverPrivateEndpoints, dockerNetworkExclusions, probeBindPort } from "./network-selection.ts";
 import type { PortProbe, SelectionPrompts } from "./network-selection.ts";
 import type { InstallationConfig } from "./config.ts";
+import { originFor } from "./config.ts";
 import { cliColorEnabled, cliSection, cliText } from "./cli-format.ts";
 import { acquireMaintenanceLock, guardTerminalUpdate } from "../updater/deployment.ts";
 import { findReleaseImage, requireReleaseImage, runtimeRelease } from "./image-identity.ts";
@@ -223,7 +225,20 @@ function savedConfiguration(coordinator: Coordinator, runner: DockerRunner, inst
   if (!config) throw new InstallerError("The saved backend configuration is not available. Rerun setup first.");
   return config;
 }
-export function printBrowserReady(terminal: TerminalPrompts, origin: string): void {
+export function printSecureBrowserGuide(terminal: Pick<TerminalPrompts, "print" | "color">, origin: string): void {
+  const url = new URL(origin), address = url.hostname.replace(/^\[|\]$/g, "");
+  if (!["http:", "https:"].includes(url.protocol) || originFor(address, Number(url.port)).replace(/^https:/, url.protocol) !== origin)
+    throw new InstallerError("Secure browser setup requires the exact saved private origin.");
+  terminal.print(cliText(terminal, "action", `Secure this device: ${origin}/secure-setup`));
+}
+export function printSecureBrowserReady(terminal: Pick<TerminalPrompts, "print" | "color">, publication: BrowserSecurityPublication): void {
+  printSecureBrowserGuide(terminal, publication.httpOrigin ?? publication.httpsOrigin);
+  const trust = publicCertificates(publication.certificatePem)[0]!;
+  terminal.print(`${trust.ca ? "PUBLIC CA certificate" : "Public server certificate"} SHA-256: ${publicCertificateFingerprint(publication.certificatePem)}`);
+  terminal.print(`Saved HTTPS dashboard: ${publication.httpsOrigin}/`);
+  terminal.print("Compare the guide's certificate fingerprint with this terminal before installing trust. Existing addresses and TLS identities were preserved.");
+}
+export function printBrowserReady(terminal: TerminalPrompts, origin: string, secureBrowserSetup = false): void {
   // Keep the existing private-origin validation before presenting a clickable URL.
   privateBrowserConnectionText(origin);
   terminal.print("");
@@ -232,6 +247,7 @@ export function printBrowserReady(terminal: TerminalPrompts, origin: string): vo
   terminal.print("");
   terminal.print("Open this address, then choose Hosts in the left menu to find, add or update PCs.");
   terminal.print(cliText(terminal, "muted", "Use your existing VPN when away."));
+  if (secureBrowserSetup) printSecureBrowserGuide(terminal, origin);
   terminal.print("");
 }
 function printSavedConnection(terminal: TerminalPrompts, coordinator: Coordinator, runner: DockerRunner, instance: string): void {
@@ -254,11 +270,11 @@ function publishSetupNetwork(runner: DockerRunner, config: InstallationConfig): 
   const context=verifiedSetupNetwork(config.bindAddress,config.active.version,interfaces);
   if(context)setupControl(runner,config.instance)({operation:"setup-network-context",scopeId:"default",...context});
 }
-export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts):Promise<void>{
-  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
+export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts, suppliedRunner?:DockerRunner):Promise<void>{
+  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n--secure-browser refreshes the secure-device guide, prints its public certificate fingerprint and creates a one-use HTTPS operator sign-in link.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
   if(args.includes("--version")){console.log("gridlens-modern-coordinator 1 / Node "+process.versions.node);return;}
   process.umask(0o077);
-  const terminal=suppliedTerminal??controllingTerminal(),runner=localDockerRunner();
+  const terminal=suppliedTerminal??controllingTerminal(),runner=suppliedRunner??localDockerRunner();
   let releaseMaintenanceLock: (() => Promise<void>) | undefined;
   try{
     const instance=option(args,"--instance")??"default";resourceName(instance,"owner");
@@ -266,6 +282,21 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     if(webPortInput!==undefined&&(!args.includes("--vpn-web")||!/^\d+$/.test(webPortInput)||Number(webPortInput)<1024||Number(webPortInput)>65535))
       throw new InstallerError("Use --web-port with --vpn-web and a port from 1024 through 65535.");
     let webPort=webPortInput===undefined?undefined:Number(webPortInput);
+    if(args.includes("--secure-browser")) {
+      if (["--upgrade", "--rollback", "--connect", "--vpn-web", "--ssh-sign-in", "--scan", "--web-port"].some(flag => args.includes(flag)))
+        throw new InstallerError("Use --secure-browser by itself with an optional --instance; it preserves the existing installation.");
+      const coordinator = new Coordinator(runner), config = savedConfiguration(coordinator, runner, instance);
+      if (!coordinator.supportsBrowserSecurity(config.active)) throw new InstallerError("This installed version does not support the secure-device guide. Update GridLens before using --secure-browser.");
+      releaseMaintenanceLock = await acquireMaintenanceLock(runner, instance, config.active.imageId);
+      guardTerminalUpdate(runner, config);
+      const publication = coordinator.publishBrowserSecurity(config);
+      if (!publication) throw new InstallerError("Secure browser setup is unavailable in the installed version.");
+      printSecureBrowserReady(terminal, publication);
+      terminal.print("After installing certificate trust, open this one-use HTTPS operator sign-in link. If it expires, rerun --secure-browser for a fresh five-minute link.");
+      const rawConnection = coordinator.operatorCode(instance), connection = browserConnectionText(config.origin, rawConnection, true);
+      // The existing handoff validator has checked this exact one-use code.
+      terminal.print(connection); terminal.print(`Connection code: ${(JSON.parse(rawConnection) as { code: string }).code}`); return;
+    }
     if(args.includes("--ssh-sign-in")){
       const coordinator=new Coordinator(runner),config=savedConfiguration(coordinator,runner,instance);
       if(config.active.sequence<6)throw new InstallerError("Run the current installer with --vpn-web first to update terminal setup.");
@@ -341,12 +372,13 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
       await verifyPrivateWeb(web.origin,true);
       publishSetupNetwork(runner,result.config);
-      printBrowserReady(terminal,web.origin);
+      printBrowserReady(terminal,web.origin,coordinator.supportsBrowserSecurity(result.config.active));
       return;
     }
     terminal.print(`Server TLS certificate SHA-256 (Android pin): ${result.config.certificateSha256}`);
     await offerPublicCertificateExport(terminal,instance,result.certificate,{existingTrusted:certificate!==undefined});
     if(result.config.active.sequence>=5)publishSetupNetwork(runner,result.config);
     terminal.print(browserConnectionText(result.config.origin,coordinator.operatorCode(instance),result.config.active.sequence>=3));
+    if (coordinator.supportsBrowserSecurity(result.config.active)) printSecureBrowserGuide(terminal,result.config.origin);
   }finally{await releaseMaintenanceLock?.();terminal.close();}
 }

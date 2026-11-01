@@ -57,6 +57,8 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
   if (enabled) {
     const hostsLink = document.querySelector<HTMLAnchorElement>("#sidebar-hosts");
     if (hostsLink) hostsLink.hidden = false;
+    const secureLink = document.querySelector<HTMLAnchorElement>("#sidebar-secure");
+    if (secureLink) secureLink.hidden = false;
     document.querySelector<HTMLElement>(".scenario-controls")?.setAttribute("hidden", "");
     document.addEventListener("visibilitychange", () => { if (document.hidden) { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); }
       else { void refresh(); pumpHistory(); } });

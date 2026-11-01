@@ -19,7 +19,7 @@
     "dev:handoff": "npm run build && node scripts/hosting-lab.ts",
     "preview": "node scripts/preview-server.ts",
     "test:browser": "npm run build && playwright test",
-    "check": "npm run typecheck && npm test && npm run test:browser",
+    "check": "npm run typecheck && npm run build && npm test && npm run test:browser",
     "shared:owner": "node scripts/shared-owner.ts",
     "shared:gateway": "node scripts/shared-gateway.ts",
     "shared:control": "node scripts/shared-control.ts",

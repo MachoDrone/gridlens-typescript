@@ -62,6 +62,33 @@ function copyDirectory(source: string, destination: string): void {
   chownSync(destination,1000,1000);
   const fd=openSync(destination,"r");try{fsyncSync(fd);}finally{closeSync(fd);}
 }
+/** Fixed public files only. The callable container operation accepts no paths. */
+export function publicBrowserCertificates(configDirectory = "/config", tlsDirectory = "/tls"): { certificatePem: string; serverCertificatePem: string } {
+  const readPublic = (path: string): string[] => {
+    let pem: string;
+    try {
+      const info = lstatSync(path);
+      if (!info.isFile() || info.size > 32 * 1024) throw new InstallerError("The saved public certificate is not a bounded ordinary file.");
+      pem = readFileSync(path, "utf8");
+    } catch (error) {
+      if (error instanceof InstallerError) throw error;
+      const code = (error as NodeJS.ErrnoException)?.code;
+      const reason = typeof code === "string" && /^[A-Z][A-Z0-9_]{0,31}$/.test(code) ? ` (${code})` : "";
+      throw new InstallerError(`The saved public ${path.endsWith("/ca.crt") ? "CA" : "server"} certificate could not be read${reason}; its identity was retained.`);
+    }
+    if (Buffer.byteLength(pem) > 32 * 1024) throw new InstallerError("The saved public certificate exceeds its size limit.");
+    const blocks = [...pem.matchAll(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/g)].map(match => match[0]);
+    if (!blocks.length || pem.replace(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/g, "").trim())
+      throw new InstallerError("The saved public certificate contains unsupported data.");
+    try { blocks.forEach(block => new X509Certificate(block)); }
+    catch { throw new InstallerError("The saved public certificate could not be validated."); }
+    return blocks;
+  };
+  const server = readPublic(join(tlsDirectory, "server.crt"));
+  const caPath = join(configDirectory, "ca.crt");
+  const trust = existsSync(caPath) ? readPublic(caPath) : server;
+  return { certificatePem: trust.join("\n") + "\n", serverCertificatePem: server[0]! + "\n" };
+}
 export function containerOperation(operation: string, body: unknown): unknown {
   if (operation === "updater-initialize") {
     for (const directory of ["/updates", "/update-state"]) {
@@ -75,6 +102,10 @@ export function containerOperation(operation: string, body: unknown): unknown {
   if(operation==="read")return existsSync("/config/installation.json")?validateInstallation(JSON.parse(readFileSync("/config/installation.json","utf8"))):null;
   if(operation==="save") {const config=validateInstallation(body);atomic("/config/installation.json",JSON.stringify(config));return {saved:true};}
   if(operation==="certificate")return readFileSync(existsSync("/config/ca.crt")?"/config/ca.crt":"/tls/server.crt","utf8");
+  if(operation==="public-browser-certificates") {
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) throw new InstallerError("Public certificate publication accepts no file paths or options.");
+    return publicBrowserCertificates();
+  }
   if(operation==="copy-state") {if(readdirSync("/destination").length)throw new InstallerError("Recovery destination is not empty.");copyDirectory("/source","/destination");return {copied:true};}
   if(operation!=="initialize"||!body||typeof body!=="object")throw new InstallerError("Unsupported installer operation.");
   if(existsSync("/config/installation.json"))return validateInstallation(JSON.parse(readFileSync("/config/installation.json","utf8")));

@@ -111,6 +111,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
         const configured = html.replace("<title>GridLens Fleet · Local preview</title>", "<title>GridLens Fleet</title>")
           .replace('href="/styles.css"', `href="${basePath}/styles.css"`)
           .replace('src="/preview/main.js"', `src="${basePath}/preview/main.js"`)
+          .replace('src="/preview/webapp.js"', `src="${basePath}/preview/webapp.js"`)
           .replace('src="/preview/updates.js"', `src="${basePath}/preview/updates.js"`).replace("</head>", [
           `<meta name="gridlens-api-base" content="${basePath}/api/fleet">`,
           '<meta name="gridlens-source-mode" content="snapshot">',

@@ -9,8 +9,13 @@ import { join } from "node:path";
 import { isIP } from "node:net";
 import { parseUpdateBuild } from "../contracts/updates.ts";
 import type { UpdateBuild } from "../contracts/updates.ts";
+import { createHash } from "node:crypto";
+import { parseBrowserSecurityStatus, parseBrowserSecurityConnectCode } from "../contracts/browser-security.ts";
+import { parsePublicBrowserCertificates } from "./browser-security.ts";
+import type { BrowserSecurityRead } from "./browser-security.ts";
 
 export type GatewayTransport = "https" | "vpn-http";
+export interface BrowserSecurityAssets { html: Buffer; script: Buffer }
 const cookieName = (transport: GatewayTransport): string => transport === "vpn-http" ? "gridlens-vpn" : "__Host-gridlens";
 
 /** HTTP is an explicit private-network option, never inferred from proxy headers. */
@@ -36,11 +41,15 @@ export function requestToken(request: IncomingMessage, transport: GatewayTranspo
   return cookies.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(cookies[0]!.slice(prefix.length)) ? cookies[0]!.slice(prefix.length) : null;
 }
 export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, setupScript: Buffer,
-  { transport = "https", privateNetworkToken, build, updatesEnabled = false }: {
-    transport?: GatewayTransport; privateNetworkToken?: string; build?: UpdateBuild; updatesEnabled?: boolean } = {}): FleetIntegration {
+  { transport = "https", privateNetworkToken, build, updatesEnabled = false, browserSecurityAssets, serverCertificateSha256 }: {
+    transport?: GatewayTransport; privateNetworkToken?: string; build?: UpdateBuild; updatesEnabled?: boolean;
+    browserSecurityAssets?: BrowserSecurityAssets; serverCertificateSha256?: string } = {}): FleetIntegration {
   if (updatesEnabled && !build) throw new Error("Updater-enabled gateway requires immutable build identity.");
   if (build) build = parseUpdateBuild(build);
   if (transport !== "https" && transport !== "vpn-http") throw new Error("Unsupported gateway transport.");
+  if (serverCertificateSha256 !== undefined && !/^[a-f0-9]{64}$/.test(serverCertificateSha256)) throw new Error("Invalid saved TLS certificate identity.");
+  if (browserSecurityAssets && (browserSecurityAssets.html.length > 256 * 1024 || browserSecurityAssets.script.length > 512 * 1024))
+    throw new Error("Browser security assets exceed their bounds.");
   if (privateNetworkToken !== undefined && (transport !== "vpn-http" || !/^[A-Za-z0-9_-]{43}$/.test(privateNetworkToken)))
     throw new Error("Private-network access requires its configured HTTP gateway grant.");
   const privateNetwork = privateNetworkToken !== undefined;
@@ -94,6 +103,82 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     },
     async handleRequest(request, response) {
       const url = new URL(request.url ?? "/", "https://gateway.invalid");
+      if (url.pathname === "/secure-setup" || url.pathname === "/secure-setup.js" || url.pathname.startsWith("/secure-setup/")) {
+        const send = (status: number, contentType: string, body: Buffer, headers: Record<string, string> = {}): void => {
+          response.writeHead(status, { "Content-Type": contentType, "Content-Length": body.length, "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", ...headers });
+          response.end(request.method === "HEAD" ? undefined : body);
+        };
+        const fail = (status: number): void => send(status, "application/json; charset=utf-8", Buffer.from(JSON.stringify({ error: "Secure browser setup is unavailable. Check the saved installation." })));
+        const servedOrigin = `${transport === "https" ? "https" : "http"}://${request.headers.host}`;
+        const readPublicSecurity = async () => {
+          const raw = await call<BrowserSecurityRead>({ operation: "browser-security" });
+          if (!raw || Object.keys(raw).some(field => !["status", "certificatePem"].includes(field))) throw new Error("Invalid public security response.");
+          const status = parseBrowserSecurityStatus(raw.status);
+          if (status.available && (servedOrigin !== (transport === "https" ? status.httpsOrigin : status.httpOrigin)
+            || transport === "https" && serverCertificateSha256 !== undefined && serverCertificateSha256 !== status.serverCertificateSha256))
+            throw new Error("The published and served browser identities differ.");
+          return { status, certificatePem: raw.certificatePem };
+        };
+        if (url.pathname === "/secure-setup/connect-code" || url.pathname === "/secure-setup/connect") {
+          if (request.method !== "POST") { response.setHeader("Allow", "POST"); fail(405); return true; }
+          if (url.search) { fail(400); return true; }
+          const issuing = url.pathname === "/secure-setup/connect-code";
+          if (issuing ? transport !== "vpn-http" || !privateNetwork : transport !== "https") { fail(403); return true; }
+          if (request.headers.origin !== servedOrigin) { fail(403); return true; }
+          if (!issuing && serverCertificateSha256 === undefined) { fail(503); return true; }
+          try {
+            const input = await readJson(request, 1024);
+            if (issuing ? Object.keys(input).length !== 0 : Object.keys(input).length !== 2 || input.version !== 1
+              || typeof input.code !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(input.code)
+              || Object.keys(input).some(field => !["version", "code"].includes(field))) throw new SharedHttpError(400);
+            const { status } = await readPublicSecurity();
+            if (!status.available || status.status !== "ready" || status.httpOrigin === null) throw new SharedHttpError(409);
+            if (issuing) {
+              const code = parseBrowserSecurityConnectCode(await call({ operation: "browser-security-connect-code", token: privateNetworkToken }));
+              send(200, "application/json; charset=utf-8", Buffer.from(JSON.stringify(code)));
+            } else {
+              const result = await call<{ token?: unknown }>({ operation: "browser-security-connect", version: 1, code: input.code,
+                httpsOrigin: servedOrigin, serverCertificateSha256 });
+              if (typeof result.token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(result.token)) throw new SharedHttpError(502);
+              send(200, "application/json; charset=utf-8", Buffer.from(JSON.stringify({ version: 1, connected: true })),
+                { "Set-Cookie": `${cookieName("https")}=${result.token}; Path=/; Secure; HttpOnly; SameSite=Strict` });
+            }
+          } catch (error) { fail(error instanceof SharedHttpError ? error.status : 503); }
+          return true;
+        }
+        if (!["GET", "HEAD"].includes(request.method ?? "")) { response.setHeader("Allow", "GET, HEAD"); fail(405); return true; }
+        if (url.search) { fail(400); return true; }
+        if (url.pathname === "/secure-setup" || url.pathname === "/secure-setup.js") {
+          if (!browserSecurityAssets) { fail(503); return true; }
+          const html = url.pathname === "/secure-setup";
+          send(200, html ? "text/html; charset=utf-8" : "text/javascript; charset=utf-8", html ? browserSecurityAssets.html : browserSecurityAssets.script,
+            html ? { "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" } : {});
+          return true;
+        }
+        if (url.pathname !== "/secure-setup/status.json" && url.pathname !== "/secure-setup/ca.crt") { fail(404); return true; }
+        const expectedCertificate = url.pathname === "/secure-setup/ca.crt" ? request.headers["if-match"] : undefined;
+        if (expectedCertificate !== undefined && (typeof expectedCertificate !== "string" || !/^"[a-f0-9]{64}"$/.test(expectedCertificate))) {
+          fail(412); return true;
+        }
+        try {
+          const { status, certificatePem } = await readPublicSecurity();
+          if (url.pathname === "/secure-setup/status.json") {
+            send(200, "application/json; charset=utf-8", Buffer.from(JSON.stringify({ ...status,
+              canConnectBrowser: privateNetwork && status.available && status.status === "ready" }))); return true;
+          }
+          if (expectedCertificate !== undefined && (!status.available || status.trustMode !== "private-ca"
+            || expectedCertificate !== `"${status.certificateSha256}"`)) { fail(412); return true; }
+          if (!status.available || status.trustMode !== "private-ca" || status.status !== "ready") { fail(409); return true; }
+          const certificates = parsePublicBrowserCertificates(certificatePem);
+          if (certificates.some(certificate => !certificate.ca)
+            || createHash("sha256").update(certificates[0]!.raw).digest("hex") !== status.certificateSha256) throw new Error("Invalid public CA download.");
+          send(200, "application/x-x509-ca-cert", Buffer.from(certificates.map(cert => cert.toString().trim()).join("\n") + "\n"),
+            { "Content-Disposition": `attachment; filename="gridlens-${status.instance}-${status.certificateSha256.slice(0, 8)}-ca.crt"`,
+              ETag: `"${status.certificateSha256}"` });
+        } catch { fail(503); }
+        return true;
+      }
       if (updatesEnabled && build && url.pathname === "/health/ready" && ["GET", "HEAD"].includes(request.method ?? "")) {
         try {
           const owner = await ownerCall<{ version: number; status: string; build: unknown }>(socketPath, { operation: "readiness" }, undefined, 5000);
@@ -122,7 +207,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
       }
       if (["/connect", "/setup"].includes(url.pathname) && request.method === "GET") {
         response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Content-Length": setupHtml.length,
-          "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+          "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; manifest-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
         response.end(setupHtml); return true;
       }
       if (url.pathname === "/shared-setup.js" && request.method === "GET") {
@@ -186,13 +271,17 @@ export async function startSharedGateway(options: { socketPath: string; certPath
     } finally { await file.close(); }
   }
   if (transport === "https" && (!options.certPath || !options.keyPath)) throw new Error("HTTPS requires its saved certificate and key.");
-  const [html, script, tls] = await Promise.all([
+  const [html, script, tls, browserSecurityAssets] = await Promise.all([
     readFile(join(options.directory, "shared-setup.html")), readFile(join(options.directory, "preview/shared-setup.js")),
     transport === "https" ? Promise.all([readFile(options.certPath!), readFile(options.keyPath!)]).then(([cert, key]) => ({ cert, key })) : undefined,
+    Promise.all([readFile(join(options.directory, "secure-setup.html")), readFile(join(options.directory, "preview/secure-setup.js"))])
+      .then(([html, script]) => ({ html, script })).catch(error => { if (error?.code === "ENOENT") return undefined; throw error; }),
   ]);
   const integration = createGatewayIntegration(options.socketPath, html, script, { transport,
     ...(privateNetworkToken === undefined ? {} : { privateNetworkToken }), ...(options.build ? { build: options.build } : {}),
-    ...(options.updatesEnabled === undefined ? {} : { updatesEnabled: options.updatesEnabled }) });
+    ...(options.updatesEnabled === undefined ? {} : { updatesEnabled: options.updatesEnabled }),
+    ...(browserSecurityAssets ? { browserSecurityAssets } : {}),
+    ...(tls ? { serverCertificateSha256: createHash("sha256").update(parsePublicBrowserCertificates(tls.cert.toString("utf8"))[0]!.raw).digest("hex") } : {}) });
   const server: FleetServerOptions = { integration, directory: options.directory, host: options.host ?? "0.0.0.0",
     port: options.port ?? 8443, publicOrigin: options.publicOrigin, ...(tls ? { tls } : {}), accessCheckIntervalMs: 1000 };
   return { server: await startFleetServer(server), integration };

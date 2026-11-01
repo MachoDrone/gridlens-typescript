@@ -1,5 +1,74 @@
 # GridLens hosting handoff
 
+## Local web-app installation
+
+The operator subsequently authorized an optional, explicit **Secure this device**
+guide for the installed local backend. It supplies the saved public certificate,
+guides OS trust approval and checks the actual saved HTTPS endpoint without a
+domain or hosted service. Ordinary LAN/VPN HTTP access stays available and is never
+automatically redirected. Existing paired HTTPS/native access, certificates and
+identities are preserved. See [guided setup](SECURE_BROWSER_SETUP.md) for the
+trusted-network bootstrap assumption and platform verification boundaries.
+
+This guide belongs to the installed backend, not the portable snapshot gateway.
+An integration that has not supplied installer-owned certificate metadata does
+not acquire certificate export, pairing or privileged capabilities.
+
+The generic manifest, application icons and browser-offered Install action remain
+useful for an operator who already has correctly configured trusted HTTPS,
+including a domain that reaches their own host. The normal and portable builds
+include `manifest.webmanifest`, 192/512/maskable icons and `preview/webapp.js`.
+All metadata and icon URLs are relative to the current app origin/mount path.
+The app and its data stay on the same server; no external frontend or cross-origin
+access path is introduced. Cloudflare Workers and the earlier Workers app remain
+abandoned and unsupported.
+
+**Install GridLens** stays hidden until the browser supplies an installation
+prompt in a secure context. Clicking it opens that native prompt. Dismissal or
+failure leaves the normal dashboard usable without a certificate tutorial or
+redirect; an installed standalone app hides the redundant action. This code adds
+no service worker, offline data cache or separate frontend update lifecycle.
+
+### Operator-managed domain exception
+
+A domain or router port-forward alone does not establish trusted HTTPS. The
+visited hostname needs a matching browser-trusted certificate. The deployment
+also needs appropriate access control, the correct configured application origin,
+and exact Host/Origin handling. GridLens does not trust forwarded headers as a
+substitute for its configured origin. A reverse proxy that only rewrites Host
+while leaving an incompatible browser Origin is not a supported shortcut.
+
+The lower-level gateway accepts an explicitly configured HTTPS hostname, but the
+managed installer currently derives its origin from an assigned private IP and
+checks certificates for that IP. It does not provision domains, certificates,
+reverse proxies or public port forwarding. Retaining the web-app metadata is
+compatibility for correctly configured HTTPS; it is not a claim that domain-based
+installation is turnkey or that a public deployment has been tested.
+
+The current `--vpn-web` HTTP gateway grants operator access to anyone who can
+reach it. Do not port-forward that gateway directly to the public internet.
+HTTPS alone does not supply authentication. No public exposure or existing VPN,
+router, DNS, certificate or pairing change is authorized by this optional case.
+
+### Verification and historical phone result
+
+Automated checks inspect the real manifest through Chromium and exercise prompt
+availability, cancellation, failure and standalone behavior without network or
+navigation side effects from the Install control. Actual TLS fixture checks verify
+certificate validation and preserve protected API access. Loopback's developer
+secure-context exception does not make private-IP HTTP installable on a phone.
+Physical device and any real operator-domain deployment need their own acceptance.
+
+The October 30 physical phone check of the existing private HTTPS address produced
+crossed-out HTTPS and "Your connection is not private". That did not establish a
+successful installation. Private local evidence retains the diagnostic result;
+normal users are no longer directed through that certificate-onboarding attempt.
+The earlier external frontend, CORS path and hosted-bundle publication workflow
+have already been removed. No live deployment or physical installation success is
+claimed for the retained optional metadata.
+
+## Portable backend handoff
+
 The local preview uses the same browser and observation contracts as the portable
 hosting runtime.
 

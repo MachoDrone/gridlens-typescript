@@ -14,8 +14,15 @@ interface PairCode { hash: string; scopeId: string; rosterRevision: string; role
 interface AccessState { version: 1; serverId: string; fleets: FleetContext[]; devices: Device[]; codes: PairCode[]; attempts: number[] }
 interface GatewayGrant { id: string; scopeId: string; hash: string; revokedAtMs: number | null }
 interface GatewayState { version: 1; grants: GatewayGrant[] }
+interface SecureBrowserTicket { hash: string; parentGatewayId: string; scopeId: string; rosterRevision: string; bindingHash: string; expiresAtMs: number }
+interface SecureBrowserSession { id: string; hash: string; parentGatewayId: string; scopeId: string; revokedAtMs: number | null }
+interface SecureBrowserState { version: 1; tickets: SecureBrowserTicket[]; sessions: SecureBrowserSession[]; issuanceAttempts: number[]; redemptionAttempts: number[] }
 const hash = (value: string): string => createHash("sha256").update(value).digest("hex");
 const boundedName = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0 && value.length <= 80 && !/[\u0000-\u001f\u007f]/.test(value);
+const validIdentifier = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+const validHash = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+const validTime = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+const validUuid = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9-]{36}$/.test(value);
 
 /** Owner-only access ledger. Raw bearer credentials and connection codes are never persisted. */
 export function createAccess(state: PrivateState, now = Date.now) {
@@ -37,6 +44,38 @@ export function createAccess(state: PrivateState, now = Date.now) {
     || new Set(gateways.grants.map(grant => grant.scopeId)).size !== gateways.grants.length
     || new Set(gateways.grants.map(grant => grant.hash)).size !== gateways.grants.length)
     throw new Error("Invalid private-network gateway ledger.");
+  // Older runtimes must reject these credentials by not knowing this namespace;
+  // placing them in access.v1.devices would silently remove their parent constraint.
+  const secureBrowserKey = "secure-browser-access.v1";
+  const savedSecureBrowser = state.get<SecureBrowserState>(secureBrowserKey);
+  let secureBrowser: SecureBrowserState = savedSecureBrowser === undefined
+    ? { version: 1, tickets: [], sessions: [], issuanceAttempts: [], redemptionAttempts: [] } : savedSecureBrowser;
+  if (!secureBrowser || secureBrowser.version !== 1 || Object.keys(secureBrowser).some(field => !["version", "tickets", "sessions", "issuanceAttempts", "redemptionAttempts"].includes(field))
+    || !Array.isArray(secureBrowser.tickets) || secureBrowser.tickets.length > 128 || !Array.isArray(secureBrowser.sessions) || secureBrowser.sessions.length > 4096
+    || !Array.isArray(secureBrowser.issuanceAttempts) || secureBrowser.issuanceAttempts.length > 20 || secureBrowser.issuanceAttempts.some(at => !validTime(at))
+    || !Array.isArray(secureBrowser.redemptionAttempts) || secureBrowser.redemptionAttempts.length > 20 || secureBrowser.redemptionAttempts.some(at => !validTime(at))
+    || secureBrowser.tickets.some(ticket => !ticket || !validHash(ticket.hash) || !validUuid(ticket.parentGatewayId) || !validIdentifier(ticket.scopeId)
+      || !validIdentifier(ticket.rosterRevision) || !validHash(ticket.bindingHash) || !validTime(ticket.expiresAtMs)
+      || Object.keys(ticket).some(field => !["hash", "parentGatewayId", "scopeId", "rosterRevision", "bindingHash", "expiresAtMs"].includes(field)))
+    || secureBrowser.sessions.some(session => !session || !validUuid(session.id) || !validHash(session.hash) || !validUuid(session.parentGatewayId)
+      || !validIdentifier(session.scopeId) || session.revokedAtMs !== null && !validTime(session.revokedAtMs)
+      || Object.keys(session).some(field => !["id", "hash", "parentGatewayId", "scopeId", "revokedAtMs"].includes(field)))
+    || new Set(secureBrowser.tickets.map(ticket => ticket.hash)).size !== secureBrowser.tickets.length
+    || new Set(secureBrowser.sessions.map(session => session.hash)).size !== secureBrowser.sessions.length
+    || new Set(secureBrowser.sessions.map(session => session.id)).size !== secureBrowser.sessions.length)
+    throw new Error("Invalid secure-browser access ledger.");
+  function mutateSecureBrowser(change: (next: SecureBrowserState) => void): void {
+    const next = structuredClone(secureBrowser); change(next); state.set(secureBrowserKey, next); secureBrowser = next;
+  }
+  function reserveBrowserAttempt(kind: "issuanceAttempts" | "redemptionAttempts"): number {
+    const at = now(); if (!validTime(at)) throw new AccessError("invalid");
+    if (secureBrowser[kind].filter(time => time > at - 60_000).length >= 20) throw new AccessError("paused");
+    mutateSecureBrowser(next => {
+      next[kind] = next[kind].filter(time => time > at - 60_000); next[kind].push(at);
+      next.tickets = next.tickets.filter(ticket => ticket.expiresAtMs > at);
+    });
+    return at;
+  }
   function mutateGateways(change: (next: GatewayState) => void): void {
     const next = structuredClone(gateways); change(next); state.set(gatewayKey, next); gateways = next;
   }
@@ -58,6 +97,12 @@ export function createAccess(state: PrivateState, now = Date.now) {
       const context = ledger.fleets.find(value => value.scopeId === gateway.scopeId);
       return context ? { deviceId: gateway.id, name: "Private-network web gateway", role: "operator", context: structuredClone(context) } : null;
     }
+    const browser = secureBrowser.sessions.find(value => value.hash === tokenHash && value.revokedAtMs === null);
+    if (browser) {
+      const parent = gateways.grants.find(value => value.id === browser.parentGatewayId && value.scopeId === browser.scopeId && value.revokedAtMs === null);
+      const context = parent && ledger.fleets.find(value => value.scopeId === parent.scopeId);
+      return context ? { deviceId: browser.id, name: "Secure browser", role: "operator", context: structuredClone(context) } : null;
+    }
     const device = ledger.devices.find(value => value.hash === tokenHash && value.revokedAtMs === null);
     if (!device) return null;
     const context = ledger.fleets.find(value => value.scopeId === device.scopeId && value.rosterRevision === device.rosterRevision);
@@ -66,6 +111,15 @@ export function createAccess(state: PrivateState, now = Date.now) {
   function requireAccess(token: unknown, role?: DeviceRole): DeviceAccess {
     const access = resolve(token);
     if (!access || role === "operator" && access.role !== role) throw new AccessError("denied");
+    return access;
+  }
+  function isDerivedSecureBrowser(token: unknown): boolean {
+    const principal = resolve(token);
+    return principal !== null && secureBrowser.sessions.some(session => session.id === principal.deviceId);
+  }
+  function requireDeviceAdministration(token: unknown): DeviceAccess {
+    const access = requireAccess(token, "operator");
+    if (secureBrowser.sessions.some(session => session.id === access.deviceId)) throw new AccessError("denied");
     return access;
   }
   function createCode(scopeId: string, role: DeviceRole) {
@@ -80,13 +134,41 @@ export function createAccess(state: PrivateState, now = Date.now) {
   }
   return {
     get serverId(): string { return ledger.serverId; },
-    contexts: (): FleetContext[] => structuredClone(ledger.fleets), fleet, resolve, requireAccess, createCode,
+    contexts: (): FleetContext[] => structuredClone(ledger.fleets), fleet, resolve, requireAccess, isDerivedSecureBrowser, requireDeviceAdministration, createCode,
+    createSecureBrowserCode(token: unknown, bindingHash: string) {
+      if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token) || !validHash(bindingHash)) throw new AccessError("denied");
+      const parent = gateways.grants.find(value => value.hash === hash(token) && value.revokedAtMs === null);
+      if (!parent) throw new AccessError("denied");
+      const context = fleet(parent.scopeId), at = reserveBrowserAttempt("issuanceAttempts"), code = randomBytes(32).toString("base64url"), expiresAtMs = at + 300_000;
+      mutateSecureBrowser(next => {
+        if (next.tickets.length >= 128 || next.sessions.length >= 4096) throw new AccessError("paused");
+        next.tickets.push({ hash: hash(code), parentGatewayId: parent.id, scopeId: parent.scopeId, rosterRevision: context.rosterRevision, bindingHash, expiresAtMs });
+      });
+      return { version: 1 as const, code, expiresAtMs };
+    },
+    redeemSecureBrowserCode(code: unknown, bindingHash: string) {
+      const at = reserveBrowserAttempt("redemptionAttempts");
+      if (typeof code !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(code) || !validHash(bindingHash)) throw new AccessError("denied");
+      const ticket = secureBrowser.tickets.find(value => value.hash === hash(code) && value.expiresAtMs > at && value.expiresAtMs <= at + 300_000);
+      const parent = ticket && gateways.grants.find(value => value.id === ticket.parentGatewayId && value.scopeId === ticket.scopeId && value.revokedAtMs === null);
+      if (!ticket || !parent || ticket.bindingHash !== bindingHash) throw new AccessError("denied");
+      const context = fleet(parent.scopeId);
+      if (context.rosterRevision !== ticket.rosterRevision) throw new AccessError("denied");
+      const token = randomBytes(32).toString("base64url"), deviceId = randomUUID();
+      mutateSecureBrowser(next => {
+        if (next.sessions.length >= 4096) throw new AccessError("paused");
+        next.tickets = next.tickets.filter(value => value.hash !== ticket.hash);
+        next.sessions.push({ id: deviceId, hash: hash(token), parentGatewayId: parent.id, scopeId: parent.scopeId, revokedAtMs: null });
+      });
+      return { token, deviceId };
+    },
     registerGateway(scopeId: string, token: unknown) {
       const context = fleet(scopeId);
       if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token)) throw new AccessError("invalid");
       const tokenHash = hash(token), existing = gateways.grants.find(value => value.scopeId === scopeId);
       if (existing && (existing.revokedAtMs !== null || existing.hash !== tokenHash)
         || ledger.devices.some(value => value.hash === tokenHash)
+        || secureBrowser.sessions.some(value => value.hash === tokenHash)
         || gateways.grants.some(value => value.hash === tokenHash && value.scopeId !== scopeId)) throw new AccessError("denied");
       const grant = existing ?? { id: randomUUID(), scopeId, hash: tokenHash, revokedAtMs: null };
       if (!existing) mutateGateways(next => {
@@ -134,14 +216,20 @@ export function createAccess(state: PrivateState, now = Date.now) {
       return { version: 1 as const, serverId: ledger.serverId, deviceId, token, role: selected.role, context };
     },
     devices(token: unknown) {
-      const access = requireAccess(token, "operator");
-      return ledger.devices.filter(value => value.scopeId === access.context.scopeId).map(value => ({
+      const access = requireDeviceAdministration(token);
+      return [...ledger.devices.filter(value => value.scopeId === access.context.scopeId).map(value => ({
         deviceId: value.id, name: value.name, role: value.role, revokedAtMs: value.revokedAtMs,
         rosterRevision: value.rosterRevision,
-      }));
+      })), ...secureBrowser.sessions.filter(value => value.scopeId === access.context.scopeId).map(value => ({
+        deviceId: value.id, name: "Secure browser", role: "operator" as const,
+        revokedAtMs: value.revokedAtMs ?? gateways.grants.find(parent => parent.id === value.parentGatewayId)?.revokedAtMs ?? null,
+        rosterRevision: access.context.rosterRevision,
+      }))];
     },
     revoke(token: unknown, deviceId: unknown): void {
-      const access = requireAccess(token, "operator");
+      const access = requireDeviceAdministration(token);
+      const browser = secureBrowser.sessions.find(value => value.id === deviceId && value.scopeId === access.context.scopeId);
+      if (browser) { mutateSecureBrowser(next => { next.sessions.find(value => value.id === deviceId)!.revokedAtMs ??= now(); }); return; }
       mutate(next => {
         const device = next.devices.find(value => value.id === deviceId && value.scopeId === access.context.scopeId);
         if (!device) throw new AccessError("denied");

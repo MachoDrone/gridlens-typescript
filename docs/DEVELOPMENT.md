@@ -109,6 +109,99 @@ Tests use isolated input files and injected providers; browser tests use port
 4174 and reject nonlocal requests. Other test servers use isolated loopback ports.
 Keep real rosters, exports, snapshots, credentials and local evidence outside Git.
 
+The optional [guided secure browser setup](SECURE_BROWSER_SETUP.md) supersedes the
+earlier withdrawal of private-IP certificate instructions. It is explicitly opened
+from Secure in the sidebar, setup or the installer; HTTP users are not automatically redirected. A
+terminal-owned public certificate record supplies the actual saved endpoints,
+certificate identity and validity. Public certificate reads grant no access.
+The explicit HTTP-to-HTTPS handoff inherits the current gateway's operational
+grant, remains revocable with it, and creates no financial ownership. Normal
+browser setup therefore needs no follow-up terminal command. Its first HTTP
+download assumes a trusted private network and is not
+independent authentication of that certificate. OS trust approval remains manual,
+with short platform/browser-specific steps and honest connection checks.
+
+The [web-app metadata](HOSTING_HANDOFF.md#local-web-app-installation) remains
+separate. Install stays hidden until the browser offers its native prompt.
+Existing paired HTTPS, TLS identities and native pins are preserved. Managed
+domain/public deployment is not implemented, and the no-login private operator
+gateway must not be publicly port-forwarded. Cloudflare Workers and the earlier
+Workers app remain unsupported.
+
+## Publishing reviewed updates
+
+`main` remains the default branch. Keep it and `review/fleet-duration-freshness`
+at the same approved commit after every publication so the repository homepage,
+ordinary clones and existing review links all show the same version. This is a
+completion workflow followed during development, not unattended synchronization.
+
+1. During implementation, use focused checks appropriate to the changes, with
+   isolated fixtures. A full application test run is not required after every
+   intermediate edit. Before presenting a completed code, dependency, build-tooling
+   or test update as ready for user review or publication, finish the intended
+   changes and documentation and run the complete `npm run check` suite on the
+   final candidate with the pinned toolchain. Also run any explicitly required
+   acceptance checks for the affected subsystem. Final verification must cover the
+   affected user workflow from its entry point through the intended result;
+   existing automated coverage can satisfy this when it exercises that workflow.
+   Report required physical-device verification separately and keep automated
+   results distinct from the user's own review/testing.
+
+   If verification fails, make corrections and use focused checks while iterating;
+   obtain a clean full-suite result after the corrections are complete. Further
+   changes to code, dependencies, build tooling, tests or executable inputs require
+   another full run once those changes are complete. Reuse passing results through
+   review and publication when the tested content and relevant conditions remain
+   unchanged. Documentation-only changes require wording/link review and
+   `git diff --check`; they do not require application tests unless executable
+   behavior or test inputs also change.
+2. Review the proposed paths and contents before staging only the intended files.
+   Review `git diff --cached` and run `git diff --cached --check`. Exclude private
+   rosters, identities, credentials, runtime data, evidence and generated output.
+   Tests must describe the exact content to be published. If unrelated local work
+   would make that uncertain, validate the candidate in an isolated checkout;
+   preserve the unrelated work rather than including or discarding it.
+3. Confirm `origin` points to `MachoDrone/gridlens-typescript`, fetch its current
+   branch tips and check that both publication targets can advance without
+   rewriting history. Resolve any divergence before presenting the candidate.
+   Once the user indicates their review/testing is complete, give a brief change
+   summary and check results, then ask:
+   **"Publish this tested update to both GitHub branches?"** Wait for approval.
+   An explicit request to publish this exact reviewed candidate already supplies
+   approval; do not ask twice. Otherwise, tests passing or a request to implement
+   a feature is not permission to publish. If review is pending, report readiness;
+   if publication is declined or deferred, leave the candidate local.
+4. On approval, confirm the content still matches the reviewed and tested
+   candidate, then commit only that content. If anything changed, repeat affected
+   checks and obtain approval for the revised update. Push the resulting commit
+   with explicit destinations in one atomic operation:
+
+   ```sh
+   publication_commit=$(git rev-parse HEAD)
+   git push --atomic origin \
+     "$publication_commit:refs/heads/main" \
+     "$publication_commit:refs/heads/review/fleet-duration-freshness"
+   ```
+
+   Do not use force options or retry as separate branch pushes. If either target
+   rejects the update, or atomic push is unsupported, neither target should be
+   advanced by this operation. Investigate the failure; preserve any concurrent
+   remote work and repeat checks/approval if reconciliation changes the candidate.
+5. Read GitHub's actual branch tips after the push:
+
+   ```sh
+   git ls-remote origin refs/heads/main refs/heads/review/fleet-duration-freshness
+   ```
+
+   Both hashes must equal `publication_commit`. Report the published commit link,
+   both branch names and the check results only after verification. If the push
+   or verification is inconclusive, inspect the remote state before retrying and
+   report publication as unconfirmed rather than complete.
+
+Apply the same approval gate to the first synchronization of the older `main`.
+Failed checks or missing approval leave GitHub unchanged. This workflow adds no
+automatic push hook, scheduled uploader, deployment or runtime/API changes.
+
 ## External roster input
 
 The live preview accepts two independent startup files:

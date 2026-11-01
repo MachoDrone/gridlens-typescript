@@ -1,5 +1,6 @@
 // Setup sends bounded, transient credentials to the owner without browser storage,
 // a host shell, or a Docker bridge.
+import { parseBrowserSecurityStatus } from "../contracts/browser-security.js";
 interface SetupComputer { id: string; host: string; port: number; name: string; fingerprint: string }
 interface ManagedComputer { id: string; name: string; host: string; port: number; hostCount: number; username: string | null;
   hasSavedCredential: boolean; status: "approved" | "paused" | "revoked" | "not-approved" }
@@ -14,6 +15,10 @@ const el = <T extends HTMLElement>(id: string): T => document.getElementById(id)
 const privateNetwork = document.querySelector<HTMLMetaElement>('meta[name="gridlens-private-network"]')?.content === "1";
 const terminalSetup = document.querySelector<HTMLMetaElement>('meta[name="gridlens-setup-mode"]')?.content === "terminal";
 const browserSetup = document.querySelector<HTMLMetaElement>('meta[name="gridlens-setup-mode"]')?.content === "browser";
+// A supplied terminal link keeps its own explicit success/error path even after
+// its fragment is cleared. Ordinary HTTPS entry can resume the guided flow.
+const suppliedSignInFragment = location.hash.length > 0;
+const guidedHttpsEntry = !privateNetwork && !suppliedSignInFragment && location.protocol === "https:" && ["/connect", "/setup"].includes(location.pathname);
 let current: SetupView | undefined;
 let selected = new Set<string>();
 let filtering = "";
@@ -21,6 +26,7 @@ let lastSignature = "";
 let signingIn = false;
 let refreshing = false;
 let connected = false;
+let canManageDevices = false;
 let signInRevision = 0;
 let actionPending = false;
 let actionRevision = 0;
@@ -448,11 +454,13 @@ function render(view: SetupView): void {
   }
 }
 async function devices(): Promise<void> {
+  if (!canManageDevices) return;
   const result = await api<{ devices: { deviceId: string; name: string; role: string; revokedAtMs: number | null }[] }>("devices");
+  if (!canManageDevices) return;
   el("devices").hidden = false; const list = el("device-list"); list.replaceChildren();
   for (const device of result.devices) {
     const row = text("p", `${device.name} · ${device.role} · ${device.revokedAtMs ? "Revoked" : "Authorized"} `);
-    if (!device.revokedAtMs) row.append(button("Revoke", () => { void api("revoke", { deviceId: device.deviceId }).then(devices).catch(() => message("Revocation could not be confirmed.", "failure")); })); list.append(row);
+    if (!device.revokedAtMs) row.append(button("Revoke", () => { if (canManageDevices) void api("revoke", { deviceId: device.deviceId }).then(devices).catch(() => message("Revocation could not be confirmed.", "failure")); })); list.append(row);
   }
 }
 async function monitoring(): Promise<void> {
@@ -490,32 +498,68 @@ async function signIn(code: string): Promise<void> {
 el("login-form").addEventListener("submit", event => {
   event.preventDefault(); void signIn(el<HTMLInputElement>("code").value.trim());
 });
-el("new-code").addEventListener("click", () => { void api<{ code: string; expiresAtMs: number }>("pair-code", {})
+el("new-code").addEventListener("click", () => { if (!canManageDevices) return; void api<{ code: string; expiresAtMs: number }>("pair-code", {})
   .then(value => {
+    if (!canManageDevices) return;
     if (typeof value.code !== "string" || !/^[A-Za-z0-9_-]{12}$/.test(value.code) || !Number.isSafeInteger(value.expiresAtMs) || value.expiresAtMs <= Date.now()) throw new Error("Invalid connection link.");
     const link = document.createElement("a"); link.href = `${location.origin}/connect#code=${value.code}`;
     link.textContent = "Open GridLens on the other device";
     el("pair-code").replaceChildren(link, text("span", ` · Keep this link private. It works once and expires at ${new Date(value.expiresAtMs).toLocaleTimeString()}.`));
   })
   .catch(() => message("Connection code could not be created.", "failure")); });
+async function continueSecureBrowserSetup(revision: number, action: number): Promise<boolean> {
+  if (!guidedHttpsEntry || revision !== 0 || signingIn) return false;
+  const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 10_000);
+  const leaving = () => controller.abort(); window.addEventListener("pagehide", leaving, { once: true });
+  try {
+    const response = await fetch("/secure-setup/status.json", { credentials: "same-origin", cache: "no-store", redirect: "error", signal: controller.signal });
+    if (response.status !== 200 || response.headers.get("content-type")?.split(";", 1)[0]?.trim() !== "application/json") {
+      await response.body?.cancel(); return false;
+    }
+    const reader = response.body?.getReader(); if (!reader) return false;
+    let bytes = 0, body = ""; const decoder = new TextDecoder("utf-8", { fatal: true });
+    try {
+      for (;;) { const part = await reader.read(); if (part.done) break;
+        bytes += part.value.byteLength; if (bytes > 32_768) throw new Error("Invalid secure browser metadata."); body += decoder.decode(part.value, { stream: true }); }
+      body += decoder.decode();
+    } finally { await reader.cancel().catch(() => {}); }
+    const status = parseBrowserSecurityStatus(JSON.parse(body));
+    if (controller.signal.aborted || revision !== signInRevision || action !== actionRevision || signingIn
+      || !status.available || status.status !== "ready" || status.httpsOrigin !== location.origin || status.httpOrigin === null) return false;
+    // The TLS gateway already compares this publication to its actually served
+    // certificate. Navigation alone grants no cookie or additional authority.
+    location.replace("/secure-setup"); return true;
+  } catch { return false; }
+  finally { clearTimeout(timeout); window.removeEventListener("pagehide", leaving); }
+}
 async function refresh(): Promise<void> {
   if (signingIn || refreshing || actionPending) return;
   refreshing = true;
   const revision = signInRevision, action = actionRevision;
+  let statusAuthorized = false;
   try {
-    const status = await api<{ role: string; serverId: string }>("status");
+    const status = await api<{ role: string; serverId: string; canManageDevices?: boolean }>("status");
     if (revision !== signInRevision || action !== actionRevision) return;
+    statusAuthorized = true;
+    canManageDevices = !privateNetwork && status.role === "operator" && (status.canManageDevices === undefined || status.canManageDevices === true);
+    el<HTMLButtonElement>("new-code").disabled = !canManageDevices;
+    if (!canManageDevices) { el("devices").hidden = true; el("device-list").replaceChildren(); el("pair-code").replaceChildren(); }
     connected = true; el("login").hidden = true;
     if (status.role === "operator") {
       const view = await api<SetupView>("setup");
       if (revision !== signInRevision || action !== actionRevision) return;
-      render(view); if (!privateNetwork && el("devices").hidden) await devices(); if (!browserSetup && el("monitoring").hidden) await monitoring();
+      render(view); if (canManageDevices && el("devices").hidden) await devices(); if (!browserSetup && el("monitoring").hidden) await monitoring();
     }
     else { for (const id of ["setup", "network-search", "pc-manager", "pc-signin", "pc-report"]) el(id).hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
   } catch (error) {
     if (revision !== signInRevision || action !== actionRevision) return;
+    if (!statusAuthorized && error instanceof RequestError && [401, 403].includes(error.status)
+      && await continueSecureBrowserSetup(revision, action)) return;
+    if (revision !== signInRevision || action !== actionRevision) return;
+    canManageDevices = false; el<HTMLButtonElement>("new-code").disabled = true;
     if (error instanceof RequestError && [401, 403].includes(error.status)) connected = false;
-    el("login").hidden = privateNetwork;
+    el("login").hidden = privateNetwork || guidedHttpsEntry && revision === 0
+      && !(error instanceof RequestError && [401, 403].includes(error.status));
     for (const id of ["setup", "network-search", "devices", "monitoring", "pc-manager", "pc-signin", "pc-report"]) el(id).hidden = true;
     clearComputerPassword();
     lastSignature = "";
@@ -533,7 +577,10 @@ function start(): void {
     message("Connected through your private network.", "success"); void refresh(); return;
   }
   const fragment = location.hash;
-  if (!fragment) { void refresh(); return; }
+  if (!fragment) {
+    if (guidedHttpsEntry) { el("login").hidden = true; message("Checking access…", "pending"); }
+    void refresh(); return;
+  }
   const code = /^#code=([A-Za-z0-9_-]{12})$/.exec(fragment)?.[1];
   try { history.replaceState(null, "", location.pathname + location.search); }
   catch { message("The sign-in link could not be cleared safely. Open the dashboard address and enter a new connection code.", "failure"); return; }

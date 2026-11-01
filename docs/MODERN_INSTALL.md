@@ -45,6 +45,43 @@ The HTTPS endpoint and native Android pairing remain separate. A protected
 server-side grant gives the web gateway access to its fleet's current roster.
 Reruns cannot revive a revoked gateway grant.
 
+### Optional web-app installation
+
+Standard manifest/icons are retained for an operator who already uses correctly
+configured trusted HTTPS, including an operator-managed domain. **Install GridLens**
+is shown only when the browser actually offers installation. Ordinary LAN/VPN
+HTTP users are not automatically redirected. They can explicitly choose
+**Secure** in the sidebar (or **Secure this device** in Manage computers) for the
+[guided local HTTPS setup](SECURE_BROWSER_SETUP.md). It downloads the existing
+public certificate to that device and guides system approval and connection
+checks. First enrollment over HTTP assumes a trusted private network; this is
+not independent authentication of the downloaded certificate. Existing paired
+HTTPS/native clients, saved certificates and access rules are preserved.
+
+Normal private-network installations connect the HTTPS browser through an
+explicit one-use handoff in the guide; no additional CLI command is required.
+The resulting session inherits the existing private-network operational access
+and is revoked with that grant. It creates no financial-owner authority.
+
+For recovery or HTTPS-only installations, use `--secure-browser` with the
+installed-compatible terminal coordinator to
+refresh the public guide metadata and print the actual setup address and the
+independent public-certificate fingerprint, followed by a one-use HTTPS operator
+sign-in link/code. Its five-minute expiry starts when the terminal issues it;
+rerun this action after system trust is complete if needed. It does not regenerate
+identities, install device trust or restart workloads. Only the trusted terminal
+issues this independent operator code. Public certificate reads alone never
+grant browser access; the normal handoff requires the existing gateway grant.
+Older runtimes without the advertised browser-security capability are reported
+as unsupported and retain their existing installation.
+
+The managed installer remains private-IP based. DNS/port-forwarding alone does not
+make HTTPS trusted, and this installer does not provision a domain, proxy or public
+listener. Never publicly port-forward the no-login private HTTP operator gateway.
+A public deployment requires appropriate authentication and validated origin/TLS
+configuration. See [deployment boundaries](HOSTING_HANDOFF.md#local-web-app-installation).
+Cloudflare Workers and the earlier Workers app remain abandoned and unsupported.
+
 ### Manage computers in the browser
 
 Open **Hosts** in the left menu. Saved PCs show their host counts and

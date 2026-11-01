@@ -1,6 +1,7 @@
 import { ensureVpnWeb, readVpnWebEndpoint } from "./vpn-web.ts";
 import type { VpnWebEndpoint } from "./vpn-web.ts";
 import type { DockerRunner } from "./docker.ts";
+import { Coordinator } from "./coordinator.ts";
 import type { InstallResult } from "./coordinator.ts";
 import type { ModernRelease } from "./release.ts";
 import { ensureUpdater, stopUpdater } from "../updater/deployment.ts";
@@ -17,5 +18,6 @@ export function reconcileInstalledServices(runner: DockerRunner, result: Install
     ? ensureVpnWeb(runner, result.config, selected, webPort ?? saved?.port, { upgrade: true }) : saved;
   if (result.config.updater) ensureUpdater(runner, result.config, { replace: true });
   else stopUpdater(runner, result.config.instance);
+  new Coordinator(runner).publishBrowserSecurity(result.config);
   return web;
 }

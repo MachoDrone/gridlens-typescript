@@ -19,6 +19,8 @@ import { emptyStaking } from "./fixtures/staking.ts";
 import { blankStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../src/fleet/staking.ts";
 
 const fixtureFiles = [
+  "contracts/browser-security.js", "preview/secure-setup.js", "preview/secure-guides.js",
+  "manifest.webmanifest", "icons/gridlens-192.png", "icons/gridlens-512.png", "icons/gridlens-maskable-512.png", "preview/webapp.js",
   "contracts/fleet.js", "contracts/shared.js", "contracts/updates.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "preview/shared-telemetry.js", "preview/updates.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",
   "preview/evidence-clock.js", "preview/refresh-deadline.js", "preview/sidebar.js", "preview/viewport.js", "preview/table-scroll.js", "preview/connection.js",
   "index.html", "styles.css", "preview/main.js", "preview/fixtures.js", "fleet/freshness.js", "fleet/sort.js", "fleet/ip-display.js", "fleet/duration.js", "fleet/market-display.js", "fleet/hardware-display.js", "fleet/host-metadata.js",
@@ -129,9 +131,9 @@ test("preview serves exactly the fixture assets on loopback with fixed types and
     const result = await read(server, `/${filename}`);
     assert.equal(result.status, 200);
     assert.equal(result.body, `fixture: ${filename}\n`);
-    const expected = filename.endsWith(".html") ? "text/html" :
-      filename.endsWith(".css") ? "text/css" : "text/javascript";
-    assert.equal(result.headers["content-type"], `${expected}; charset=utf-8`);
+    const expected = filename.endsWith(".png") ? "image/png" : filename.endsWith(".webmanifest") ? "application/manifest+json; charset=utf-8"
+      : `${filename.endsWith(".html") ? "text/html" : filename.endsWith(".css") ? "text/css" : "text/javascript"}; charset=utf-8`;
+    assert.equal(result.headers["content-type"], expected);
     assert.equal(result.headers["cache-control"], "no-store");
     assert.equal(result.headers["x-content-type-options"], "nosniff");
     assert.equal(Number(result.headers["content-length"]), Buffer.byteLength(result.body));

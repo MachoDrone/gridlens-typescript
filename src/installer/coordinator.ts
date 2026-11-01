@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { checked, ensureVolume, inspectOwned, labels, mount, resourceName, restrictions, PRODUCT_LABEL, PRODUCT } from "./docker.ts";
 import type { DockerRunner } from "./docker.ts";
 import { originFor, validateInstallation } from "./config.ts";
@@ -6,8 +6,14 @@ import type { InstallationConfig, InstalledImage } from "./config.ts";
 import { InstallerError } from "./release.ts";
 import type { ModernRelease } from "./release.ts";
 import { stopUpdater } from "../updater/deployment.ts";
+import { readVpnWebEndpoint } from "./vpn-web.ts";
 
 export const UPDATER_PROTOCOL_LABEL = "io.gridlens.updater-protocol";
+export const BROWSER_SECURITY_PROTOCOL_LABEL = "io.gridlens.browser-security-protocol";
+export interface BrowserSecurityPublication {
+  version: 1; instance: string; httpsOrigin: string; httpOrigin: string | null;
+  certificatePem: string; serverCertificatePem: string; serverCertificateSha256: string;
+}
 const updaterConfiguration = (config: InstallationConfig, enabled: boolean): InstallationConfig => {
   const { updater: _updater, ...rest } = config;
   return enabled ? { ...rest, updater: { protocol: 1 } } : rest;
@@ -39,6 +45,59 @@ export class Coordinator {
     const protocol = image.Config.Labels[UPDATER_PROTOCOL_LABEL];
     if (protocol !== undefined && protocol !== "1") throw new InstallerError("The selected image requires an unsupported updater protocol.");
     return protocol === "1";
+  }
+  supportsBrowserSecurity(selected: Pick<InstalledImage, "imageId" | "version">): boolean {
+    let images: { Id?: string; Config?: { Labels?: Record<string, string> } }[];
+    const raw = checked(this.runner, ["image", "inspect", selected.imageId]);
+    try { images = JSON.parse(raw); }
+    catch { throw new InstallerError("The selected browser security capability could not be verified."); }
+    const image = Array.isArray(images) ? images[0] : undefined;
+    if (!Array.isArray(images) || images.length !== 1 || image?.Id !== selected.imageId || image.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT
+      || image.Config.Labels["io.gridlens.version"] !== selected.version) throw new InstallerError("The browser security image does not match its saved release.");
+    const protocol = image.Config.Labels[BROWSER_SECURITY_PROTOCOL_LABEL];
+    if (protocol !== undefined && protocol !== "1") throw new InstallerError("The selected image requires an unsupported browser security protocol.");
+    return protocol === "1";
+  }
+  /** Publish public trust metadata only after the saved services are running.
+   * Older images remain usable without receiving an unsupported helper/control. */
+  publishBrowserSecurity(config: InstallationConfig): BrowserSecurityPublication | undefined {
+    validateInstallation(config);
+    if (!this.supportsBrowserSecurity(config.active)) return undefined;
+    if (config.phase !== "ready" || config.pendingPort !== undefined) throw new InstallerError("Finish installation recovery before publishing secure browser setup.");
+    this.validateManagedRuntime(config);
+    if (this.endpointStatus(config).repairRequired) throw new InstallerError("The saved HTTPS gateway is unavailable; secure browser setup was not changed.");
+    const owner = inspectOwned(this.runner, "container", resourceName(config.instance, "owner"), config.instance);
+    if ((owner?.State as { Running?: boolean } | undefined)?.Running !== true) throw new InstallerError("The saved collection owner must be running before secure browser setup is published.");
+    const web = readVpnWebEndpoint(this.runner, config);
+    if (web && web.imageId !== config.active.imageId) throw new InstallerError("The browser gateway has not reached the saved release; finish update recovery before secure browser setup.");
+    // Config belongs to UID 0; TLS belongs to UID 1000 with directory mode 0700.
+    // Read/search is sufficient across those fixed read-only volumes. Preserve
+    // the command runner's sanitized failure rather than relabeling it as bad PEM.
+    const raw = checked(this.runner, ["run", "--rm", "-i", ...labels(config.instance), ...restrictions,
+      "--network", "none", "--user", "0:0", "--cap-add", "DAC_READ_SEARCH", ...mount(resourceName(config.instance, "config"), "/config", true),
+      ...mount(resourceName(config.instance, "tls"), "/tls", true), config.active.imageId,
+      "node", "src/installer/container-init.ts", "public-browser-certificates"], "{}");
+    let certificates: { certificatePem: string; serverCertificatePem: string };
+    try {
+      if (Buffer.byteLength(raw) > 68 * 1024) throw new Error();
+      certificates = JSON.parse(raw);
+      if (!certificates || typeof certificates.certificatePem !== "string" || typeof certificates.serverCertificatePem !== "string"
+        || Object.keys(certificates).some(key => !["certificatePem", "serverCertificatePem"].includes(key))) throw new Error();
+      for (const pem of [certificates.certificatePem, certificates.serverCertificatePem]) {
+        const blocks = [...pem.matchAll(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/g)];
+        if (Buffer.byteLength(pem) > 32 * 1024 || !blocks.length || pem.replace(/-----BEGIN CERTIFICATE-----[A-Za-z0-9+/=\r\n]+-----END CERTIFICATE-----/g, "").trim()) throw new Error();
+        blocks.forEach(block => new X509Certificate(block[0]));
+      }
+      const leaf = new X509Certificate(certificates.serverCertificatePem);
+      if (!leaf.checkIP(config.bindAddress) || createHash("sha256").update(leaf.raw).digest("hex") !== config.certificateSha256
+        || [...certificates.serverCertificatePem.matchAll(/-----BEGIN CERTIFICATE-----/g)].length !== 1) throw new Error();
+    } catch { throw new InstallerError("The saved public TLS identity could not be verified; secure browser setup was not changed."); }
+    const publication: BrowserSecurityPublication = { version: 1, instance: config.instance, httpsOrigin: config.origin,
+      httpOrigin: web?.origin ?? null, ...certificates, serverCertificateSha256: config.certificateSha256 };
+    const result = JSON.parse(checked(this.runner, ["exec", "-i", resourceName(config.instance, "owner"), "node", "scripts/shared-control.ts", "json"],
+      JSON.stringify({ operation: "browser-security-publish", ...publication }))) as { published?: boolean };
+    if (result?.published !== true) throw new InstallerError("Secure browser setup publication was not acknowledged.");
+    return publication;
   }
   private helper(instance: string, imageId: string, operation: string, body: unknown = {}, extra: string[] = []): string {
     return checked(this.runner, ["run", "--rm", "-i", ...labels(instance), ...restrictions,
