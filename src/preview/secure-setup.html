@@ -20,9 +20,12 @@
 <p>Instructions for <strong id="device-summary"></strong>.</p>
 <details id="device-choice"><summary>Change</summary><div class="field"><label for="device">Device</label><select id="device"></select></div><div class="field"><label for="browser">Browser</label><select id="browser"></select></div></details>
 <p id="provided-help" class="muted" hidden>There is no GridLens certificate to import here. Continue to check the secure connection.</p>
+<p id="download-approval-notice">Your browser may ask you to <strong>Keep</strong> the GridLens certificate you requested. If the popup closes, open the browser menu → <strong>Downloads</strong>.</p>
 <div class="actions"><button id="device-continue" class="primary" type="button">Download certificate</button><button id="already-trusted" type="button">Already imported? Open GridLens</button></div></section>
 <section id="download-panel" class="panel" hidden aria-labelledby="download-title"><p class="step">3 · Save the certificate</p><h2 id="download-title" tabindex="-1">Save the certificate</h2>
 <p>Save <strong id="download-name"></strong> in Downloads. You will select this file when your device asks what to import.</p>
+<p>If asked, choose <strong>Keep</strong> for this requested GridLens certificate. If the popup is gone, open the browser menu → <strong>Downloads</strong>.</p>
+<p>Wait for the completed <strong>.crt</strong> file before choosing <strong>File saved — Next</strong>. An <code>Unconfirmed*.crdownload</code> file is temporary and cannot be imported. Do not rename it.</p>
 <details><summary>About this certificate</summary><p class="guide-note">This is a public certificate, not a private key. Trusting its CA lets this device accept certificates issued by this GridLens installation. Approve it only if you trust that computer.</p><p class="guide-note">The browser controls downloads. GridLens cannot tell whether you saved or imported the file.</p></details>
 <div class="actions"><button id="download-next" class="primary" type="button">File saved — Next</button><button id="download-again" type="button">Download again</button><button id="download-back" type="button">Back</button></div></section>
 <section id="guide-panel" class="panel" hidden aria-labelledby="guide-title"><p id="guide-step" class="step"></p><h2 id="guide-title" tabindex="-1"></h2><p id="guide-instruction"></p>

@@ -26,7 +26,11 @@ installed-backend capability.
    suggestion is wrong. The four device choices are Windows, macOS, Linux and
    Android. Samsung is covered under Android's optional help.
 2. Download the existing **public CA certificate** directly to the viewing device.
-   A recognizable filename avoids moving the file from another computer. A
+   If the browser asks, choose **Keep** for this requested GridLens certificate.
+   If its popup has closed, open the browser menu → **Downloads**. Wait for the
+   completed `.crt` file named by the guide before **File saved — Next**;
+   `Unconfirmed*.crdownload` is temporary and cannot be imported. Do not rename
+   temporary files. A recognizable filename avoids moving the file from another computer. A
    provided certificate is not automatically described as publicly trusted; a
    browser that already trusts its issuer can try the HTTPS check without import.
 3. Follow one short OS/browser-specific instruction at a time. Android requires
@@ -195,6 +199,17 @@ Browser mocks and emulation do not establish OS certificate installation. Record
 real platform/browser versions and physical Android walkthroughs separately.
 Windows/macOS and physical phone trust verification are not established by the
 Linux development environment. Do not advertise every device/browser as verified.
+
+November 1 operator-reported physical Brave/Chrome download observation: the
+browser required **Keep** approval for the requested certificate. Repeated
+download attempts left `Unconfirmed*.crdownload` files that were not available
+as completed certificates in the import picker. The guide previously omitted
+this approval step; it now explains where to find the pending download and to
+wait for the completed `.crt` before proceeding. This evidence establishes a
+download-approval blocker, not a completed certificate import or trusted HTTPS
+walkthrough. GridLens cannot detect browser approval, file saving or OS import.
+The download format, filename generation and browser protections are unchanged;
+the pre-download notice is hidden when no CA download is offered.
 
 November 1 candidate verification, based on the current public release source
 and preserving its Docker image-identity/lock corrections:

@@ -120,6 +120,7 @@ function renderSelectors(): void {
   text("device-summary", `${DEVICE_NAMES[device]} · ${BROWSER_NAMES[browser]}`);
   const provided = status?.trustMode === "provided-certificate";
   element("provided-help").hidden = !provided; element("already-trusted").hidden = provided;
+  element("download-approval-notice").hidden = provided;
   text("device-continue", provided ? "Open GridLens" : "Download certificate");
 }
 function filename(): string { return status ? `gridlens-${status.instance}-${status.certificateSha256.slice(0, 8)}-ca.crt` : "gridlens-ca.crt"; }
