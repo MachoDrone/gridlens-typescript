@@ -22,7 +22,7 @@ import { CHANNEL_FORMAT } from "../src/updater/release.ts";
 import { ensureUpdater, DOCKER_SOCKET } from "../src/updater/deployment.ts";
 
 export interface UpdaterAcceptanceOptions {
-  instance: string; address: string; httpsPort: number; webPort: number; baseImage: string; report?: string;
+  instance: string; address: string; httpsPort: number; webPort: number; baseImage: string; previousImage?: string; report?: string;
 }
 export function updaterAcceptanceOptions(args: readonly string[]): UpdaterAcceptanceOptions {
   const options: UpdaterAcceptanceOptions = { instance: `fixture-${randomBytes(6).toString("hex")}`, address: "", httpsPort: 0, webPort: 0, baseImage: "" };
@@ -35,14 +35,30 @@ export function updaterAcceptanceOptions(args: readonly string[]): UpdaterAccept
     else if (name === "--https-port" && /^\d+$/.test(value)) options.httpsPort = Number(value);
     else if (name === "--web-port" && /^\d+$/.test(value)) options.webPort = Number(value);
     else if (name === "--base-image") options.baseImage = value;
+    else if (name === "--previous-image") options.previousImage = value;
     else if (name === "--report") options.report = resolve(value);
     else throw new Error("Unknown updater acceptance option.");
   }
   if (!/^fixture-[a-f0-9]{12}$/.test(options.instance) || !privateAddress(options.address) || options.address.startsWith("127.") || options.address === "::1"
     || ![options.httpsPort, options.webPort].every(port => Number.isInteger(port) && port >= 1024 && port <= 65535) || options.httpsPort === options.webPort
-    || !/^[a-zA-Z0-9][a-zA-Z0-9._/:@-]+$/.test(options.baseImage) || options.baseImage.startsWith("sha256:")) throw new Error("Use an explicit private test address, separate ports and a tagged prebuilt source image.");
+    || ![options.baseImage, ...(options.previousImage ? [options.previousImage] : [])].every(image => /^[a-zA-Z0-9][a-zA-Z0-9._/:@-]+$/.test(image) && !image.startsWith("sha256:")))
+    throw new Error("Use an explicit private test address, separate ports and tagged prebuilt source images.");
   if (options.report && (existsSync(options.report) || options.report.startsWith(resolve(".") + "/"))) throw new Error("Choose a new private report path outside the checkout.");
   return options;
+}
+/** Inspect once and derive by immutable ID, so changing a source tag cannot replace
+ * the old application's code during the transition under test. */
+export function updaterAcceptanceSource(runner: DockerRunner, image: string, previous = false): { imageId: string; version: string } {
+  const values: unknown = JSON.parse(checked(runner, ["image", "inspect", image]));
+  if (!Array.isArray(values) || values.length !== 1) throw new Error("The fixture source image could not be verified.");
+  const value = values[0] as { Id?: unknown; Config?: { Labels?: Record<string, unknown> } }, identity = value?.Config?.Labels;
+  if (typeof value?.Id !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.Id) || identity?.[PRODUCT_LABEL] !== PRODUCT
+    || typeof identity["io.gridlens.version"] !== "string" || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(identity["io.gridlens.version"])
+    || identity["io.gridlens.updater-protocol"] !== "1"
+    || (previous ? identity["io.gridlens.browser-security-protocol"] !== undefined : identity["io.gridlens.browser-security-protocol"] !== "1"))
+    throw new Error(previous ? "The previous fixture source must be an updater-capable GridLens image predating guided browser setup."
+      : "The target fixture source must advertise updater and guided browser setup support.");
+  return { imageId: value.Id, version: identity["io.gridlens.version"] };
 }
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -127,9 +143,11 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
   };
   try {
     evidence.dockerVersion = checked(runner, ["version", "--format", "{{.Server.Version}}"]);
-    const base = imageInfo(options.baseImage);
-    if (base.Config.Labels[PRODUCT_LABEL] !== PRODUCT) throw new Error("Base image is not the verified GridLens source image.");
-    evidence.baseImageId = base.Id;
+    const base = updaterAcceptanceSource(runner, options.baseImage);
+    const previous = options.previousImage ? updaterAcceptanceSource(runner, options.previousImage, true) : undefined;
+    evidence.baseImageId = base.imageId;
+    if (previous) evidence.previousSource = { reference: options.previousImage, ...previous,
+      codePreserved: "Only fixture build metadata, update public key and fetch transport are replaced; application and worker source stay from this older image." };
     for (const kind of ["container", "volume", "network"] as const) {
       const names = checked(runner, [...(kind === "container" ? ["container", "ls", "-a"] : [kind, "ls"]), "--filter", `label=${PRODUCT_LABEL}=${PRODUCT}`,
         "--filter", `label=${INSTANCE_LABEL}=${instance}`, "--format", kind === "container" ? "{{.Names}}" : "{{.Name}}"]);
@@ -149,7 +167,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       const files = { "build.json": JSON.stringify({ version, sequence, buildId: `${sequence}:${version}` }), "update-public-key.pem": publicKey, "fixture-fetch.mjs": fixtureFetch,
         ...(failingOwner ? { "scripts/shared-owner.ts": 'throw new Error("Generated isolated updater startup failure.");\n' } : {}) };
       const program = `const fs=require("node:fs");const files=JSON.parse(Buffer.from("${Buffer.from(JSON.stringify(files)).toString("base64")}","base64"));for(const [name,text] of Object.entries(files))fs.writeFileSync("/app/"+name,text);`;
-      checked(runner, ["build", "--pull=false", "--tag", tag, "-"], `FROM ${options.baseImage}\nUSER 0:0\nRUN node -e '${program}'\nLABEL io.gridlens.version="${version}" ${INSTANCE_LABEL}="${instance}"\nENV NODE_OPTIONS="--import=/app/fixture-fetch.mjs"\nUSER 1000:1000\n`);
+      const source = sequence === 1 && previous ? previous : base;
+      checked(runner, ["build", "--pull=false", "--tag", tag, "-"], `FROM ${source.imageId}\nUSER 0:0\nRUN node -e '${program}'\nLABEL io.gridlens.version="${version}" ${INSTANCE_LABEL}="${instance}"\nENV NODE_OPTIONS="--import=/app/fixture-fetch.mjs"\nUSER 1000:1000\n`);
       const imageId = imageInfo(tag).Id; imageTags.set(tag, imageId); return { tag, imageId, version };
     };
     progress("building the three isolated versioned fixture images");
@@ -160,9 +179,26 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const installed = coordinator.install({ instance, release: firstRelease, action: "setup", bindAddress: options.address, port: options.httpsPort, enableUpdater: true });
     const web = ensureVpnWeb(runner, installed.config, firstRelease, options.webPort, { upgrade: true });
     evidence.origins = { https: installed.config.origin, browser: web.origin };
-    const publication = coordinator.publishBrowserSecurity(installed.config);
-    assert.ok(publication, "The candidate must advertise guided browser setup");
-    const publicCertificateSha256 = hash(new X509Certificate(publication.certificatePem).raw);
+    const initialStatus = await call(web.origin, "/api/shared/status");
+    assert.deepEqual((initialStatus.context as { addresses: unknown[] }).addresses, []);
+    evidence.initialServerId = initialStatus.serverId;
+    const publicCertificateSha256 = hash(new X509Certificate(installed.certificate).raw);
+    const initialBrowserSecurity = { serverId: initialStatus.serverId, certificateSha256: publicCertificateSha256,
+      serverCertificateSha256: installed.config.certificateSha256, httpsOrigin: installed.config.origin, httpOrigin: web.origin };
+    if (previous) {
+      // Do not seed the new ledger record here: the old worker and replacement
+      // worker must perform the real migration, without a new coordinator repair.
+      for (const path of ["/secure-setup", "/secure-setup/status.json"]) {
+        const response = await fetch(new URL(path, web.origin), { signal: AbortSignal.timeout(8000) });
+        await response.body?.cancel(); assert.equal(response.status, 404, `The previous application unexpectedly serves ${path}`);
+      }
+      const response = await fetch(web.origin, { signal: AbortSignal.timeout(8000) });
+      assert.equal(response.status, 200); const html = await response.text();
+      assert.ok(html.length < 256 * 1024); assert.doesNotMatch(html, /id=["']sidebar-secure["']/);
+      evidence.browserSecurityInitial = { ...initialBrowserSecurity, available: false, guideStatus: 404, metadataStatus: 404, newMetadataBootstrap: false };
+    } else {
+      assert.ok(coordinator.publishBrowserSecurity(installed.config), "The candidate must advertise guided browser setup");
+    }
     const checkBrowserSecurity = async () => {
       const status = parseBrowserSecurityStatus(await call(web.origin, "/secure-setup/status.json"));
       assert.equal(status.available, true);
@@ -178,21 +214,28 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       return { serverId: status.serverId, certificateSha256: status.certificateSha256,
         serverCertificateSha256: status.serverCertificateSha256, httpsOrigin: status.httpsOrigin, httpOrigin: status.httpOrigin };
     };
-    const initialBrowserSecurity = await checkBrowserSecurity(); evidence.browserSecurityInitial = initialBrowserSecurity;
-    const handoff = await call(web.origin, "/secure-setup/connect-code", {});
-    assert.equal(handoff.version, 1); assert.match(String(handoff.code), /^[A-Za-z0-9_-]{43}$/);
-    const connected = await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } });
-    assert.equal(connected.status, 200); assert.equal(connected.value.connected, true);
-    assert.equal(connected.value.token, undefined); assert.ok(connected.cookie);
-    assert.match(connected.cookie, /Secure/); assert.match(connected.cookie, /HttpOnly/); assert.match(connected.cookie, /SameSite=Strict/);
-    const browserCookie = connected.cookie.split(";", 1)[0]!;
+    let browserCookie: string | undefined;
     const checkSecureBrowser = async () => {
+      assert.ok(browserCookie, "The fixture has not established its HTTPS browser session.");
       const result = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie });
       assert.equal(result.status, 200); assert.equal(result.value.serverId, initialBrowserSecurity.serverId); assert.equal(result.value.role, "operator");
     };
-    await checkSecureBrowser();
-    assert.notEqual((await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } })).status, 200);
-    evidence.secureBrowserHandoff = "Verified HTTPS browser connected once without a terminal code; no bearer in JSON";
+    const connectSecureBrowser = async () => {
+      const handoff = await call(web.origin, "/secure-setup/connect-code", {});
+      assert.equal(handoff.version, 1); assert.match(String(handoff.code), /^[A-Za-z0-9_-]{43}$/);
+      const connected = await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } });
+      assert.equal(connected.status, 200); assert.equal(connected.value.connected, true);
+      assert.equal(connected.value.token, undefined); assert.ok(connected.cookie);
+      assert.match(connected.cookie, /Secure/); assert.match(connected.cookie, /HttpOnly/); assert.match(connected.cookie, /SameSite=Strict/);
+      browserCookie = connected.cookie.split(";", 1)[0]!;
+      await checkSecureBrowser();
+      assert.notEqual((await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } })).status, 200);
+      evidence.secureBrowserHandoff = "Verified HTTPS browser connected once without a terminal code; no bearer in JSON";
+    };
+    if (!previous) {
+      assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity); evidence.browserSecurityInitial = initialBrowserSecurity;
+      await connectSecureBrowser();
+    }
     const createRelease = (target: typeof first, sequence: number): FixtureRelease => {
       const artifact = `gridlens-runtime-fixture-${sequence}.tar`;
       const recorded = JSON.parse(helper(first.imageId, `import{mkdirSync,statSync,createReadStream}from"node:fs";import{createHash}from"node:crypto";import{spawnSync}from"node:child_process";
@@ -233,9 +276,6 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const readStatus = async () => parseUpdateStatus(await call(web.origin, "/api/shared/updates"));
     const available = await until(readStatus, value => value.candidate?.sequence === 2);
     const initial = snapshot(); evidence.initial = initial;
-    const initialStatus = await call(web.origin, "/api/shared/status");
-    assert.deepEqual((initialStatus.context as { addresses: unknown[] }).addresses, []);
-    evidence.initialServerId = initialStatus.serverId;
     browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const pageErrors: string[] = []; page.on("pageerror", error => pageErrors.push(error.message));
@@ -261,6 +301,10 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     assert.notEqual(upgraded.config.active.stateVolume, initial.config.active.stateVolume);
     assert.equal(upgraded.config.certificateSha256, initial.config.certificateSha256);
     assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity);
+    if (previous) {
+      await connectSecureBrowser();
+      evidence.browserSecurityMigration = "Older application initially returned 404; the real old-worker update and replacement worker published metadata without driver bootstrap. Original public CA, leaf and endpoints retained.";
+    }
     await checkSecureBrowser();
     evidence.browserSecurityAfterUpgrade = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
@@ -293,6 +337,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     await page.close();
     checked(runner, ["exec", "-i", resourceName(instance, "owner"), "node", "scripts/shared-control.ts", "json"],
       JSON.stringify({ operation: "revoke-vpn-web", scopeId: "default" }));
+    assert.ok(browserCookie);
     assert.equal((await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie })).status, 401);
     evidence.secureBrowserParentRevocation = "Derived browser access revoked with its private-network gateway grant";
     evidence.passed = true; progress("real worker upgrade, self-replacement, browser return and rollback passed");

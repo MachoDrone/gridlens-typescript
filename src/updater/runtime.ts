@@ -168,13 +168,15 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
     }
   };
   const verify = async (candidate: UpdateBuild, transaction: Transaction, signal?: AbortSignal): Promise<void> => {
+    if (!unlock) throw new UpdateError("Runtime verification requires the installation maintenance lock.");
     const deadline = now() + 300_000;
     for (let attempt = 0; attempt < 300; attempt++) {
       signal?.throwIfAborted();
       try {
         const current = config(), owner = readiness();
         const expectedImage = sameBuild(candidate, transaction.candidate) ? transaction.targetImageId : transaction.previous.active.imageId;
-        if (current.active.imageId !== expectedImage || !sameBuild(buildOf(current), candidate) || !sameBuild(owner.build, candidate) || owner.serverId !== transaction.serverId)
+        if (current.active.imageId !== expectedImage || !sameBuild(buildOf(current), candidate) || !sameBuild(owner.build, candidate) || owner.serverId !== transaction.serverId
+          || current.origin !== transaction.previous.origin || current.certificateSha256 !== transaction.previous.certificateSha256)
           throw new UpdateError("The updated runtime identity has not been verified.");
         coordinator.validateManagedRuntime(current);
         if (coordinator.endpointStatus(current).repairRequired) throw new UpdateError("The saved dashboard endpoint is not ready.");
@@ -193,6 +195,12 @@ export function createUpdateRuntime(options: UpdateRuntimeOptions): UpdateRuntim
           if (!web || web.origin !== transaction.previousWeb.origin || web.imageId !== current.active.imageId) throw new UpdateError("The browser gateway has not reached the expected release.");
           await probe(web.origin, ca, candidate, bounded);
         }
+        bounded.throwIfAborted();
+        // A pre-feature worker can apply this image without publishing its public
+        // setup record. Its replacement resumes verification, not apply. Refresh
+        // the record before completion, after the actual saved services verify.
+        // The coordinator skips older images without this capability.
+        coordinator.publishBrowserSecurity(current);
         return;
       } catch (error) { if (signal?.aborted) throw signal.reason; if (now() >= deadline || attempt === 299) throw error; await wait(1000, signal); }
     }

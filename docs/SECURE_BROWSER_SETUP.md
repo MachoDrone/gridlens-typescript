@@ -103,7 +103,7 @@ are checked separately; removing a self-reported checkbox is not a claim that th
 application can inspect the operating system's trust store.
 
 For Linux Chrome/Chromium the first instruction is **Manage certificates**:
-“Open Chrome Settings and search for ‘Manage certificates’. Open that result.”
+“Open this browser’s Settings and search for ‘Manage certificates’. Open that result.”
 The current manager then uses **Local certificates → Installed by you → Trusted
 certificates → Import**. Older Authorities-tab wording is confined to optional
 help. The normal steps do not contain package-installation or implementation notes.

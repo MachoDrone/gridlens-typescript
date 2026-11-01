@@ -54,9 +54,7 @@ export function secureGuide(device: SecureDevice, browser: SecureBrowser, filena
     { title: "Approve website trust", instruction: "Select Trust this CA to identify websites, then confirm the import only if you trust this GridLens computer." },
   ];
   return [
-    { title: "Manage certificates", instruction: browser === "edge"
-      ? "Open Microsoft Edge Settings and search for “Manage certificates”. Open that result."
-      : "Open Chrome Settings and search for “Manage certificates”. Open that result." },
+    { title: "Manage certificates", instruction: "Open this browser’s Settings and search for “Manage certificates”. Open that result." },
     { title: "Installed by you", instruction: "In Certificate Manager, select Local certificates, then Installed by you under Custom.", help: "If your browser has an older certificate manager, open the Authorities tab instead." },
     { title: "Import your certificate", instruction: `Under Trusted certificates, click Import. Select ${file} from Downloads, then confirm the import only if you trust this GridLens computer.`,
       help: "In an older Authorities view, choose Import and allow this CA to identify websites. Do not choose Your certificates or a personal/client certificate import." },

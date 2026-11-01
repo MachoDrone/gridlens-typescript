@@ -143,7 +143,7 @@ test("detected Linux Chrome uses the exact certificate-manager actions and opens
   await expect(page.getByRole("combobox", { name: "Browser", exact: true })).toBeHidden();
   await download(page);
   await expect(page.getByRole("heading", { name: "Manage certificates", exact: true })).toBeVisible();
-  await expect(page.locator("#guide-instruction")).toHaveText("Open Chrome Settings and search for “Manage certificates”. Open that result.");
+  await expect(page.locator("#guide-instruction")).toHaveText("Open this browser’s Settings and search for “Manage certificates”. Open that result.");
   await page.getByRole("button", { name: "Next", exact: true }).click();
   await expect(page.locator("#guide-instruction")).toHaveText("In Certificate Manager, select Local certificates, then Installed by you under Custom.");
   await page.getByRole("button", { name: "Next", exact: true }).click();
