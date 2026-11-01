@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes, X509Certificate } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { request as httpRequest } from "node:http";
@@ -35,6 +35,22 @@ function fixture() {
 }
 const stop = (server: Server) => new Promise<void>(done => { server.closeAllConnections(); server.close(() => done()); });
 const denied = (status: number) => (error: unknown) => error instanceof SharedHttpError && error.status === status;
+const applePath = (fingerprint: string) => `/secure-setup/apple-ca/${fingerprint}.mobileconfig`;
+function profileCertificate(xml: string): Buffer {
+  return execFileSync("python3", ["-c", "import sys,plistlib; p=plistlib.loads(sys.stdin.buffer.read()); assert len(p['PayloadContent'])==1; c=p['PayloadContent'][0]; assert c['PayloadType']=='com.apple.security.root'; sys.stdout.buffer.write(c['PayloadContent'])"],
+    { input: xml, maxBuffer: 64 * 1024 });
+}
+function intermediatePublication(f: ReturnType<typeof fixture>): BrowserSecurityPublication {
+  const run = (args: string[]) => execFileSync("openssl", args, { cwd: f.directory, stdio: "ignore" });
+  run(["req", "-new", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "intermediate.key", "-out", "intermediate.csr",
+    "-subj", "/CN=Generated intermediate CA"]);
+  writeFileSync(join(f.directory, "intermediate.ext"), "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\n");
+  run(["x509", "-req", "-in", "intermediate.csr", "-CA", "ca.crt", "-CAkey", "ca.key", "-set_serial", "3", "-out", "intermediate.crt", "-days", "1", "-extfile", "intermediate.ext"]);
+  run(["x509", "-req", "-in", "server.csr", "-CA", "intermediate.crt", "-CAkey", "intermediate.key", "-set_serial", "4", "-out", "intermediate-server.crt", "-days", "1", "-copy_extensions", "copy"]);
+  const intermediate = readFileSync(join(f.directory, "intermediate.crt"), "utf8"), leaf = readFileSync(join(f.directory, "intermediate-server.crt"), "utf8");
+  return { ...f.publication, certificatePem: intermediate + f.ca, serverCertificatePem: leaf,
+    serverCertificateSha256: createHash("sha256").update(new X509Certificate(leaf).raw).digest("hex") };
+}
 
 test("public browser security publication binds strict public PEM, CA signatures, SAN, fingerprint and saved endpoints", () => {
   const f = fixture(), unrelated = fixture();
@@ -105,7 +121,8 @@ test("provided certificates have no CA-import download and public metadata rejec
 });
 
 test("gateway exposes only fixed public setup resources, enforces origin/method/path, and creates no session", async t => {
-  const f = fixture(), replacement = fixture(), state = openSharedState(join(f.directory, "state")), service = createSharedService(state);
+  const f = fixture(), replacement = fixture(), state = openSharedState(join(f.directory, "state"));
+  let at = Date.now(); const service = createSharedService(state, { now: () => at });
   let cleanupOwner: Server | undefined, cleanupServer: Server | undefined;
   t.after(async () => { if (cleanupServer) await stop(cleanupServer); if (cleanupOwner) await stop(cleanupOwner); await service.setup.close(); await state.close(); f.close(); replacement.close(); });
   await service.control({ operation: "browser-security-publish", ...f.publication });
@@ -129,10 +146,30 @@ test("gateway exposes only fixed public setup resources, enforces origin/method/
     assert.equal((await call("/secure-setup/ca.crt")).headers["content-disposition"], `attachment; filename="gridlens-fixture-${caHash.slice(0, 8)}-ca.crt"`);
     const matching = await call("/secure-setup/ca.crt", "GET", { "If-Match": `"${caHash}"` });
     assert.equal(matching.code, 200); assert.equal(matching.headers.etag, `"${caHash}"`); assert.equal(matching.text, f.ca);
+    const profile = await call(applePath(caHash));
+    assert.equal(profile.code, 200); assert.equal(profile.headers["content-type"], "application/x-apple-aspen-config");
+    assert.equal(profile.headers.etag, `"${caHash}"`); assert.equal(profile.headers["cache-control"], "no-store");
+    assert.equal(profile.headers["x-content-type-options"], "nosniff"); assert.equal(profile.headers["referrer-policy"], "no-referrer");
+    assert.equal(profile.headers["set-cookie"], undefined);
+    assert.equal(profile.headers["content-disposition"], `attachment; filename="gridlens-fixture-${caHash.slice(0, 8)}-ca.mobileconfig"`);
+    assert.deepEqual(profileCertificate(profile.text), new X509Certificate(f.ca).raw);
+    const profileHead = await call(applePath(caHash), "HEAD"); assert.equal(profileHead.code, 200); assert.equal(profileHead.text, "");
+    assert.equal(profileHead.headers["content-length"], String(Buffer.byteLength(profile.text)));
+    assert.equal((await call(applePath(caHash), "GET", { "If-Match": `"${caHash}"` })).text, profile.text);
     for (const value of ["*", caHash, `W/"${caHash}"`, `"${caHash}", "${caHash}"`, '"invalid"', `"${"0".repeat(64)}"`]) {
       const rejected = await call("/secure-setup/ca.crt", "GET", { "If-Match": value });
       assert.equal(rejected.code, 412); assert.equal(rejected.text.includes("BEGIN CERTIFICATE"), false);
+      const appleRejected = await call(applePath(caHash), "GET", { "If-Match": value });
+      assert.equal(appleRejected.code, 412); assert.doesNotMatch(appleRejected.text, /<plist|<data>|BEGIN CERTIFICATE/);
+      assert.match(appleRejected.text, /href="\/secure-setup">Back to Secure/);
     }
+    assert.equal((await call(applePath(caHash), "POST")).code, 405);
+    assert.equal((await call(applePath(caHash) + "?path=/config/ca.key")).code, 400);
+    for (const invalid of [applePath(caHash.toUpperCase()), applePath("a".repeat(63)), applePath(caHash) + "/", "/secure-setup/apple-ca/server.crt"])
+      assert.equal((await call(invalid)).code, 404);
+    const traversal = await call("/secure-setup/apple-ca/../ca.crt"); assert.equal(traversal.code, 400); assert.doesNotMatch(traversal.text, /<plist|BEGIN CERTIFICATE/);
+    assert.equal((await call(applePath(caHash), "GET", { Host: "forged.invalid" })).code, 403);
+    assert.equal((await call(applePath(caHash), "GET", { Origin: "http://forged.invalid" })).code, 403);
     assert.equal((await call("/secure-setup/status.json", "POST")).code, 405);
     assert.equal((await call("/secure-setup/ca.crt?path=/config/ca.key")).code, 400);
     assert.equal((await call("/secure-setup/anything")).code, 404);
@@ -145,9 +182,24 @@ test("gateway exposes only fixed public setup resources, enforces origin/method/
     await service.control({ operation: "browser-security-publish", ...replacement.publication });
     const raced = await call("/secure-setup/ca.crt", "GET", { "If-Match": `"${caHash}"` });
     assert.equal(raced.code, 412); assert.equal(raced.text.includes("BEGIN CERTIFICATE"), false);
+    const oldApple = await call(applePath(caHash)); assert.equal(oldApple.code, 412); assert.doesNotMatch(oldApple.text, /<plist|<data>|BEGIN CERTIFICATE/);
+    assert.equal(oldApple.headers["content-type"], "text/html; charset=utf-8"); assert.equal(oldApple.headers["content-disposition"], undefined);
+    assert.match(oldApple.text, /href="\/secure-setup">Back to Secure/);
     const replacementHash = createHash("sha256").update(new X509Certificate(replacement.ca).raw).digest("hex");
     const current = await call("/secure-setup/ca.crt", "GET", { "If-Match": `"${replacementHash}"` });
     assert.equal(current.code, 200); assert.equal(current.headers.etag, `"${replacementHash}"`); assert.equal(current.text, replacement.ca);
+    assert.deepEqual(profileCertificate((await call(applePath(replacementHash))).text), new X509Certificate(replacement.ca).raw);
+    at = Date.parse(new X509Certificate(replacement.leaf).validTo);
+    const expiredApple = await call(applePath(replacementHash)); assert.equal(expiredApple.code, 409); assert.doesNotMatch(expiredApple.text, /<plist|<data>|BEGIN CERTIFICATE/);
+    at = Date.now();
+    const intermediate = intermediatePublication(f); await service.control({ operation: "browser-security-publish", ...intermediate });
+    const intermediateHash = createHash("sha256").update(new X509Certificate(intermediate.certificatePem).raw).digest("hex");
+    const unsupportedApple = await call(applePath(intermediateHash)); assert.equal(unsupportedApple.code, 409);
+    assert.match(unsupportedApple.text, /not a self-signed root/); assert.doesNotMatch(unsupportedApple.text, /<plist|<data>|BEGIN CERTIFICATE/);
+    assert.equal((await call("/secure-setup/ca.crt")).text, intermediate.certificatePem, "CRT chain export remains available");
+    await service.control({ operation: "browser-security-publish", ...f.publication, certificatePem: f.leaf + f.ca });
+    const providedApple = await call(applePath(f.publication.serverCertificateSha256)); assert.equal(providedApple.code, 409);
+    assert.doesNotMatch(providedApple.text, /<plist|<data>|BEGIN CERTIFICATE/);
     await service.control({ operation: "browser-security-publish", ...f.publication, httpOrigin: "http://127.0.0.1:19777" });
     assert.equal((await call("/secure-setup/status.json")).code, 503, "stale published endpoints fail closed");
   } finally { await closeFleetServer(server, integration); cleanupServer = undefined; await stop(owner); cleanupOwner = undefined; }
@@ -162,15 +214,21 @@ test("real TLS gateway compares published leaf to the certificate it actually se
   const gateway = await startSharedGateway({ socketPath: socket, directory: resolve("dist"), host: "127.0.0.1", port: 0,
     publicOrigin: f.publication.httpsOrigin, certPath: join(f.directory, "server.crt"), keyPath: join(f.directory, "server.key") });
   cleanupServer = gateway.server;
-  const call = () => new Promise<number>((done, reject) => {
-    const request = httpsRequest({ hostname: "127.0.0.1", port: (gateway.server.address() as { port: number }).port, path: "/secure-setup/status.json", ca: f.ca,
-      headers: { Host: new URL(f.publication.httpsOrigin).host } }, response => { response.resume(); response.on("end", () => done(response.statusCode!)); });
+  const call = (path = "/secure-setup/status.json") => new Promise<{ code: number; text: string; headers: IncomingHttpHeaders }>((done, reject) => {
+    const request = httpsRequest({ hostname: "127.0.0.1", port: (gateway.server.address() as { port: number }).port, path, ca: f.ca,
+      headers: { Host: new URL(f.publication.httpsOrigin).host } }, response => {
+      let text = ""; response.on("data", chunk => { text += chunk; }); response.on("end", () => done({ code: response.statusCode!, text, headers: response.headers }));
+    });
     request.on("error", reject); request.end();
   });
   try {
-    assert.equal(await call(), 200);
+    assert.equal((await call()).code, 200);
+    const fingerprint = createHash("sha256").update(new X509Certificate(f.ca).raw).digest("hex");
+    const profile = await call(applePath(fingerprint)); assert.equal(profile.code, 200);
+    assert.equal(profile.headers["set-cookie"], undefined); assert.deepEqual(profileCertificate(profile.text), new X509Certificate(f.ca).raw);
     await service.control({ operation: "browser-security-publish", ...other.publication });
-    assert.equal(await call(), 503, "a valid but different published leaf must not describe the served TLS identity");
+    assert.equal((await call()).code, 503, "a valid but different published leaf must not describe the served TLS identity");
+    const changed = await call(applePath(fingerprint)); assert.equal(changed.code, 503); assert.doesNotMatch(changed.text, /<plist|<data>|BEGIN CERTIFICATE/);
   } finally { await closeFleetServer(gateway.server, gateway.integration); cleanupServer = undefined; await stop(owner); cleanupOwner = undefined; }
 });
 

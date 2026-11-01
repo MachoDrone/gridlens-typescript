@@ -6,6 +6,7 @@ import { generateKeyPairSync } from "node:crypto";
 async function connectPage(page: Page): Promise<void> {
   await page.route("**/connect", async route => route.fulfill({ contentType: "text/html", body: await readFile(resolve("dist/shared-setup.html"), "utf8") }));
   await page.route("**/shared-setup.js", async route => route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist/preview/shared-setup.js"), "utf8") }));
+  await page.route("http://127.0.0.1:4174/", route => route.fulfill({ contentType: "text/html", body: "<h1>Authorized Fleet</h1>" }));
 }
 
 for (const width of [1280, 390]) test(`terminal setup is read-only in the browser through every phase at ${width}px`, async ({ page }) => {
@@ -195,13 +196,12 @@ test("one-use sign-in link connects on mobile and clears its secret before the r
     await route.fulfill({ json: { role: "viewer", serverId: "synthetic-server" } });
   });
   await page.goto(`/connect#code=${code}`);
-  await expect(page.getByRole("status")).toHaveText("Shared cache connected. Open Fleet to view authorized readings.");
-  await expect(page.locator("#login")).toBeHidden();
-  await expect(page).toHaveURL(/\/connect$/);
+  await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+  await expect(page).toHaveURL("http://127.0.0.1:4174/");
   expect(requests.every(request => !request.url.includes(code) && !request.referer.includes(code))).toBe(true);
   expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, state: history.state }))).not.toContain(code);
   await page.reload();
-  await expect(page.locator("#login")).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
   expect(logins).toBe(1);
 });
 
@@ -231,7 +231,8 @@ test("rejected link stays explained without retries and manual code entry still 
   await page.getByLabel("Device name").fill("My browser");
   await page.getByRole("button", { name: "Connect", exact: true }).focus();
   await page.keyboard.press("Enter");
-  await expect(page.locator("#login")).toBeHidden();
+  await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+  await expect(page).toHaveURL("http://127.0.0.1:4174/");
   expect(logins).toBe(2); expect(statuses).toBe(1);
 });
 
@@ -348,10 +349,23 @@ for (const width of [1280, 390, 320]) test(`browser PC manager adds, updates and
   });
   await page.goto("/setup");
   await expect(page.locator("#pc-manager-summary")).toContainText("1 computer in the fleet");
+  const viewFleet = page.getByRole("link", { name: "View Fleet", exact: true });
+  await expect(viewFleet).toBeVisible(); await expect(viewFleet).toHaveClass("primary-link"); await expect(viewFleet).toHaveAttribute("href", "/");
+  const fleetBounds = (await viewFleet.boundingBox())!;
+  expect(fleetBounds.y).toBeGreaterThanOrEqual(0); expect(fleetBounds.y + fleetBounds.height).toBeLessThanOrEqual(900);
+  expect(fleetBounds.x).toBeGreaterThanOrEqual(0); expect(fleetBounds.x + fleetBounds.width).toBeLessThanOrEqual(width);
+  await expect(page.locator("#existing-fleet-note")).toHaveText("Your fleet is already configured. View Fleet, or manage computers below.");
+  await expect(page.locator("#manager-step")).toBeHidden(); await expect(page.locator("#pc-selection-help")).toBeHidden();
+  await expect(page.locator("#pc-list input:checked")).toHaveCount(0); expect(configurations).toHaveLength(0); expect(removals).toHaveLength(0);
+  await page.route("http://127.0.0.1:4174/", route => route.fulfill({ contentType: "text/html", body: "<h1>Authorized Fleet</h1>" }));
+  await viewFleet.click(); await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+  expect(configurations).toHaveLength(0); expect(removals).toHaveLength(0);
+  await page.goto("/setup"); await expect(page.locator("#pc-manager")).toBeVisible();
   await expect(page.locator("#network-search")).toBeHidden();
   await expect(page.locator("#setup")).toBeHidden();
   await expect(page.locator("main")).not.toContainText("Run the latest GridLens installer");
   await page.getByRole("button", { name: "Find PCs on network", exact: true }).click();
+  await expect(page.locator("#manager-step")).toBeVisible(); await expect(page.locator("#existing-fleet-note")).toBeHidden();
   await page.getByLabel("Network or IP address", { exact: true }).fill("192.168.42.0/30");
   await page.getByRole("button", { name: "Search network", exact: true }).click();
   computers = [a, b]; phase = "select"; scan = { ...scan!, completed: 4, found: 2, status: "complete" }; revision++;
@@ -361,6 +375,7 @@ for (const width of [1280, 390, 320]) test(`browser PC manager adds, updates and
   await expect(addSelected).toBeDisabled();
   expect(await addSelected.evaluate(node => !!(document.querySelector("#pc-list")!.compareDocumentPosition(node) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true);
   await page.locator(`[data-pc-id="${b.id}"]`).getByRole("checkbox").check();
+  await expect(page.locator("#pc-selection-help")).toBeVisible();
   await expect(page.locator("#pc-signin")).toBeHidden();
   expect(configurations).toHaveLength(0);
   await addSelected.focus(); await page.keyboard.press("Enter");
@@ -430,7 +445,11 @@ test("browser manager clears rejected passwords and presents actionable failed-c
     await route.fulfill({ json: { revision, phase: "select", computers: [computer], managed: [], selected: [], trusted: [], automaticIp: false,
       fullMonitoring: false, exclusions: [], savedHosts: 0, inspectedPcs: 0, monitoringStatus: "Not configured", ...(report ? { report } : {}) } });
   });
-  await page.goto("/setup"); await page.locator(`[data-pc-id="${computer.id}"]`).getByRole("checkbox").check();
+  await page.goto("/setup");
+  await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeHidden();
+  await expect(page.locator("#manager-step")).toBeVisible(); await expect(page.locator("#pc-selection-help")).toBeVisible();
+  await expect(page.locator("#existing-fleet-note")).toBeHidden();
+  await page.locator(`[data-pc-id="${computer.id}"]`).getByRole("checkbox").check();
   await page.getByRole("button", { name: "Add Selected PCs", exact: true }).click();
   await page.getByLabel("Computer username", { exact: true }).fill("fixture");
   await page.getByLabel("Computer password", { exact: true }).fill("generated-bad-password");

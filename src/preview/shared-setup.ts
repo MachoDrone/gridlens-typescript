@@ -1,6 +1,7 @@
 // Setup sends bounded, transient credentials to the owner without browser storage,
 // a host shell, or a Docker bridge.
 import { parseBrowserSecurityStatus } from "../contracts/browser-security.js";
+import { isMetadataAddress } from "../fleet/host-metadata.js";
 interface SetupComputer { id: string; host: string; port: number; name: string; fingerprint: string }
 interface ManagedComputer { id: string; name: string; host: string; port: number; hostCount: number; username: string | null;
   hasSavedCredential: boolean; status: "approved" | "paused" | "revoked" | "not-approved" }
@@ -26,6 +27,10 @@ let lastSignature = "";
 let signingIn = false;
 let refreshing = false;
 let connected = false;
+let leavingForFleet = false;
+let entryDestinationChecked = false;
+// Undefined supports older status replies. Null means an explicitly invalid context.
+let currentRosterCount: number | null | undefined;
 let canManageDevices = false;
 let signInRevision = 0;
 let actionPending = false;
@@ -50,6 +55,15 @@ class RequestError extends Error {
   }
 }
 class CredentialFileError extends Error {}
+/** Match the application's scope/revision/roster validation without importing its full data model. */
+function rosterCount(value: unknown): number | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const context = value as { scopeId?: unknown; rosterRevision?: unknown; addresses?: unknown };
+  if (![context.scopeId, context.rosterRevision].every(part => typeof part === "string" && part.length > 0
+    && part.length <= 256 && !/[\u0000-\u001f\u007f]/.test(part)) || !Array.isArray(context.addresses)
+    || !context.addresses.every(isMetadataAddress) || new Set(context.addresses).size !== context.addresses.length) return null;
+  return context.addresses.length;
+}
 async function api<T>(path: string, body?: unknown): Promise<T> {
   const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 15_000);
   try {
@@ -70,7 +84,7 @@ function button(label: string, action: () => void, primary = false): HTMLButtonE
 async function act(action: string, fields: Record<string, unknown> = {}): Promise<void> {
   if (terminalSetup) return;
   if (actionPending || !current) return;
-  actionPending = true; actionRevision++; renderSearch(current);
+  actionPending = true; actionRevision++; renderSearch(current); if (browserSetup) renderManagerControls(current);
   try {
     const next = await api<SetupView>("setup-action", { action, revision: current.revision, ...fields }); render(next);
     message(action === "scan" ? "Network search started on the backend computer." : action === "cancel-scan" ? "Network search cancelled." : "Setup choice saved.", action === "scan" ? "pending" : "success");
@@ -179,6 +193,14 @@ function clearComputerPassword(): void {
 }
 function renderManagerControls(view: SetupView): void {
   const rows = selectedRows(view), busy = actionPending || configuring(view) || view.phase === "scanning";
+  const count = currentRosterCount === undefined ? Number.isSafeInteger(view.savedHosts) && view.savedHosts >= 0 ? view.savedHosts : null : currentRosterCount;
+  const hasFleet = count !== null && count > 0;
+  const idleManagement = hasFleet && rows.length === 0 && !busy && !searchExpanded && !signInExpanded;
+  el("fleet-entry").hidden = !hasFleet;
+  el("existing-fleet-note").hidden = !idleManagement;
+  for (const id of ["search-step", "manager-step", "signin-step", "report-step", "pc-selection-help"]) el(id).hidden = idleManagement;
+  const managed = (view.managed ?? []).filter(row => row.status !== "revoked");
+  el("pc-manager-summary").textContent = `${managed.length} ${managed.length === 1 ? "computer" : "computers"} in the fleet · ${count === null ? "Current host count unavailable" : `${count} hosts saved`}.${idleManagement ? "" : " Select computers to add or update their sign-in."}`;
   el<HTMLButtonElement>("configure-computers").disabled = busy || rows.length === 0;
   for (const input of el("pc-manager").querySelectorAll<HTMLInputElement>("input[type=checkbox]")) input.disabled = busy;
   for (const button of el("pc-manager").querySelectorAll<HTMLButtonElement>("button")) button.disabled = busy;
@@ -291,9 +313,7 @@ function renderManager(view: SetupView): void {
   current = view; el("login").hidden = true; el("setup").hidden = true; el("monitoring").hidden = true; el("pc-manager").hidden = false;
   const rows = computerRows(view), ids = new Set(rows.map(row => row.id));
   for (const id of selected) if (!ids.has(id)) { selected.delete(id); restoreSelected.delete(id); }
-  const managed = (view.managed ?? []).filter(row => row.status !== "revoked");
   el("show-removed-label").hidden = !(view.managed ?? []).some(row => row.status === "revoked");
-  el("pc-manager-summary").textContent = `${managed.length} ${managed.length === 1 ? "computer" : "computers"} in the fleet · ${view.savedHosts} hosts saved. Select computers to add or update their sign-in.`;
   renderSearch(view);
   const signature = JSON.stringify({ rows, selected: [...selected] });
   if (managerSignature !== signature) { managerSignature = signature; paintComputerList(view); renderSelectionDetails(view); }
@@ -309,7 +329,7 @@ async function removeComputer(pcId: string): Promise<void> {
   finally { actionPending = false; if (current) { renderSearch(current); renderManagerControls(current); } }
 }
 el("show-network-search").addEventListener("click", () => {
-  if (!current) return; searchExpanded = true; renderSearch(current); el("network-search").scrollIntoView({ block: "start", behavior: "smooth" }); el<HTMLInputElement>("network-range").focus();
+  if (!current) return; searchExpanded = true; renderSearch(current); renderManagerControls(current); el("network-search").scrollIntoView({ block: "start", behavior: "smooth" }); el<HTMLInputElement>("network-range").focus();
 });
 el("add-computers").addEventListener("click", () => {
   if (!current || !selected.size || actionPending || configuring(current)) return;
@@ -480,6 +500,7 @@ async function monitoring(): Promise<void> {
 async function signIn(code: string): Promise<void> {
   if (privateNetwork) return;
   if (signingIn) return;
+  entryDestinationChecked = false;
   signingIn = true; connected = false; signInRevision++;
   const submit = el<HTMLFormElement>("login-form").querySelector<HTMLButtonElement>("button[type=submit]")!;
   submit.disabled = true; el<HTMLInputElement>("code").value = "";
@@ -533,14 +554,24 @@ async function continueSecureBrowserSetup(revision: number, action: number): Pro
   finally { clearTimeout(timeout); window.removeEventListener("pagehide", leaving); }
 }
 async function refresh(): Promise<void> {
-  if (signingIn || refreshing || actionPending) return;
+  if (signingIn || refreshing || actionPending || leavingForFleet) return;
   refreshing = true;
   const revision = signInRevision, action = actionRevision;
   let statusAuthorized = false;
   try {
-    const status = await api<{ role: string; serverId: string; canManageDevices?: boolean }>("status");
+    const status = await api<{ role: string; serverId: string; context?: unknown; canManageDevices?: boolean }>("status");
     if (revision !== signInRevision || action !== actionRevision) return;
     statusAuthorized = true;
+    currentRosterCount = status.context === undefined ? undefined : rosterCount(status.context);
+    if (location.pathname === "/connect" && !entryDestinationChecked) {
+      // Decide once for this authorized entry. A first-time setup may populate
+      // the roster later; ordinary refreshes must leave its results on screen.
+      entryDestinationChecked = true;
+      if (status.role === "viewer" || status.role === "operator"
+        && currentRosterCount !== undefined && currentRosterCount !== null && currentRosterCount > 0) {
+        leavingForFleet = true; location.replace("/"); return;
+      }
+    }
     canManageDevices = !privateNetwork && status.role === "operator" && (status.canManageDevices === undefined || status.canManageDevices === true);
     el<HTMLButtonElement>("new-code").disabled = !canManageDevices;
     if (!canManageDevices) { el("devices").hidden = true; el("device-list").replaceChildren(); el("pair-code").replaceChildren(); }
@@ -550,7 +581,7 @@ async function refresh(): Promise<void> {
       if (revision !== signInRevision || action !== actionRevision) return;
       render(view); if (canManageDevices && el("devices").hidden) await devices(); if (!browserSetup && el("monitoring").hidden) await monitoring();
     }
-    else { for (const id of ["setup", "network-search", "pc-manager", "pc-signin", "pc-report"]) el(id).hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
+    else { for (const id of ["setup", "network-search", "pc-manager", "pc-signin", "pc-report"]) el(id).hidden = true; el("fleet-entry").hidden = status.role !== "viewer"; el("existing-fleet-note").hidden = true; message("Shared cache connected. Open Fleet to view authorized readings.", "success"); }
   } catch (error) {
     if (revision !== signInRevision || action !== actionRevision) return;
     if (!statusAuthorized && error instanceof RequestError && [401, 403].includes(error.status)
@@ -560,7 +591,7 @@ async function refresh(): Promise<void> {
     if (error instanceof RequestError && [401, 403].includes(error.status)) connected = false;
     el("login").hidden = privateNetwork || guidedHttpsEntry && revision === 0
       && !(error instanceof RequestError && [401, 403].includes(error.status));
-    for (const id of ["setup", "network-search", "devices", "monitoring", "pc-manager", "pc-signin", "pc-report"]) el(id).hidden = true;
+    for (const id of ["fleet-entry", "setup", "network-search", "devices", "monitoring", "pc-manager", "pc-signin", "pc-report"]) el(id).hidden = true;
     clearComputerPassword();
     lastSignature = "";
     message(error instanceof RequestError && [401, 403].includes(error.status)

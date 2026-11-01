@@ -12,7 +12,7 @@ const STATUS_PATH = "/secure-setup/status.json";
 const stages: Stage[] = ["trust", "device", "download", "guide", "resume", "pair", "ready", "repair"];
 const element = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const deviceSelect = element<HTMLSelectElement>("device"), browserSelect = element<HTMLSelectElement>("browser");
-const suggested = suggestSecureDevice(navigator.userAgent);
+const suggested = suggestSecureDevice(navigator.userAgent, navigator.platform, navigator.maxTouchPoints);
 let device = suggested.device, browser = suggested.browser;
 let status: AvailableStatus | undefined, expected: ExpectedIdentity | undefined;
 let stage: Stage = "trust", guideIndex = 0, busy = false, request: AbortController | undefined;
@@ -93,6 +93,7 @@ function controls(): void {
   for (const button of document.querySelectorAll<HTMLButtonElement>("button")) button.disabled = busy;
   deviceSelect.disabled = busy; browserSelect.disabled = busy;
   element<HTMLButtonElement>("trust-continue").disabled = busy || !element<HTMLInputElement>("trust-network").checked;
+  renderProfileLinks();
 }
 function show(next: Stage, focus = true): void {
   stage = next;
@@ -113,6 +114,18 @@ function options(select: HTMLSelectElement, values: readonly string[], names: Re
   select.replaceChildren(...values.map(value => { const option = document.createElement("option"); option.value = value; option.textContent = names[value]!; return option; }));
   select.value = selected;
 }
+function usesSafariInstructions(): boolean {
+  return browser === "safari" && (suggested.device !== "ios" || suggested.browser === "safari");
+}
+function safariSetupURL(): string { return status ? `${status.httpOrigin ?? status.httpsOrigin}/secure-setup` : ""; }
+function downloadAdvice(): string {
+  if (device === "android") return browser === "firefox"
+    ? "If Firefox asks, confirm or save only the GridLens certificate you requested. Find the completed file in Downloads."
+    : "If prompted for this requested GridLens certificate, your browser may offer Download anyway or another download confirmation. Find the completed file in the browser’s Downloads.";
+  if (browser === "safari") return "If Safari asks permission, allow the download only for the GridLens certificate you requested. Then find the file in Downloads.";
+  if (browser === "firefox") return "If Firefox asks, confirm or save only the GridLens certificate you requested. Find the completed file in Firefox Downloads.";
+  return "Your browser may ask you to Keep the GridLens certificate you requested. If the popup closes, open the browser menu → Downloads.";
+}
 function renderSelectors(): void {
   options(deviceSelect, SECURE_DEVICES, DEVICE_NAMES, device);
   if (!browsersFor(device).includes(browser)) browser = browsersFor(device)[0]!;
@@ -120,10 +133,68 @@ function renderSelectors(): void {
   text("device-summary", `${DEVICE_NAMES[device]} · ${BROWSER_NAMES[browser]}`);
   const provided = status?.trustMode === "provided-certificate";
   element("provided-help").hidden = !provided; element("already-trusted").hidden = provided;
-  element("download-approval-notice").hidden = provided;
+  const apple = device === "ios" && !provided;
+  const safari = usesSafariInstructions();
+  element("download-approval-notice").hidden = provided || apple;
+  element("apple-profile-notice").hidden = !apple;
+  element("apple-safari-help").hidden = !apple || safari;
+  element("device-continue").hidden = apple;
+  element("apple-profile-download").hidden = !apple || !safari;
+  element<HTMLInputElement>("apple-setup-url").value = safariSetupURL();
+  text("apple-copy-status", "");
   text("device-continue", provided ? "Open GridLens" : "Download certificate");
+  renderDownloads(); renderProfileLinks();
 }
-function filename(): string { return status ? `gridlens-${status.instance}-${status.certificateSha256.slice(0, 8)}-ca.crt` : "gridlens-ca.crt"; }
+function filename(): string {
+  const extension = device === "ios" ? "mobileconfig" : "crt";
+  return status ? `gridlens-${status.instance}-${status.certificateSha256.slice(0, 8)}-ca.${extension}` : `gridlens-ca.${extension}`;
+}
+function cleanupInstruction(): string {
+  return device === "ios"
+    ? "You may delete the downloaded GridLens .mobileconfig files, including duplicates. Keep the installed GridLens profile and its certificate trust in Settings; removing that profile removes the certificate. You can download the file again from Secure."
+    : "You may delete the downloaded GridLens .crt files, including duplicates. You can download the file again from Secure. Keep the installed certificate in your device or browser settings.";
+}
+function renderDownloads(): void {
+  const apple = device === "ios", privateCA = status?.trustMode === "private-ca";
+  element("download-file-instruction").hidden = apple;
+  element("ordinary-download-help").hidden = apple;
+  element("apple-download-help").hidden = !apple;
+  element("download-again").hidden = apple;
+  element("apple-profile-again").hidden = !apple;
+  text("download-title", apple ? "Download the certificate profile" : "Save the certificate");
+  text("download-next", apple ? "Profile downloaded — Next" : "File saved — Next");
+  text("download-name", filename()); text("apple-profile-name", `${filename()}${status ? ` · Profile: GridLens ${status.instance} CA (${status.certificateSha256.slice(0, 8)})` : ""}`);
+  text("download-approval-notice", downloadAdvice()); text("ordinary-download-approval", downloadAdvice());
+  element("chromium-download-incomplete").hidden = apple || device === "android" || !["chrome", "edge"].includes(browser);
+  element("ready-download").hidden = !privateCA || apple;
+  element("ready-apple-download").hidden = !privateCA || !apple || !usesSafariInstructions();
+  element("ready-apple-safari-help").hidden = !privateCA || !apple || usesSafariInstructions();
+  element<HTMLInputElement>("ready-apple-setup-url").value = safariSetupURL();
+  element("ready-certificate-help").hidden = !privateCA;
+  text("ready-certificate-help", cleanupInstruction());
+}
+function profileURL(): string | undefined {
+  if (!status || !expected || device !== "ios" || status.trustMode !== "private-ca" || status.status !== "ready"
+    || !matches(expected, identityOf(status)) || location.origin !== (HTTPS ? status.httpsOrigin : status.httpOrigin)) return;
+  return new URL(`/secure-setup/apple-ca/${expected.certificateSha256}.mobileconfig`, location.origin).href;
+}
+function renderProfileLinks(): void {
+  const url = !busy && !pageHidden ? profileURL() : undefined;
+  for (const id of ["apple-profile-download", "apple-profile-again", "ready-apple-download"]) {
+    const link = element<HTMLAnchorElement>(id);
+    if (url) { link.href = url; link.removeAttribute("aria-disabled"); link.removeAttribute("tabindex"); }
+    else { link.removeAttribute("href"); link.setAttribute("aria-disabled", "true"); link.tabIndex = -1; }
+  }
+}
+function profileClick(event: MouseEvent, fromReady: boolean): void {
+  const link = event.currentTarget as HTMLAnchorElement, url = profileURL();
+  const active = fromReady ? stage === "ready" : stage === "device" || stage === "download";
+  if (busy || pageHidden || !active || !url || link.href !== url || link.hidden) { event.preventDefault(); return; }
+  // Preserve only public guide progress before Safari hands the real response to Settings.
+  // The fingerprint-bound server route rejects rotation; no Blob or access code is involved.
+  if (fromReady) { saveProgress(); message("Profile download requested. Installing it again is unnecessary if this device already trusts GridLens."); }
+  else { message(""); show("download"); }
+}
 function renderGuide(): void {
   const steps = secureGuide(device, browser, filename()); guideIndex = Math.min(guideIndex, steps.length - 1);
   const step = steps[guideIndex]!;
@@ -131,6 +202,7 @@ function renderGuide(): void {
   text("guide-title", step.title); text("guide-instruction", step.instruction);
   text("guide-next", guideIndex === steps.length - 1 ? "I’ve imported it — Open GridLens" : "Next");
   element("guide-final-note").hidden = guideIndex !== steps.length - 1;
+  text("guide-final-note", `If the next page shows a certificate warning, return here. Do not bypass it. After Fleet opens securely, ${cleanupInstruction().replace(/^You/, "you")}`);
   element("android-screen-help").hidden = device !== "android";
   element<HTMLDetailsElement>("android-screen-help").open = false;
   element("guide-help").hidden = !step.help; element<HTMLDetailsElement>("guide-help").open = false;
@@ -151,7 +223,7 @@ function renderStatus(): void {
   text("certificate-label", status.trustMode === "private-ca" ? "Public CA SHA-256" : "Supplied certificate SHA-256");
   text("certificate-fingerprint", status.certificateSha256); text("leaf-fingerprint", status.serverCertificateSha256);
   text("certificate-expiry", new Date(status.serverCertificateValidToMs).toISOString().replace("T", " ").replace(".000Z", " UTC"));
-  text("download-name", filename());
+  renderDownloads(); renderProfileLinks();
   // Returning to HTTP is explicit and only uses the installer's saved endpoint.
   element<HTMLAnchorElement>("return-fleet").href = HTTPS ? "/" : `${status.httpOrigin}/`;
 }
@@ -213,11 +285,13 @@ async function load(): Promise<void> {
     if (resumeRequested) { message(""); show("resume"); return; }
     message("");
     // Only public instructions are restored; HTTPS verification never restores as complete.
-    const resume = restored && expected && matches(restored.expected, expected) ? restored.stage : "trust";
+    const progress = device === "ios" ? readProgress() : restored;
+    const resume = progress && expected && matches(progress.expected, expected) ? progress.stage : "trust";
     show(status?.trustMode === "provided-certificate" && resume === "guide" ? "device" : resume, false);
   });
 }
-async function download(): Promise<void> {
+async function download(fromReady = false): Promise<void> {
+  if (device === "ios") return;
   await run(async signal => {
     if (!await checkedStatus(signal) || !status) return;
     if (status.trustMode !== "private-ca" || status.certificateDownloadPath !== "/secure-setup/ca.crt") { show("device"); return; }
@@ -245,7 +319,10 @@ async function download(): Promise<void> {
     const link = document.createElement("a"); link.href = certificateURL; link.download = filename();
     document.body.append(link); link.click(); link.remove();
     certificateURLTimer = setTimeout(revokeCertificateURL, 60_000);
-    message(""); show("download");
+    if (fromReady) {
+      show("ready");
+      message(`Certificate download requested. ${downloadAdvice()}`);
+    } else { message(""); show("download"); }
   });
 }
 function revokeCertificateURL(): void {
@@ -298,10 +375,24 @@ async function completeAccess(signal: AbortSignal, openFleet: boolean): Promise<
 element("trust-network").addEventListener("change", controls);
 element("trust-continue").addEventListener("click", () => { if (!busy && element<HTMLInputElement>("trust-network").checked) { message(""); show("device"); } });
 deviceSelect.addEventListener("change", () => { if (!isDevice(deviceSelect.value)) return; device = deviceSelect.value; guideIndex = 0; renderSelectors(); saveProgress(); });
-browserSelect.addEventListener("change", () => { if (!isBrowser(browserSelect.value) || !browsersFor(device).includes(browserSelect.value)) return; browser = browserSelect.value; guideIndex = 0; text("device-summary", `${DEVICE_NAMES[device]} · ${BROWSER_NAMES[browser]}`); saveProgress(); });
+browserSelect.addEventListener("change", () => { if (!isBrowser(browserSelect.value) || !browsersFor(device).includes(browserSelect.value)) return; browser = browserSelect.value; guideIndex = 0; renderSelectors(); saveProgress(); });
 element("device-continue").addEventListener("click", () => { if (status?.trustMode === "provided-certificate") void openGridLens(); else void download(); });
 element("already-trusted").addEventListener("click", () => { void openGridLens(); });
 element("download-again").addEventListener("click", () => { void download(); });
+element("ready-download").addEventListener("click", () => { void download(true); });
+element("apple-profile-download").addEventListener("click", event => profileClick(event, false));
+element("apple-profile-again").addEventListener("click", event => profileClick(event, false));
+element("ready-apple-download").addEventListener("click", event => profileClick(event, true));
+function copySetupAddress(inputId: string, statusId: string): void {
+  if (busy || pageHidden) return;
+  const input = element<HTMLInputElement>(inputId); input.focus(); input.select();
+  if (navigator.clipboard?.writeText) void navigator.clipboard.writeText(input.value)
+    .then(() => text(statusId, "Setup address copied. Paste it into Safari."))
+    .catch(() => text(statusId, "The address is selected. Use your device’s Copy action, then paste it into Safari."));
+  else text(statusId, "The address is selected. Use your device’s Copy action, then paste it into Safari.");
+}
+element("copy-apple-setup").addEventListener("click", () => copySetupAddress("apple-setup-url", "apple-copy-status"));
+element("copy-ready-apple-setup").addEventListener("click", () => copySetupAddress("ready-apple-setup-url", "ready-apple-copy-status"));
 element("download-back").addEventListener("click", () => show("device"));
 element("download-next").addEventListener("click", () => { guideIndex = 0; message(""); show("guide"); });
 element("guide-next").addEventListener("click", () => { if (guideIndex + 1 < secureGuide(device, browser, filename()).length) { guideIndex++; show("guide"); } else void openGridLens(); });

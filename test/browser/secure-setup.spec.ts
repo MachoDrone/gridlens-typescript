@@ -1,12 +1,54 @@
 import { expect, test, type Page } from "@playwright/test";
-import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
+import { createServer as createHTTPServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { createServer as createHTTPSServer } from "node:https";
 import type { BrowserSecurityStatus } from "../../src/contracts/browser-security.ts";
 
 // These fixtures exercise browser behavior only. They do not establish OS certificate trust.
 const HTTP = "http://192.168.50.2:8789", HTTPS = "https://192.168.50.2:9467";
 const SERVER = "00000000-0000-4000-8000-000000000001", CA = "a".repeat(64), LEAF = "b".repeat(64);
 const CONNECT_CODE = "syntheticHandoff".padEnd(43, "x");
+const PROFILE_PATH = `/secure-setup/apple-ca/${CA}.mobileconfig`;
+const PROFILE_BODY = "<?xml version=\"1.0\"?><plist version=\"1.0\"><dict><key>PayloadType</key><string>Configuration</string></dict></plist>";
+// WebKit does not emit a native attachment download for route.fulfill here.
+// Only these two download cases use real loopback responses. Ignoring their
+// generated test TLS certificate is fixture transport, never OS trust evidence.
+const nativeProfileTest = test.extend<{ nativeProfileOrigin: (protocol: "http:" | "https:") => Promise<string> }>({
+  ignoreHTTPSErrors: true,
+  nativeProfileOrigin: async ({}, use) => {
+    const servers: (ReturnType<typeof createHTTPServer> | ReturnType<typeof createHTTPSServer>)[] = [];
+    const directories: string[] = [];
+    try {
+      await use(async protocol => {
+        const respond = (request: IncomingMessage, response: ServerResponse): void => {
+          if (request.method !== "GET" || request.url !== PROFILE_PATH) { response.writeHead(404).end(); return; }
+          response.writeHead(200, { "Content-Type": "application/x-apple-aspen-config", "Content-Length": Buffer.byteLength(PROFILE_BODY),
+            "Cache-Control": "no-store", ETag: `"${CA}"`, "Content-Disposition": 'attachment; filename="gridlens-synthetic-aaaaaaaa-ca.mobileconfig"' });
+          response.end(PROFILE_BODY);
+        };
+        let server: typeof servers[number];
+        if (protocol === "https:") {
+          const directory = await mkdtemp(join(tmpdir(), "gridlens-profile-download-")); directories.push(directory);
+          execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", join(directory, "key.pem"),
+            "-out", join(directory, "cert.pem"), "-days", "1", "-subj", "/CN=Generated loopback profile fixture", "-addext", "subjectAltName=IP:127.0.0.1"], { stdio: "ignore" });
+          server = createHTTPSServer({ key: await readFile(join(directory, "key.pem")), cert: await readFile(join(directory, "cert.pem")) }, respond);
+        } else server = createHTTPServer(respond);
+        servers.push(server);
+        await new Promise<void>((done, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", done); });
+        return `${protocol}//127.0.0.1:${(server.address() as { port: number }).port}`;
+      });
+    } finally {
+      for (const server of servers) {
+        server.closeAllConnections();
+        await new Promise<void>(done => server.close(() => done()));
+      }
+      for (const directory of directories) await rm(directory, { recursive: true, force: true });
+    }
+  },
+});
 type Metadata = Extract<BrowserSecurityStatus, { available: true }>;
 function metadata(): Metadata {
   return { version: 1, available: true, serverId: SERVER, instance: "synthetic", httpOrigin: HTTP, httpsOrigin: HTTPS,
@@ -16,19 +58,20 @@ function metadata(): Metadata {
 }
 interface Mode {
   value: BrowserSecurityStatus; secureValue: BrowserSecurityStatus | undefined; requests: { url: string; method: string }[];
-  signedIn: boolean; statusCode: number; accessCode: number; downloads: number; logins: unknown[];
+  signedIn: boolean; statusCode: number; accessCode: number; downloads: number; profiles: number; logins: unknown[];
   downloadCode: number; downloadETag: string; downloadBody: string; downloadWait: Promise<void> | undefined;
   issued: number; issueStatus: number; redeems: unknown[]; redeemStatus: number; loseRedeemResponse: boolean;
   fleetEntry: boolean;
   secureStatusWait: Promise<void> | undefined;
 }
-async function fixture(page: Page): Promise<Mode> {
-  const mode: Mode = { value: metadata(), secureValue: undefined, requests: [], signedIn: false, statusCode: 200, accessCode: 200, downloads: 0, logins: [],
+async function fixture(page: Page, nativeProfileOrigin?: string): Promise<Mode> {
+  const mode: Mode = { value: metadata(), secureValue: undefined, requests: [], signedIn: false, statusCode: 200, accessCode: 200, downloads: 0, profiles: 0, logins: [],
     downloadCode: 200, downloadETag: `"${CA}"`, downloadBody: "-----BEGIN CERTIFICATE-----\nMAMCAQE=\n-----END CERTIFICATE-----\n", downloadWait: undefined,
     issued: 0, issueStatus: 200, redeems: [], redeemStatus: 200, loseRedeemResponse: false, fleetEntry: false, secureStatusWait: undefined };
   const assets: Record<string, string> = {
     "/preview/secure-setup.js": "preview/secure-setup.js", "/preview/secure-guides.js": "preview/secure-guides.js",
     "/contracts/browser-security.js": "contracts/browser-security.js", "/shared-setup.js": "preview/shared-setup.js", "/preview/webapp.js": "preview/webapp.js",
+    "/fleet/host-metadata.js": "fleet/host-metadata.js",
   };
   await page.route("**/*", async route => {
     const request = route.request(), url = new URL(request.url()); mode.requests.push({ url: url.href, method: request.method() });
@@ -57,6 +100,17 @@ async function fixture(page: Page): Promise<Mode> {
       if (mode.downloadWait) await mode.downloadWait;
       await route.fulfill({ status: mode.downloadCode, contentType: "application/x-x509-ca-cert", headers: { ETag: mode.downloadETag },
         body: mode.downloadCode === 200 ? mode.downloadBody : "" }); return;
+    }
+    if (url.pathname === PROFILE_PATH) {
+      expect(request.method()).toBe("GET"); expect(request.isNavigationRequest()).toBe(true);
+      expect(url.search).toBe(""); mode.profiles++;
+      if (nativeProfileOrigin) {
+        expect(new URL(nativeProfileOrigin).protocol).toBe(url.protocol);
+        await route.continue({ url: nativeProfileOrigin + PROFILE_PATH }); return;
+      }
+      await route.fulfill({ contentType: "application/x-apple-aspen-config", headers: { ETag: `"${CA}"`,
+        "Content-Disposition": 'attachment; filename="gridlens-synthetic-aaaaaaaa-ca.mobileconfig"' },
+      body: PROFILE_BODY }); return;
     }
     if (url.pathname === "/api/shared/status") {
       await route.fulfill({ status: mode.accessCode !== 200 ? mode.accessCode : mode.signedIn ? 200 : 401,
@@ -154,11 +208,11 @@ test("detected Linux Chrome uses the exact certificate-manager actions and opens
   expect(mode.redeems).toEqual([{ version: 1, code: CONNECT_CODE }]);
 });
 
-test("Samsung is Android with optional brand guidance and four top-level device choices", async ({ page }) => {
+test("Samsung stays under Android alongside the separate Apple device choice", async ({ page }) => {
   await page.addInitScript(() => Object.defineProperty(navigator, "userAgent", { value: "Mozilla/5.0 (Linux; Android 15; SM-S921B) AppleWebKit/537.36 SamsungBrowser/28.0 Chrome/130.0.0.0 Mobile Safari/537.36" }));
   await fixture(page); await begin(page);
   await expect(page.locator("#device-summary")).toHaveText("Android · Samsung Internet");
-  expect(await page.locator("#device option").evaluateAll(options => options.map(node => (node as HTMLOptionElement).value))).toEqual(["windows", "macos", "linux", "android"]);
+  expect(await page.locator("#device option").evaluateAll(options => options.map(node => (node as HTMLOptionElement).value))).toEqual(["windows", "macos", "linux", "android", "ios"]);
   await expect(page.getByRole("combobox", { name: "Device", exact: true })).toBeHidden();
   await download(page); await expect(page.locator("#android-screen-help")).not.toHaveAttribute("open");
   await expect(page.locator("#android-screen-help p")).toBeHidden();
@@ -166,6 +220,126 @@ test("Samsung is Android with optional brand guidance and four top-level device 
   await expect(page.locator("#android-screen-help p")).toContainText("Samsung Galaxy");
   await page.getByRole("button", { name: "Change instructions" }).click();
   await expect(page.getByRole("combobox", { name: "Device", exact: true })).toHaveValue("android");
+});
+
+async function emulateApple(page: Page, chrome = false): Promise<void> {
+  await page.addInitScript(isChrome => {
+    Object.defineProperty(navigator, "userAgent", { value: isChrome
+      ? "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 CriOS/130.0 Mobile/15E148 Safari/604.1"
+      : "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Version/18.0 Safari/605.1.15" });
+    Object.defineProperty(navigator, "platform", { value: isChrome ? "iPhone" : "MacIntel" });
+    Object.defineProperty(navigator, "maxTouchPoints", { value: 5 });
+  }, chrome);
+}
+
+nativeProfileTest("desktop-mode iPad uses a real fingerprint-bound profile link before separate install and full-trust steps", async ({ page, nativeProfileOrigin }) => {
+  await emulateApple(page); const mode = await fixture(page, await nativeProfileOrigin("http:")); await begin(page);
+  await expect(page.locator("#device-summary")).toHaveText("iPhone / iPad · Safari");
+  const link = page.getByRole("link", { name: "Download certificate profile", exact: true });
+  const url = `${HTTP}/secure-setup/apple-ca/${CA}.mobileconfig`;
+  await expect(link).toHaveAttribute("href", url); await expect(link).not.toHaveAttribute("download");
+  await expect(page.locator("#download-approval-notice")).toBeHidden();
+  const waiting = page.waitForEvent("download"); await link.click(); const file = await waiting;
+  expect(file.url()).toBe(url); expect(file.suggestedFilename()).toBe("gridlens-synthetic-aaaaaaaa-ca.mobileconfig");
+  await expect(page.locator("#download-panel")).toBeVisible();
+  await expect(page.locator("#ordinary-download-help")).toBeHidden();
+  await expect(page.locator("#apple-download-help")).toContainText("Not Signed");
+  await expect(page.locator("#apple-download-help")).toContainText("eight minutes");
+  const saved = await page.evaluate(() => JSON.parse(sessionStorage.getItem("gridlens.secure-setup.progress.v1")!));
+  expect(saved.device).toBe("ios"); expect(saved.stage).toBe("download");
+  expect(JSON.stringify(saved)).not.toMatch(/"trusted"|"verified"|"token"|"code"/);
+  expect(mode.downloads).toBe(0); expect(mode.profiles).toBe(1); expect(mode.issued).toBe(0); expect(mode.redeems).toEqual([]);
+  // Native Settings handoff/Back is modeled only as page lifecycle, not an OS import.
+  await page.evaluate(() => {
+    window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true }));
+    window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+  });
+  await expect(page.locator("#download-panel")).toBeVisible(); expect(mode.issued).toBe(0);
+  await page.reload(); await expect(page.locator("#download-panel")).toBeVisible();
+  await page.getByRole("button", { name: "Profile downloaded — Next", exact: true }).click();
+  const steps: string[] = [];
+  for (let step = 0; step < 8; step++) {
+    steps.push(await page.locator("#guide-instruction").innerText());
+    if (await page.locator("#guide-next").innerText() === "I’ve imported it — Open GridLens") break;
+    await page.getByRole("button", { name: "Next", exact: true }).click();
+  }
+  expect(steps.join(" ")).toContain("Install"); expect(steps.join(" ")).toContain("Certificate Trust Settings");
+  expect(steps.join(" ")).toMatch(/full trust/i); expect(mode.issued).toBe(0);
+  await expect(page.locator("#guide-final-note")).toContainText(".mobileconfig");
+  await expect(page.locator("#guide-final-note")).toContainText("removing that profile removes the certificate");
+  await openHTTPS(page); await expectFleet(page);
+  expect(mode.issued).toBe(1); expect(mode.redeems).toEqual([{ version: 1, code: CONNECT_CODE }]);
+  expect(mode.requests.some(request => request.url.includes(CONNECT_CODE))).toBe(false);
+});
+
+test("iPhone Chrome gives a plain Safari setup address and returns to its own browser connection", async ({ page }) => {
+  await emulateApple(page, true);
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { value: undefined }));
+  const mode = await fixture(page); await begin(page);
+  await expect(page.locator("#device-summary")).toHaveText("iPhone / iPad · Chrome / Chromium");
+  await expect(page.locator("#apple-safari-help")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Setup address for Safari", exact: true })).toHaveValue(`${HTTP}/secure-setup`);
+  await page.getByRole("button", { name: "Copy setup address", exact: true }).click();
+  await expect(page.locator("#apple-copy-status")).toContainText("address is selected");
+  await expect(page.locator("#apple-profile-download")).toBeHidden();
+  await chooseInstructions(page, "ios", "safari");
+  await expect(page.locator("#apple-safari-help")).toBeVisible();
+  await expect(page.locator("#apple-profile-download")).toBeHidden();
+  await expect(page.locator("#apple-safari-help")).toContainText("does not switch browsers");
+  await chooseInstructions(page, "ios", "chrome");
+  expect(mode.profiles).toBe(0); expect(mode.downloads).toBe(0); expect(mode.issued).toBe(0);
+  await openHTTPS(page); await expectFleet(page);
+  expect(mode.issued).toBe(1); expect(mode.redeems).toHaveLength(1);
+});
+
+nativeProfileTest("connected Apple profile recovery stays ready and disables direct navigation while setup is being checked", async ({ page, nativeProfileOrigin }) => {
+  await emulateApple(page); const mode = await fixture(page, await nativeProfileOrigin("https:")); mode.signedIn = true;
+  await page.goto(`${HTTPS}/secure-setup`); await expect(page.locator("#ready-panel")).toBeVisible();
+  const link = page.getByRole("link", { name: "Download certificate profile again", exact: true });
+  const url = `${HTTPS}/secure-setup/apple-ca/${CA}.mobileconfig`;
+  await expect(link).toHaveAttribute("href", url);
+  const waiting = page.waitForEvent("download"); await link.click(); const file = await waiting;
+  expect(file.url()).toBe(url); await expect(page.locator("#ready-panel")).toBeVisible();
+  await expect(page.locator("#download-panel")).toBeHidden(); await expect(page.locator("#guide-panel")).toBeHidden();
+  await expect(page.locator("#ready-certificate-help")).toContainText("installed GridLens profile");
+  let release = () => {}; mode.secureStatusWait = new Promise<void>(resolve => { release = resolve; });
+  await page.evaluate(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+  await expect(page.locator("#ready-apple-download")).toHaveAttribute("aria-disabled", "true");
+  await expect(page.locator("#ready-apple-download")).not.toHaveAttribute("href");
+  await page.locator("#ready-apple-download").evaluate(node => (node as HTMLAnchorElement).click());
+  expect(mode.profiles).toBe(1);
+  release(); mode.secureStatusWait = undefined;
+  await expect(link).toHaveAttribute("href", url);
+  expect(mode.downloads).toBe(0); expect(mode.issued).toBe(0); expect(mode.redeems).toEqual([]); expect(mode.logins).toEqual([]);
+});
+
+test("connected iPhone Chrome offers Safari profile recovery without changing its current session", async ({ page }) => {
+  await emulateApple(page, true);
+  await page.addInitScript(() => Object.defineProperty(navigator, "clipboard", { value: undefined }));
+  const mode = await fixture(page); mode.signedIn = true;
+  await page.goto(`${HTTPS}/secure-setup`); await expect(page.locator("#ready-panel")).toBeVisible();
+  await expect(page.locator("#ready-apple-download")).toBeHidden();
+  await expect(page.locator("#ready-download")).toBeHidden();
+  await expect(page.locator("#ready-apple-safari-help")).toBeVisible();
+  await expect(page.getByRole("textbox", { name: "Setup address for Safari", exact: true })).toHaveValue(`${HTTP}/secure-setup`);
+  await page.getByRole("button", { name: "Copy setup address", exact: true }).click();
+  await expect(page.locator("#ready-apple-copy-status")).toContainText("address is selected");
+  await expect(page.locator("#ready-panel")).toBeVisible();
+  expect(mode.profiles).toBe(0); expect(mode.downloads).toBe(0); expect(mode.issued).toBe(0);
+  expect(mode.redeems).toEqual([]); expect(mode.logins).toEqual([]);
+  expect(mode.requests.every(request => request.method === "GET")).toBe(true);
+  await page.getByRole("link", { name: "Open Fleet", exact: true }).click(); await expectFleet(page);
+});
+
+test("Apple supplied-certificate setup offers no profile or CA installation", async ({ page }) => {
+  await emulateApple(page); const mode = await fixture(page);
+  mode.value = { ...metadata(), trustMode: "provided-certificate", certificateDownloadPath: null }; mode.signedIn = true;
+  await begin(page); await expect(page.locator("#provided-help")).toBeVisible();
+  await expect(page.locator("#apple-profile-download")).toBeHidden(); await expect(page.locator("#apple-profile-notice")).toBeHidden();
+  await expect(page.locator("#apple-safari-help")).toBeHidden(); await openHTTPS(page); await expectFleet(page);
+  await page.goto(`${HTTPS}/secure-setup`); await expect(page.locator("#ready-panel")).toBeVisible();
+  await expect(page.locator("#ready-apple-download")).toBeHidden(); await expect(page.locator("#ready-certificate-help")).toBeHidden();
+  expect(mode.profiles).toBe(0); expect(mode.downloads).toBe(0);
 });
 
 test("legacy Samsung progress resumes as Android without restoring trust or issuing a link", async ({ page }) => {
@@ -239,7 +413,7 @@ for (const width of [1280, 390, 320]) test(`guided certificate setup connects HT
   const main = (await page.locator("main").boundingBox())!; expect(main.x).toBeGreaterThanOrEqual(0); expect(main.x + main.width).toBeLessThanOrEqual(width);
 });
 
-test("all offered device and browser guides lead to a real HTTPS check without automating settings", async ({ page }) => {
+test("desktop and Android guides lead to a real HTTPS check without automating settings", async ({ page }) => {
   test.setTimeout(60_000); const mode = await fixture(page); await begin(page);
   const cases: [string, string[]][] = [["windows", ["chrome", "edge", "firefox"]], ["macos", ["safari", "chrome", "edge", "firefox"]],
     ["linux", ["chrome", "edge", "firefox"]], ["android", ["chrome", "samsung", "edge", "firefox"]]];
@@ -265,6 +439,27 @@ test("all offered device and browser guides lead to a real HTTPS check without a
   expect(mode.requests.some(request => request.url.includes("/api/shared/"))).toBe(false);
 });
 
+test("a connected HTTPS browser can recover its public certificate without repeating setup or changing access", async ({ page }) => {
+  const mode = await fixture(page); mode.signedIn = true;
+  await page.goto(`${HTTPS}/secure-setup`); await expect(page.locator("#ready-panel")).toBeVisible();
+  const waiting = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Download certificate again", exact: true }).click();
+  const file = await waiting;
+  expect(file.suggestedFilename()).toBe("gridlens-synthetic-aaaaaaaa-ca.crt");
+  expect(await readFile((await file.path())!, "utf8")).toBe(mode.downloadBody);
+  await expect(page).toHaveURL(`${HTTPS}/secure-setup`);
+  await expect(page.locator("#ready-panel")).toBeVisible();
+  await expect(page.locator("#download-panel")).toBeHidden(); await expect(page.locator("#guide-panel")).toBeHidden();
+  await expect(page.locator("#wizard-message")).toContainText("download requested");
+  expect(mode.downloads).toBe(1); expect(mode.requests.every(request => request.method === "GET")).toBe(true);
+  expect(mode.issued).toBe(0); expect(mode.redeems).toEqual([]); expect(mode.logins).toEqual([]);
+  // The recovery button retains the same identity gate as the initial download.
+  mode.value = { ...metadata(), certificateSha256: "d".repeat(64) };
+  await page.getByRole("button", { name: "Download certificate again", exact: true }).click();
+  await expect(page.locator("#repair-message")).toContainText("certificate changed");
+  expect(mode.downloads).toBe(1);
+});
+
 test("supplied certificate skips CA import and rechecks even an existing browser session", async ({ page }) => {
   const mode = await fixture(page); mode.value = { ...metadata(), trustMode: "provided-certificate", certificateDownloadPath: null }; mode.signedIn = true;
   await begin(page); await expect(page.locator("#provided-help")).toBeVisible();
@@ -273,6 +468,8 @@ test("supplied certificate skips CA import and rechecks even an existing browser
   await expectFleet(page); expect(mode.downloads).toBe(0);
   expect(mode.issued).toBe(1); expect(mode.redeems).toEqual([]);
   await page.goto(`${HTTPS}/secure-setup`); await expect(page.locator("#ready-panel")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Download certificate again", exact: true })).toBeHidden();
+  await expect(page.locator("#ready-certificate-help")).toBeHidden();
   mode.accessCode = 401;
   await page.evaluate(() => { window.dispatchEvent(new PageTransitionEvent("pagehide", { persisted: true })); window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })); });
   await expect(page.locator("#pair-panel")).toBeVisible(); await expect(page.locator("#ready-panel")).toBeHidden(); expect(mode.redeems).toEqual([]);
@@ -286,7 +483,7 @@ test("HTTPS-only installations retain their separate terminal pairing fallback",
   await page.getByRole("link", { name: "Connect browser", exact: true }).click();
   await page.getByRole("textbox", { name: "Connection code", exact: true }).fill("fixture-code");
   await page.getByRole("button", { name: "Connect", exact: true }).click();
-  await expect(page.locator("#message")).toContainText("Shared cache connected");
+  await expectFleet(page);
   expect(mode.logins).toEqual([{ version: 1, code: "fixture-code", deviceName: "Web browser" }]);
   expect(mode.issued).toBe(0); expect(mode.redeems).toEqual([]);
 });

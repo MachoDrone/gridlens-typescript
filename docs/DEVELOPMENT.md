@@ -109,6 +109,13 @@ Tests use isolated input files and injected providers; browser tests use port
 4174 and reject nonlocal requests. Other test servers use isolated loopback ports.
 Keep real rosters, exports, snapshots, credentials and local evidence outside Git.
 
+Certificate tests use an existing OpenSSL executable for generated fixtures.
+The TypeScript Apple-profile checks also invoke Python 3's standard-library
+`plistlib` as an independent XML/property-list decoder. These are development
+verification tools, not new operator-install
+requirements. The shipped runtime and coordinator do not need host Python or a
+host certificate/package installation.
+
 The optional [guided secure browser setup](SECURE_BROWSER_SETUP.md) supersedes the
 earlier withdrawal of private-IP certificate instructions. It is explicitly opened
 from Secure in the sidebar, setup or the installer; HTTP users are not automatically redirected. A

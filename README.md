@@ -24,7 +24,11 @@ The left-menu **Hosts** action opens browser PC management, leading from search 
 file. Rewards/GPU monitoring is checked by default and can be turned off before
 submitting setup. Results clearly lead to the primary **Open Fleet** action.
 Saved sign-ins can be reused or updated; computers can be removed or explicitly
-restored. Selecting monitoring options alone changes no permissions until setup
+restored. When a fleet is already configured, **View Fleet** appears before the
+computer list and adding or changing computers is optional. Connected viewers
+and returning operators with a current populated roster go from the connection
+page directly to Fleet; **Hosts** still opens computer management.
+Selecting monitoring options alone changes no permissions until setup
 is submitted. Anyone who can reach that private address has access to its configured
 fleet. HTTP LAN traffic is unencrypted;
 that includes submitted passwords, SSH private keys, passphrases and optional
@@ -36,7 +40,7 @@ separate.
 
 **Secure** in the left sidebar opens the optional guided local HTTPS setup; its
 lock icon remains visible when the menu is collapsed. It supplies the existing public certificate
-directly to the device, guides Windows/macOS/Linux/Android system approval, then
+directly to the device, guides Windows/macOS/Linux/Android and iPhone/iPad approval, then
 checks the saved HTTPS address and connects the browser using a one-use handoff
 from its existing private-network access. Normal setup needs no extra CLI command
 or manually copied connection code. Initial HTTP
@@ -50,6 +54,11 @@ controls. Samsung phones use Android instructions. After import, **I've imported
 it — Open GridLens** checks the saved HTTPS identity and browser access and opens
 Fleet directly; normal signed-out HTTPS bookmarks resume the guide instead of a
 manual connection-code screen.
+On iPhone/iPad, Safari downloads a certificate-only Apple profile containing the
+existing public CA. Installing the profile and enabling full website trust in
+Settings are separate actions. Mac instructions use Keychain Access and SSL trust;
+they are not the iPhone/iPad procedure. These instructions follow primary vendor
+documentation; physical Apple profile import and trust verification remain separate.
 See [guided secure browser setup](docs/SECURE_BROWSER_SETUP.md) for platform
 instructions, limitations and verification coverage.
 

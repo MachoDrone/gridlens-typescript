@@ -11,6 +11,8 @@ const entryCleanup: (() => Promise<void>)[] = [];
 test.afterEach(async () => { for (const cleanup of entryCleanup.splice(0).reverse()) await cleanup(); });
 
 const origin = "https://192.168.50.2:9467";
+const hostAddress = "1".repeat(31) + "2";
+const currentContext = (addresses = [hostAddress]) => ({ scopeId: "synthetic-fleet", rosterRevision: "current-roster", addresses });
 async function fixture(page: Page, permission: boolean | undefined) {
   const pc = { id: "a".repeat(64), name: "Saved computer", host: "192.168.50.3", port: 22, fingerprint: `SHA256:${"A".repeat(43)}` };
   const mode = { permission, calls: [] as string[], scans: 0 };
@@ -25,12 +27,12 @@ async function fixture(page: Page, permission: boolean | undefined) {
       const body = (await readFile(resolve("dist/shared-setup.html"), "utf8")).replace("</head>", '<meta name="gridlens-setup-mode" content="browser"></head>');
       await route.fulfill({ contentType: "text/html", body }); return;
     }
-    if (url.pathname === "/shared-setup.js" || url.pathname === "/preview/webapp.js" || url.pathname === "/contracts/browser-security.js") {
+    if (url.pathname === "/shared-setup.js" || url.pathname === "/preview/webapp.js" || url.pathname === "/contracts/browser-security.js" || url.pathname === "/fleet/host-metadata.js") {
       await route.fulfill({ contentType: "text/javascript", body: await readFile(resolve("dist", url.pathname === "/shared-setup.js" ? "preview/shared-setup.js" : url.pathname.slice(1)), "utf8") }); return;
     }
     if (url.pathname === "/manifest.webmanifest" || url.pathname.startsWith("/icons/")) { await route.fulfill({ status: 404, body: "" }); return; }
     mode.calls.push(url.pathname);
-    if (url.pathname === "/api/shared/status") { await route.fulfill({ json: { version: 1, serverId: "synthetic", role: "operator", ...(mode.permission === undefined ? {} : { canManageDevices: mode.permission }) } }); return; }
+    if (url.pathname === "/api/shared/status") { await route.fulfill({ json: { version: 1, serverId: "synthetic", role: "operator", context: currentContext(), ...(mode.permission === undefined ? {} : { canManageDevices: mode.permission }) } }); return; }
     if (url.pathname === "/api/shared/setup") { await route.fulfill({ json: view }); return; }
     if (url.pathname === "/api/shared/setup-action") {
       expect(request.postDataJSON().action).toBe("scan"); mode.scans++; await route.fulfill({ json: { ...view, phase: "scanning", revision: 2,
@@ -47,8 +49,15 @@ async function fixture(page: Page, permission: boolean | undefined) {
 }
 
 test("a gateway-derived HTTPS operator keeps PC setup without independent device administration", async ({ page }) => {
+  await page.addInitScript(() => {
+    const original = window.matchMedia.bind(window);
+    window.matchMedia = query => { const result = original(query); if (query === "(display-mode: standalone)") Object.defineProperty(result, "matches", { value: true }); return result; };
+  });
   const mode = await fixture(page, false); await page.goto(`${origin}/setup`);
+  expect(await page.evaluate(() => matchMedia("(display-mode: standalone)").matches)).toBe(true);
   await expect(page.locator("#pc-manager")).toBeVisible(); await expect(page.locator("#pc-manager-summary")).toContainText("1 computer in the fleet");
+  await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeVisible();
+  await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toHaveAttribute("href", "/");
   await expect(page.locator("#devices")).toBeHidden(); await expect(page.locator("#new-code")).toBeDisabled();
   await expect(page.locator("main")).not.toContainText("Run the latest GridLens installer");
   await page.getByRole("button", { name: "Find PCs on network", exact: true }).click();
@@ -59,6 +68,7 @@ test("a gateway-derived HTTPS operator keeps PC setup without independent device
   await page.clock.fastForward(3100); await expect(page.locator("#pc-manager")).toBeVisible();
   expect(mode.calls.some(path => /\/(?:devices|pair-code|revoke)$/.test(path))).toBe(false);
   await expect(page.locator("#message")).not.toContainText("sign-in link");
+  await expect(page).toHaveURL(`${origin}/setup`);
 });
 
 for (const capability of [true, undefined]) test(`independent and legacy operator device access remains available (${String(capability)})`, async ({ page }) => {
@@ -82,9 +92,12 @@ const publicMetadata = (httpsOrigin = origin) => ({ version: 1, available: true,
 async function signedOutEntry(page: Page) {
   const mode = { origin: "", signedIn: false, deniedStatus: 401, metadata: undefined as unknown, metadataStatus: 200, metadataReads: 0,
     statusWait: undefined as Promise<void> | undefined, metadataWait: undefined as Promise<void> | undefined,
+    loginWait: undefined as Promise<void> | undefined, role: "viewer" as "operator" | "viewer", context: undefined as unknown,
+    deniedBody: {} as unknown, setupSavedHosts: 0, setupReport: undefined as unknown, canManageDevices: undefined as boolean | undefined,
     loginStatus: 200, logins: [] as unknown[], requests: [] as { method: string; url: string }[] };
   const assets: Record<string, string> = { "/shared-setup.js": "preview/shared-setup.js", "/preview/webapp.js": "preview/webapp.js",
-    "/contracts/browser-security.js": "contracts/browser-security.js", "/preview/secure-setup.js": "preview/secure-setup.js", "/preview/secure-guides.js": "preview/secure-guides.js" };
+    "/contracts/browser-security.js": "contracts/browser-security.js", "/preview/secure-setup.js": "preview/secure-setup.js", "/preview/secure-guides.js": "preview/secure-guides.js",
+    "/fleet/host-metadata.js": "fleet/host-metadata.js" };
   const directory = await mkdtemp(join(tmpdir(), "gridlens-https-entry-"));
   execFileSync("openssl", ["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", join(directory, "key.pem"),
     "-out", join(directory, "cert.pem"), "-days", "1", "-subj", "/CN=Generated loopback entry fixture", "-addext", "subjectAltName=IP:127.0.0.1"], { stdio: "ignore" });
@@ -109,11 +122,19 @@ async function signedOutEntry(page: Page) {
     if (url.pathname === "/secure-setup/status.json") { mode.metadataReads++; await mode.metadataWait; json(mode.metadataStatus, mode.metadata); return; }
     if (url.pathname === "/api/shared/status") {
       await mode.statusWait;
-      json(mode.signedIn ? 200 : mode.deniedStatus, mode.signedIn ? { version: 1, serverId: "synthetic", role: "viewer" } : {}); return;
+      json(mode.signedIn ? 200 : mode.deniedStatus, mode.signedIn ? { version: 1, serverId: "synthetic", role: mode.role,
+        ...(mode.context === undefined ? {} : { context: mode.context }), ...(mode.canManageDevices === undefined ? {} : { canManageDevices: mode.canManageDevices }) } : mode.deniedBody); return;
     }
+    if (url.pathname === "/api/shared/setup") {
+      json(mode.signedIn ? 200 : mode.deniedStatus, { revision: 1, phase: mode.setupSavedHosts ? "done" : "scan", computers: [], managed: [],
+        selected: [], trusted: [], automaticIp: true, fullMonitoring: false, exclusions: [], savedHosts: mode.setupSavedHosts,
+        inspectedPcs: 0, monitoringStatus: "Not configured", ...(mode.setupReport === undefined ? {} : { report: mode.setupReport }) }); return;
+    }
+    if (url.pathname === "/api/shared/devices") { json(mode.signedIn && mode.canManageDevices !== false ? 200 : 403, { devices: [] }); return; }
     if (url.pathname === "/api/shared/login") {
       let body = ""; for await (const chunk of request) body += String(chunk);
       mode.logins.push(JSON.parse(body));
+      await mode.loginWait;
       if (mode.loginStatus === 200) mode.signedIn = true;
       json(mode.loginStatus, mode.signedIn ? { version: 1, serverId: "synthetic", role: "viewer" } : {}); return;
     }
@@ -199,18 +220,110 @@ for (const state of ["unprepared", "missing", "wrong-origin", "expired", "https-
 
 test("valid terminal fragments keep first priority over available guided setup", async ({ page }) => {
   const mode = await signedOutEntry(page), code = "synthetic_12";
+  let release!: () => void; mode.loginWait = new Promise<void>(done => { release = done; });
   await page.goto(`${mode.origin}/connect#code=${code}`);
-  await expect(page.locator("#message")).toHaveText("Shared cache connected. Open Fleet to view authorized readings.");
-  await expect(page).toHaveURL(`${mode.origin}/connect`); await expect(page.locator("#login")).toBeHidden();
+  await expect.poll(() => mode.logins.length).toBe(1);
+  expect(await page.evaluate(() => location.hash)).toBe("");
+  expect(await page.evaluate(() => JSON.stringify({ local: { ...localStorage }, session: { ...sessionStorage }, state: history.state }))).not.toContain(code);
+  release(); await expect(page).toHaveURL(`${mode.origin}/`);
+  await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
   expect(mode.logins).toEqual([{ version: 1, code, deviceName: "Web browser" }]); expect(mode.metadataReads).toBe(0);
   expect(mode.requests.every(request => !request.url.includes(code))).toBe(true);
-  await page.reload(); await expect(page.locator("#login")).toBeHidden(); expect(mode.logins).toHaveLength(1); expect(mode.metadataReads).toBe(0);
+  expect(mode.requests.some(request => /\/api\/shared\/(?:setup|devices)$/.test(new URL(request.url).pathname))).toBe(false);
+  await page.reload(); await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+  expect(mode.logins).toHaveLength(1); expect(mode.metadataReads).toBe(0);
 });
 
 for (const fragment of ["#code=synthetic_12", "#code=bad&code=synthetic_12"]) test(`rejected supplied terminal fragment stays explicit (${fragment})`, async ({ page }) => {
-  const mode = await signedOutEntry(page); mode.loginStatus = 401;
+  const mode = await signedOutEntry(page); mode.loginStatus = 401; mode.role = "operator"; mode.context = currentContext(); mode.setupSavedHosts = 99;
   await page.goto(`${mode.origin}/connect${fragment}`);
   await expect(page.locator("#message")).toContainText(fragment.includes("&") ? "not valid" : "expired");
   await expect(page).toHaveURL(`${mode.origin}/connect`); await expect(page.locator("#login-form")).toBeVisible();
   expect(mode.metadataReads).toBe(0); expect(mode.logins).toHaveLength(fragment.includes("&") ? 0 : 1);
+});
+
+for (const role of ["operator", "viewer"] as const) test(`returning ${role} access at /connect opens Fleet before PC/device management`, async ({ page }) => {
+  const mode = await signedOutEntry(page); mode.signedIn = true; mode.role = role; mode.context = role === "operator" ? currentContext() : currentContext([]);
+  mode.canManageDevices = false;
+  await page.goto(`${mode.origin}/connect`); await expect(page).toHaveURL(`${mode.origin}/`);
+  await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+  expect(mode.metadataReads).toBe(0); expect(mode.logins).toEqual([]);
+  expect(mode.requests.some(request => /\/api\/shared\/(?:setup|devices|pair-code|revoke)$/.test(new URL(request.url).pathname))).toBe(false);
+  expect(mode.requests.every(request => request.method === "GET")).toBe(true);
+  await page.goto(`${mode.origin}/connect`); await expect(page).toHaveURL(`${mode.origin}/`);
+});
+
+test("a successful operator reconnect opens the existing Fleet after consuming and scrubbing the code", async ({ page }) => {
+  const mode = await signedOutEntry(page), code = "synthetic_12"; mode.role = "operator"; mode.context = currentContext();
+  mode.canManageDevices = true;
+  let release!: () => void; mode.loginWait = new Promise<void>(done => { release = done; });
+  await page.goto(`${mode.origin}/connect#code=${code}`); await expect.poll(() => mode.logins.length).toBe(1);
+  expect(await page.evaluate(() => location.hash)).toBe(""); release();
+  await expect(page).toHaveURL(`${mode.origin}/`); await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+  expect(mode.requests.filter(request => request.method === "POST").map(request => new URL(request.url).pathname)).toEqual(["/api/shared/login"]);
+  expect(mode.requests.some(request => /\/api\/shared\/(?:setup|devices)$/.test(new URL(request.url).pathname))).toBe(false);
+  expect(mode.metadataReads).toBe(0);
+});
+
+test("an empty operator fleet remains in first-time setup after successful reconnect", async ({ page }) => {
+  const mode = await signedOutEntry(page); mode.role = "operator"; mode.context = currentContext([]); mode.canManageDevices = false;
+  await page.goto(`${mode.origin}/connect#code=synthetic_12`);
+  await expect(page.locator("#pc-manager")).toBeVisible(); await expect(page.locator("#network-search")).toBeVisible();
+  await expect(page).toHaveURL(`${mode.origin}/connect`); await expect(page.locator("#login")).toBeHidden();
+  await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeHidden();
+  expect(mode.requests.some(request => new URL(request.url).pathname === "/api/shared/setup")).toBe(true);
+  expect(mode.requests.some(request => new URL(request.url).pathname === "/api/shared/devices")).toBe(false);
+});
+
+for (const reconnect of [false, true]) test(`onboarding keeps attention results when polling populates the fleet (${reconnect ? "after login" : "existing empty session"})`, async ({ page }) => {
+  const mode = await signedOutEntry(page); mode.signedIn = !reconnect; mode.role = "operator"; mode.context = currentContext([]); mode.canManageDevices = false;
+  await page.clock.install();
+  await page.goto(`${mode.origin}/connect${reconnect ? "#code=synthetic_12" : ""}`);
+  await expect(page.locator("#pc-manager")).toBeVisible(); await expect(page).toHaveURL(`${mode.origin}/connect`);
+  await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeHidden();
+  mode.setupReport = { status: "running", total: 1, completed: 0, results: [] };
+  await page.clock.fastForward(3100);
+  await expect(page.locator("#pc-report-title")).toHaveText("Setting up computers…");
+  mode.context = currentContext(); mode.setupSavedHosts = 1;
+  mode.setupReport = { status: "complete", total: 1, completed: 1, results: [{ pcId: "a".repeat(64), name: "Synthetic PC",
+    status: "attention", hosts: 1, message: "One optional monitoring source needs attention." }] };
+  await page.clock.fastForward(3100);
+  await expect(page.locator("#pc-report-summary")).toContainText("1 need attention");
+  await expect(page.locator("#pc-report-results")).toContainText("One optional monitoring source needs attention.");
+  await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeVisible();
+  await expect(page).toHaveURL(`${mode.origin}/connect`);
+  await page.clock.fastForward(3100);
+  await expect(page.locator("#pc-report-summary")).toContainText("1 need attention");
+  expect(mode.requests.some(request => new URL(request.url).pathname === "/")).toBe(false);
+  // A genuinely new connection-page entry can now open the existing fleet.
+  await page.goto(`${mode.origin}/connect`); await expect(page).toHaveURL(`${mode.origin}/`);
+  await expect(page.getByRole("heading", { name: "Authorized Fleet" })).toBeVisible();
+});
+
+const incompleteContexts: [string, unknown][] = [
+  ["missing", undefined], ["null", null], ["currently empty", currentContext([])],
+  ["invalid address", currentContext(["not-a-public-host"])], ["duplicate addresses", currentContext([hostAddress, hostAddress])],
+  ["missing revision", { scopeId: "synthetic-fleet", addresses: [hostAddress] }],
+  ["invalid scope", { ...currentContext(), scopeId: "synthetic\u0000fleet" }],
+];
+for (const [name, context] of incompleteContexts) test(`${name} current roster never routes from a stale populated setup report`, async ({ page }) => {
+  const mode = await signedOutEntry(page); mode.signedIn = true; mode.role = "operator"; mode.context = context; mode.setupSavedHosts = 99; mode.canManageDevices = false;
+  await page.goto(`${mode.origin}/connect`); await expect(page.locator("#pc-manager")).toBeVisible();
+  if (context === undefined) {
+    await expect(page.locator("#pc-manager-summary")).toContainText("99 hosts saved");
+    await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeVisible();
+  } else {
+    await expect(page.locator("#pc-manager-summary")).not.toContainText("99 hosts saved");
+    await expect(page.getByRole("link", { name: "View Fleet", exact: true })).toBeHidden();
+  }
+  await expect(page).toHaveURL(`${mode.origin}/connect`);
+  expect(mode.metadataReads).toBe(0); expect(mode.requests.some(request => new URL(request.url).pathname === "/")).toBe(false);
+});
+
+test("revoked access cannot use a populated error response or old setup report to enter Fleet", async ({ page }) => {
+  const mode = await signedOutEntry(page); mode.role = "operator"; mode.context = currentContext(); mode.setupSavedHosts = 99; mode.metadataStatus = 404;
+  mode.deniedBody = { version: 1, serverId: "synthetic", role: "operator", context: currentContext() };
+  await page.goto(`${mode.origin}/connect`); await expect(page.locator("#login-form")).toBeVisible();
+  await expect(page.locator("#message")).toContainText("connection code"); await expect(page).toHaveURL(`${mode.origin}/connect`);
+  expect(mode.requests.some(request => new URL(request.url).pathname === "/" || /\/api\/shared\/(?:setup|devices)$/.test(new URL(request.url).pathname))).toBe(false);
 });

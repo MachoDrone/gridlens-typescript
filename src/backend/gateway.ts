@@ -13,6 +13,7 @@ import { createHash } from "node:crypto";
 import { parseBrowserSecurityStatus, parseBrowserSecurityConnectCode } from "../contracts/browser-security.ts";
 import { parsePublicBrowserCertificates } from "./browser-security.ts";
 import type { BrowserSecurityRead } from "./browser-security.ts";
+import { AppleCertificateProfileError, createAppleCertificateProfile } from "./apple-certificate.ts";
 
 export type GatewayTransport = "https" | "vpn-http";
 export interface BrowserSecurityAssets { html: Buffer; script: Buffer }
@@ -103,6 +104,10 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     },
     async handleRequest(request, response) {
       const url = new URL(request.url ?? "/", "https://gateway.invalid");
+      const rawPath = (request.url ?? "/").split("?", 1)[0]!;
+      if ((rawPath.startsWith("/secure-setup/apple-ca/") || url.pathname.startsWith("/secure-setup/apple-ca/")) && rawPath !== url.pathname) {
+        sendJson(response, 400, { error: "Use the exact Apple certificate link from Secure setup." }); return true;
+      }
       if (url.pathname === "/secure-setup" || url.pathname === "/secure-setup.js" || url.pathname.startsWith("/secure-setup/")) {
         const send = (status: number, contentType: string, body: Buffer, headers: Record<string, string> = {}): void => {
           response.writeHead(status, { "Content-Type": contentType, "Content-Length": body.length, "Cache-Control": "no-store",
@@ -110,6 +115,12 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
           response.end(request.method === "HEAD" ? undefined : body);
         };
         const fail = (status: number): void => send(status, "application/json; charset=utf-8", Buffer.from(JSON.stringify({ error: "Secure browser setup is unavailable. Check the saved installation." })));
+        const appleCertificate = /^\/secure-setup\/apple-ca\/([a-f0-9]{64})\.mobileconfig$/.exec(url.pathname)?.[1];
+        const appleFailure = (code: number, message: string): void => send(code, "text/html; charset=utf-8", Buffer.from(
+          '<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
+          + '<title>GridLens certificate setup</title></head><body><main><h1>Apple certificate setup is unavailable</h1><p>'
+          + message + '</p><p><a href="/secure-setup">Back to Secure</a></p></main></body></html>'),
+        { "Content-Security-Policy": "default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'" });
         const servedOrigin = `${transport === "https" ? "https" : "http"}://${request.headers.host}`;
         const readPublicSecurity = async () => {
           const raw = await call<BrowserSecurityRead>({ operation: "browser-security" });
@@ -156,10 +167,12 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
             html ? { "Content-Security-Policy": "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" } : {});
           return true;
         }
-        if (url.pathname !== "/secure-setup/status.json" && url.pathname !== "/secure-setup/ca.crt") { fail(404); return true; }
-        const expectedCertificate = url.pathname === "/secure-setup/ca.crt" ? request.headers["if-match"] : undefined;
+        if (url.pathname !== "/secure-setup/status.json" && url.pathname !== "/secure-setup/ca.crt" && appleCertificate === undefined) { fail(404); return true; }
+        const expectedCertificate = url.pathname === "/secure-setup/ca.crt" || appleCertificate !== undefined ? request.headers["if-match"] : undefined;
         if (expectedCertificate !== undefined && (typeof expectedCertificate !== "string" || !/^"[a-f0-9]{64}"$/.test(expectedCertificate))) {
-          fail(412); return true;
+          if (appleCertificate !== undefined) appleFailure(412, "This certificate download request is no longer valid. Return to Secure for the current certificate.");
+          else fail(412);
+          return true;
         }
         try {
           const { status, certificatePem } = await readPublicSecurity();
@@ -167,16 +180,40 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
             send(200, "application/json; charset=utf-8", Buffer.from(JSON.stringify({ ...status,
               canConnectBrowser: privateNetwork && status.available && status.status === "ready" }))); return true;
           }
+          if (appleCertificate !== undefined && status.available && appleCertificate !== status.certificateSha256) {
+            appleFailure(412, "The GridLens certificate changed after this link was created. No profile was downloaded. Return to Secure to review the current certificate."); return true;
+          }
           if (expectedCertificate !== undefined && (!status.available || status.trustMode !== "private-ca"
-            || expectedCertificate !== `"${status.certificateSha256}"`)) { fail(412); return true; }
-          if (!status.available || status.trustMode !== "private-ca" || status.status !== "ready") { fail(409); return true; }
+            || expectedCertificate !== `"${status.certificateSha256}"`)) {
+            if (appleCertificate !== undefined) appleFailure(412, "The certificate no longer matches this download request. Return to Secure for the current certificate.");
+            else fail(412);
+            return true;
+          }
+          if (!status.available || status.trustMode !== "private-ca" || status.status !== "ready") {
+            if (appleCertificate !== undefined) appleFailure(409, "This installation does not currently offer a valid GridLens root certificate profile. Return to Secure for its current status and instructions.");
+            else fail(409);
+            return true;
+          }
           const certificates = parsePublicBrowserCertificates(certificatePem);
           if (certificates.some(certificate => !certificate.ca)
             || createHash("sha256").update(certificates[0]!.raw).digest("hex") !== status.certificateSha256) throw new Error("Invalid public CA download.");
+          if (appleCertificate !== undefined) {
+            const profile = createAppleCertificateProfile({ instance: status.instance, certificatePem: certificates.map(cert => cert.toString().trim()).join("\n") + "\n",
+              certificateSha256: appleCertificate });
+            send(200, "application/x-apple-aspen-config", profile,
+              { "Content-Disposition": `attachment; filename="gridlens-${status.instance}-${appleCertificate.slice(0, 8)}-ca.mobileconfig"`, ETag: `"${appleCertificate}"` });
+            return true;
+          }
           send(200, "application/x-x509-ca-cert", Buffer.from(certificates.map(cert => cert.toString().trim()).join("\n") + "\n"),
             { "Content-Disposition": `attachment; filename="gridlens-${status.instance}-${status.certificateSha256.slice(0, 8)}-ca.crt"`,
               ETag: `"${status.certificateSha256}"` });
-        } catch { fail(503); }
+        } catch (error) {
+          if (appleCertificate !== undefined) appleFailure(error instanceof AppleCertificateProfileError && error.kind === "unsupported" ? 409 : 503,
+            error instanceof AppleCertificateProfileError && error.kind === "unsupported"
+              ? "This installation uses a certificate that is not a self-signed root. An Apple root profile is not supported for it. Return to Secure for the available certificate instructions."
+              : "The saved certificate or HTTPS identity could not be verified. No profile was downloaded. Return to Secure and check this installation before trying again.");
+          else fail(503);
+        }
         return true;
       }
       if (updatesEnabled && build && url.pathname === "/health/ready" && ["GET", "HEAD"].includes(request.method ?? "")) {
