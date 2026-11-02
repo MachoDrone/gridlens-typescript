@@ -196,6 +196,13 @@ then sends one empty-body POST to the fixed official payment endpoint. Source
 keys and authorization headers never leave the node. The helper accepts no
 amount, destination, arbitrary URL or transaction instruction and follows no
 redirects. Network time is bounded to 60 seconds; the parent command to 75.
+The payment POST response's `claimableAmount` is an integer count of NOS base
+units. It is distinct from the rewards GET's decimal NOS amount. The helper
+preserves exact numeric lexemes, rejects fractional base units and marks its
+normalized response explicitly as base units; it does not multiply this payment
+amount by 1,000,000 again. This unit contract was established by matching a
+captured production acknowledgment to its exact finalized payout, rather than
+inferring units from the upstream field name or UI label.
 Planned upgrades and rollback give the collection owner up to 90 seconds to
 stop, allowing an already dispatched claim response to be journaled. An idle
 owner exits immediately; gateway and updater stop limits remain unchanged.
@@ -219,6 +226,39 @@ program, six decimals, expected host/ATA and exact credit. Known Transfer and
 TransferChecked layouts and narrowly validated ATA setup are supported; unknown
 layouts remain unverified. This validator does not relax the original transfer's
 exact signed-message checks.
+
+### Recovering a dev.20 receipt amount
+
+Dev.20's initial payment-response parser incorrectly treated the POST amount as
+decimal NOS and scaled it again. The empty-body claim request still paid the
+correct amount, but the recorded expected amount could be a million times too
+large and leave Wallet showing Verifying after the payment completed.
+
+The correction recognizes only unmarked legacy acknowledgments. It first checks
+the recorded amount using the existing exact receipt validator. If that proof
+does not match and the recorded amount divides exactly by 1,000,000, it verifies
+that deterministic candidate against the same finalized transaction. It does
+not choose an amount from a displayed balance or guess from the last reward
+reading. Only a fully verified signature, NOS mint, host owner/ATA, transfer and
+exact balance changes permit correction.
+
+The confirmed amount and an encrypted audit of the original interpretation are
+saved atomically. The operation ID, captured signature, source reservation,
+idempotency information and original 1 NOS transfer remain intact. Marked new
+responses never take this correction path, and already settled legacy records
+are left unchanged. No new claim POST, signing, forwarding or allowance reset
+is involved. Rolling back to dev.20 makes its strict old reader reject the new
+record fields, disabling claims while retaining their history.
+
+The correction candidate passed the pinned `npm run check`: **1,174 Node tests
+and 501 browser tests**. A four-stage isolated Docker test used the actual dev.20
+decoder to create a generated legacy record, corrected it through the candidate's
+production RPC driver and unchanged strict validator, confirmed that dev.20 then
+failed closed without changing ledger rows, and reopened the candidate with the
+same confirmed receipt and spent host. The fixture used disabled networking,
+generated responses and no source wallet keys or real claims; cleanup passed.
+A separately captured finalized payout also passed an offline replay of the
+corrected driver. These checks do not constitute deployment or live UI acceptance.
 
 Wallet keeps a separate Rewards activity section, with the full transaction
 link and payout details after reload/unlock. Reads never refresh the owner

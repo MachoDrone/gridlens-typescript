@@ -18,12 +18,18 @@ export interface ClaimsQuote {
 }
 export interface ClaimsDispatchResult {
   status: "acknowledged" | "rejected" | "uncertain" | "rate-limited" | "authentication-failed"; success: boolean | null;
+  /** Missing only in persisted dev.20 records, never in a new helper response. */
+  amountUnit?: "base-units";
   claimedAmountAtoms?: string; signature?: string; observedAtMs: number; retryAfterSeconds?: number;
 }
 export interface ClaimsReconcileInput { quote: ClaimsQuote; dispatch: ClaimsDispatchResult }
+export interface ClaimsAmountCorrection {
+  kind: "legacy-post-base-units"; originalClaimedAmountAtoms: string; correctedClaimedAmountAtoms: string;
+}
 export interface ClaimsReceipt {
   status: "confirmed" | "failed" | "uncertain"; observedAtMs: number; slot?: number; retryAtMs?: number;
   paidAmountBaseUnits?: string; payoutOwner?: string; payoutTokenAddress?: string; mintAddress?: string;
+  amountCorrection?: ClaimsAmountCorrection;
 }
 export interface ClaimsDriver {
   prepare(context: FleetContext, sourceAddress: string): Promise<ClaimsQuote>;
@@ -43,6 +49,8 @@ interface Stored {
   public: TreasuryClaimOperation; quote: ClaimsQuote; dispatch: ClaimsDispatchResult | null;
   configurationRevision: number; planId: string; reviewDigest: string; requestKeyHash: string;
   reconcileAttempts: number; nextReconcileAtMs: number;
+  /** Encrypted provenance; the original mistaken interpretation is not erased. */
+  amountCorrection?: ClaimsAmountCorrection & { version: 1; factor: "1000000"; signature: string; verifiedSlot: number; verifiedAtMs: number };
 }
 interface Prepared { public: TreasuryClaimPlan; quote: ClaimsQuote; deviceId: string; authorizationId: string; configurationRevision: number }
 export const TREASURY_CLAIMS_LEDGER_KEY = "treasury.claims.v1";
@@ -76,19 +84,38 @@ function publicQuote(quote: ClaimsQuote): TreasuryClaimQuote {
     mintAddress: quote.mintAddress, decimals: 6, amountMode: "full-available", lastReportedAmountBaseUnits: quote.lastReportedAmountBaseUnits,
     checkedAtMs: quote.checkedAtMs, expiresAtMs: quote.expiresAtMs });
 }
-function parseDispatch(value: unknown): ClaimsDispatchResult {
-  fields(value, ["status", "success", "observedAtMs"], ["claimedAmountAtoms", "signature", "retryAfterSeconds"]);
+function parseDispatch(value: unknown, allowLegacy = false): ClaimsDispatchResult {
+  fields(value, ["status", "success", "observedAtMs"], ["amountUnit", "claimedAmountAtoms", "signature", "retryAfterSeconds"]);
   if (!["acknowledged", "rejected", "uncertain", "rate-limited", "authentication-failed"].includes(String(value.status))
     || value.success !== null && typeof value.success !== "boolean" || !time(value.observedAtMs)
+    || (value.amountUnit !== "base-units" && !(allowLegacy && value.amountUnit === undefined))
     || value.claimedAmountAtoms !== undefined && !claimAmount(value.claimedAmountAtoms) || value.signature !== undefined && !claimSignature(value.signature)
     || value.retryAfterSeconds !== undefined && (!time(value.retryAfterSeconds) || value.retryAfterSeconds > 2_147_483_647)) throw new Error("Invalid claim response.");
   return { status: value.status as ClaimsDispatchResult["status"], success: value.success as boolean | null, observedAtMs: value.observedAtMs,
+    ...(value.amountUnit === undefined ? {} : { amountUnit: "base-units" as const }),
     ...(value.claimedAmountAtoms === undefined ? {} : { claimedAmountAtoms: value.claimedAmountAtoms as string }),
     ...(value.signature === undefined ? {} : { signature: value.signature as string }),
     ...(value.retryAfterSeconds === undefined ? {} : { retryAfterSeconds: value.retryAfterSeconds as number }) };
 }
 const verifiable = (response: ClaimsDispatchResult | null): response is ClaimsDispatchResult & { signature: string; claimedAmountAtoms: string } =>
   response !== null && response.status === "acknowledged" && response.success === true && claimSignature(response.signature) && claimAmount(response.claimedAmountAtoms);
+
+function parseAmountCorrection(value: unknown): ClaimsAmountCorrection {
+  fields(value, ["kind", "originalClaimedAmountAtoms", "correctedClaimedAmountAtoms"]);
+  if (value.kind !== "legacy-post-base-units" || !claimAmount(value.originalClaimedAmountAtoms) || !claimAmount(value.correctedClaimedAmountAtoms)
+    || BigInt(value.originalClaimedAmountAtoms) !== BigInt(value.correctedClaimedAmountAtoms) * 1_000_000n) throw new Error("Invalid claim amount correction.");
+  return { kind: "legacy-post-base-units", originalClaimedAmountAtoms: value.originalClaimedAmountAtoms, correctedClaimedAmountAtoms: value.correctedClaimedAmountAtoms };
+}
+function parseCorrectionAudit(value: unknown, operation: TreasuryClaimOperation, response: ClaimsDispatchResult | null): NonNullable<Stored["amountCorrection"]> {
+  fields(value, ["version", "kind", "originalClaimedAmountAtoms", "correctedClaimedAmountAtoms", "factor", "signature", "verifiedSlot", "verifiedAtMs"]);
+  const correction = parseAmountCorrection({ kind: value.kind, originalClaimedAmountAtoms: value.originalClaimedAmountAtoms, correctedClaimedAmountAtoms: value.correctedClaimedAmountAtoms });
+  if (value.version !== 1 || value.factor !== "1000000" || !claimSignature(value.signature) || !time(value.verifiedSlot) || value.verifiedSlot === 0 || !time(value.verifiedAtMs)
+    || !verifiable(response) || response.amountUnit !== "base-units" || value.signature !== response.signature || value.signature !== operation.signature
+    || operation.phase !== "confirmed" || correction.correctedClaimedAmountAtoms !== response.claimedAmountAtoms
+    || correction.correctedClaimedAmountAtoms !== operation.paidAmountBaseUnits || value.verifiedSlot !== operation.slot || value.verifiedAtMs !== operation.confirmedAtMs)
+    throw new Error("Claim amount correction lost its receipt binding.");
+  return { version: 1, ...correction, factor: "1000000", signature: value.signature, verifiedSlot: value.verifiedSlot, verifiedAtMs: value.verifiedAtMs };
+}
 
 /** Separate per-public-host claim allowance. Never modifies treasury.v1 or its
  * original one-NOS transfer receipt, including when owner configuration resets. */
@@ -109,15 +136,16 @@ export function createTreasuryClaims(state: PrivateState, options: {
       const encrypted = state.get<unknown>(recordKey(operationId));
       if (typeof encrypted !== "string" || encrypted.length > 90_000) throw new Error();
       const row = vault.open<unknown>(encrypted, purpose(operationId));
-      fields(row, ["public", "quote", "dispatch", "configurationRevision", "planId", "reviewDigest", "requestKeyHash", "reconcileAttempts", "nextReconcileAtMs"]);
-      const value = parseClaimsOperation(row.public), quote = parseQuote(row.quote), response = row.dispatch === null ? null : parseDispatch(row.dispatch);
+      fields(row, ["public", "quote", "dispatch", "configurationRevision", "planId", "reviewDigest", "requestKeyHash", "reconcileAttempts", "nextReconcileAtMs"], ["amountCorrection"]);
+      const value = parseClaimsOperation(row.public), quote = parseQuote(row.quote), response = row.dispatch === null ? null : parseDispatch(row.dispatch, true);
       if (value.id !== operationId || value.sourceAddress !== quote.sourceAddress || value.payoutTokenAddress !== quote.sourceTokenAddress
         || value.lastReportedAmountBaseUnits !== quote.lastReportedAmountBaseUnits || !time(row.configurationRevision) || !id(row.planId)
         || !hash(row.reviewDigest) || !hash(row.requestKeyHash) || !time(row.reconcileAttempts) || row.reconcileAttempts > 4 || !time(row.nextReconcileAtMs)
         || value.signature !== (response?.signature ?? null) || value.paidAmountBaseUnits !== (response?.claimedAmountAtoms ?? null)
         || ["confirmed", "verifying", "failed"].includes(value.phase) && !verifiable(response)) throw new Error();
       return { public: value, quote, dispatch: response, configurationRevision: row.configurationRevision, planId: row.planId,
-        reviewDigest: row.reviewDigest, requestKeyHash: row.requestKeyHash, reconcileAttempts: row.reconcileAttempts, nextReconcileAtMs: row.nextReconcileAtMs };
+        reviewDigest: row.reviewDigest, requestKeyHash: row.requestKeyHash, reconcileAttempts: row.reconcileAttempts, nextReconcileAtMs: row.nextReconcileAtMs,
+        ...(row.amountCorrection === undefined ? {} : { amountCorrection: parseCorrectionAudit(row.amountCorrection, value, response) }) };
     } catch { broken = true; plans.clear(); return fail(503); }
   }
   function persist(next: Index, row?: Stored): void {
@@ -179,15 +207,35 @@ export function createTreasuryClaims(state: PrivateState, options: {
     catch { receipt = { status: "uncertain", observedAtMs: now() }; }
     const latest = read(operationId);
     let result: "confirmed" | "failed" | "uncertain" = "uncertain";
+    let correction: Stored["amountCorrection"];
     if (receipt && ["confirmed", "failed", "uncertain"].includes(receipt.status) && time(receipt.observedAtMs) && receipt.observedAtMs <= now() + 15_000
       && (receipt.retryAtMs === undefined || time(receipt.retryAtMs))) {
-      if (receipt.status === "confirmed" && time(receipt.slot) && receipt.slot > 0 && receipt.paidAmountBaseUnits === current.dispatch.claimedAmountAtoms
-        && receipt.payoutOwner === current.quote.sourceAddress && receipt.payoutTokenAddress === current.quote.sourceTokenAddress && receipt.mintAddress === NOS_MINT) result = "confirmed";
-      else if (receipt.status === "failed" && time(receipt.slot) && receipt.slot > 0) result = "failed";
+      if (receipt.status === "confirmed" && time(receipt.slot) && receipt.slot > 0
+        && receipt.payoutOwner === current.quote.sourceAddress && receipt.payoutTokenAddress === current.quote.sourceTokenAddress && receipt.mintAddress === NOS_MINT) {
+        if (receipt.amountCorrection === undefined) {
+          if (receipt.paidAmountBaseUnits === current.dispatch.claimedAmountAtoms) result = "confirmed";
+        } else {
+          try {
+            const checked = parseAmountCorrection(receipt.amountCorrection);
+            if (!verifiable(latest.dispatch) || latest.dispatch.amountUnit !== undefined || latest.amountCorrection !== undefined
+              || latest.dispatch.signature !== current.dispatch.signature || checked.originalClaimedAmountAtoms !== latest.dispatch.claimedAmountAtoms
+              || checked.originalClaimedAmountAtoms !== latest.public.paidAmountBaseUnits || checked.correctedClaimedAmountAtoms !== receipt.paidAmountBaseUnits)
+              throw new Error("The legacy receipt correction does not match the retained operation.");
+            correction = { version: 1, ...checked, factor: "1000000", signature: latest.dispatch.signature, verifiedSlot: receipt.slot, verifiedAtMs: receipt.observedAtMs };
+            result = "confirmed";
+          } catch { /* Keep the original captured amount unless every proof binding validates. */ }
+        }
+      } else if (receipt.status === "failed" && receipt.amountCorrection === undefined && time(receipt.slot) && receipt.slot > 0) result = "failed";
     }
-    save({ ...latest, nextReconcileAtMs: result === "uncertain" ? Math.max(latest.nextReconcileAtMs, now() + delay,
+    // One atomic retained-ledger update stores the canonical amount and its
+    // encrypted provenance with the ordinary confirmed transition. No claim
+    // request, reservation, identity, quote or original transfer record changes.
+    save({ ...latest, ...(correction ? { amountCorrection: correction,
+      dispatch: { ...latest.dispatch!, amountUnit: "base-units" as const, claimedAmountAtoms: correction.correctedClaimedAmountAtoms } } : {}),
+      nextReconcileAtMs: result === "uncertain" ? Math.max(latest.nextReconcileAtMs, now() + delay,
       receipt && time(receipt.retryAtMs) ? receipt.retryAtMs : 0) : 0,
       public: { ...latest.public, phase: result === "uncertain" ? "verifying" : result, updatedAtMs: Math.max(now(), latest.public.updatedAtMs),
+        ...(correction ? { paidAmountBaseUnits: correction.correctedClaimedAmountAtoms } : {}),
         confirmedAtMs: result === "confirmed" ? receipt.observedAtMs : null, slot: result !== "uncertain" ? receipt.slot! : null,
         error: result === "confirmed" ? null : result === "failed" ? "The recorded payout transaction failed. This host's claim attempt remains used."
           : "The recorded payout is not finalized and verified yet. No claim request will be repeated." } });

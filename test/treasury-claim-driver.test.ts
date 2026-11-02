@@ -52,6 +52,7 @@ const signature = getBase58Decoder().decode(
 const ack: ClaimsDispatchResult = {
   status: "acknowledged",
   success: true,
+  amountUnit: "base-units",
   claimedAmountAtoms: "2345678",
   signature,
   observedAtMs: base,
@@ -81,6 +82,7 @@ function fixture() {
     identity = host,
     response: ClaimsDispatchResult = ack,
     lost = false;
+  let rawOutput: string | undefined;
   let afterHandoff: (() => void) | undefined,
     onRead: (() => void) | undefined,
     transaction: unknown = null;
@@ -182,7 +184,14 @@ function fixture() {
         if (lost) throw Error("lost helper response");
         return {
           code: 0,
-          stdout: JSON.stringify({ schema: 1, address: host, ...response }),
+          stdout:
+            rawOutput ??
+            JSON.stringify({
+              schema: 2,
+              address: host,
+              amountUnit: "base-units",
+              ...response,
+            }),
         };
       }
       onRead?.();
@@ -214,6 +223,9 @@ function fixture() {
     },
     response: (value: ClaimsDispatchResult) => {
       response = value;
+    },
+    rawOutput: (value: string) => {
+      rawOutput = value;
     },
     reward: (value: Partial<RewardObservation>) => {
       reward = { ...reward, ...value };
@@ -247,10 +259,12 @@ function payout(
     checked = false,
     createAta = false,
     version = 0,
+    amount = ack.claimedAmountAtoms!,
   }: {
     checked?: boolean;
     createAta?: boolean;
     version?: number | "legacy";
+    amount?: string;
   } = {},
 ) {
   const keys = [
@@ -291,13 +305,13 @@ function payout(
         ? {
             mint: NOS_MINT,
             tokenAmount: {
-              amount: ack.claimedAmountAtoms,
+              amount,
               decimals: 6,
-              uiAmount: 2.345678,
-              uiAmountString: "2.345678",
+              uiAmount: Number(amount) / 1_000_000,
+              uiAmountString: (Number(amount) / 1_000_000).toFixed(6),
             },
           }
-        : { amount: ack.claimedAmountAtoms }),
+        : { amount }),
     },
   );
   const ata = parsed(ASSOCIATED_TOKEN_PROGRAM_ADDRESS, "createIdempotent", {
@@ -338,8 +352,12 @@ function payout(
         ...(createAta ? [] : [balance(2, host, "38000000")]),
       ],
       postTokenBalances: [
-        balance(1, funder, "97654322"),
-        balance(2, host, createAta ? "2345678" : "40345678"),
+        balance(1, funder, (100_000_000n - BigInt(amount)).toString()),
+        balance(
+          2,
+          host,
+          (BigInt(amount) + (createAta ? 0n : 38_000_000n)).toString(),
+        ),
       ],
       innerInstructions: createAta
         ? [
@@ -426,6 +444,7 @@ test("verified source gets one fixed helper invocation and ACK survives owner lo
   const result = await f.driver.dispatch(quote, f.guard);
   assert.equal(result.status, "acknowledged");
   assert.equal(result.claimedAmountAtoms, "2345678");
+  assert.equal(result.amountUnit, "base-units");
   assert.equal(f.helperCalls(), 1);
   assert.equal(f.commands.at(-1)!.timeoutMs, 75_000);
   assert(f.commands.at(-1)!.command.includes("/usr/bin/env -i"));
@@ -436,6 +455,24 @@ test("verified source gets one fixed helper invocation and ACK survives owner lo
     ClaimsNotDispatchedError,
   );
   assert.equal(f.helperCalls(), 1);
+});
+test("new helper responses require schema two and the explicit atomic-unit marker", async () => {
+  const unmarked = { ...ack };
+  delete unmarked.amountUnit;
+  for (const result of [
+    { schema: 1, address: host, ...unmarked },
+    { schema: 2, address: host, ...unmarked },
+    { schema: 2, address: host, ...ack, amountUnit: "NOS" },
+  ]) {
+    const f = fixture(),
+      quote = await f.driver.prepare(context, host);
+    f.rawOutput(JSON.stringify(result));
+    const response = await f.driver.dispatch(quote, f.guard);
+    assert.equal(response.status, "uncertain");
+    assert.equal(response.amountUnit, "base-units");
+    assert.equal(response.claimedAmountAtoms, undefined);
+    assert.equal(f.helperCalls(), 1);
+  }
 });
 test("identity, owner or provider eligibility changes stop before the claim helper", async () => {
   for (const kind of ["identity", "owner", "permission", "wait"]) {
@@ -601,4 +638,98 @@ test("driver reconciles only captured ACK signature through shared finalized RPC
     (await verifyClaimReceipt({ quote, dispatch: ack }, failed, base)).status,
     "failed",
   );
+});
+test("legacy normalization correction requires exact finalized proof from the same single receipt read", async () => {
+  const f = fixture(),
+    quote = await f.driver.prepare(context, host);
+  const legacy: ClaimsDispatchResult = {
+    ...ack,
+    claimedAmountAtoms: (
+      BigInt(ack.claimedAmountAtoms!) * 1_000_000n
+    ).toString(),
+  };
+  delete legacy.amountUnit;
+  const original = structuredClone(legacy);
+  f.transaction(payout(quote));
+  const result = await f.driver.reconcile({ quote, dispatch: legacy });
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.paidAmountBaseUnits, ack.claimedAmountAtoms);
+  assert.deepEqual(result.amountCorrection, {
+    kind: "legacy-post-base-units",
+    originalClaimedAmountAtoms: legacy.claimedAmountAtoms,
+    correctedClaimedAmountAtoms: ack.claimedAmountAtoms,
+  });
+  assert.deepEqual(
+    legacy,
+    original,
+    "The driver must not mutate captured audit evidence.",
+  );
+  assert.deepEqual(f.rpcCalls, ["getGenesisHash", "getTransaction"]);
+  assert.equal(f.commands.length, 0);
+  assert.equal(f.helperCalls(), 0);
+});
+test("legacy amounts that already match finalized payment are verified as recorded without conversion", async () => {
+  const f = fixture(),
+    quote = await f.driver.prepare(context, host);
+  const legacy: ClaimsDispatchResult = {
+    ...ack,
+    claimedAmountAtoms: "2000000",
+  };
+  delete legacy.amountUnit;
+  f.transaction(payout(quote, { amount: "2000000" }));
+  const result = await f.driver.reconcile({ quote, dispatch: legacy });
+  assert.equal(result.status, "confirmed");
+  assert.equal(result.paidAmountBaseUnits, "2000000");
+  assert.equal(result.amountCorrection, undefined);
+  assert.deepEqual(f.rpcCalls, ["getGenesisHash", "getTransaction"]);
+});
+test("newly marked amounts, nonintegral legacy reversal and invalid payout proofs never receive a correction", async () => {
+  for (const kind of [
+    "marked",
+    "nonintegral",
+    "recipient",
+    "mint",
+    "amount",
+    "signature",
+    "unfinalized",
+    "failed",
+  ]) {
+    const f = fixture(),
+      quote = await f.driver.prepare(context, host);
+    const captured: ClaimsDispatchResult = {
+      ...ack,
+      claimedAmountAtoms: (
+        BigInt(ack.claimedAmountAtoms!) * 1_000_000n
+      ).toString(),
+    };
+    if (kind !== "marked") delete captured.amountUnit;
+    if (kind === "nonintegral")
+      captured.claimedAmountAtoms = (
+        BigInt(captured.claimedAmountAtoms!) + 1n
+      ).toString();
+    const transaction = payout(quote);
+    if (kind === "recipient")
+      transaction.meta.postTokenBalances[1]!.owner = other;
+    if (kind === "mint") transaction.meta.postTokenBalances[1]!.mint = other;
+    if (kind === "amount")
+      transaction.meta.postTokenBalances[1]!.uiTokenAmount.amount = "40345679";
+    if (kind === "signature")
+      transaction.transaction.signatures[0] = getBase58Decoder().decode(
+        Buffer.alloc(64, 7),
+      );
+    if (kind === "failed")
+      (transaction.meta as { err: unknown }).err = {
+        InstructionError: [1, "failed"],
+      };
+    f.transaction(kind === "unfinalized" ? null : transaction);
+    const result = await f.driver.reconcile({ quote, dispatch: captured });
+    assert.equal(
+      result.status,
+      kind === "failed" ? "failed" : "uncertain",
+      kind,
+    );
+    assert.equal(result.amountCorrection, undefined, kind);
+    assert.deepEqual(f.rpcCalls, ["getGenesisHash", "getTransaction"], kind);
+    assert.equal(f.commands.length, 0);
+  }
 });

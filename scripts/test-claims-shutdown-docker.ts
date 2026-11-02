@@ -55,7 +55,7 @@ async function fixtureRuntime(input: FixtureInput): Promise<void> {
         // at that signal makes the old 30-second stop failure deterministic,
         // independent of log/SSH readiness latency. There is no HTTP request.
         await pendingAck;
-        return { status: "acknowledged", success: true, claimedAmountAtoms: "2000000", signature, observedAtMs: Date.now() };
+        return { status: "acknowledged", success: true, amountUnit: "base-units", claimedAmountAtoms: "2000000", signature, observedAtMs: Date.now() };
       },
       async reconcile(operation) { return { status: "confirmed", observedAtMs: Date.now(), slot: 42, paidAmountBaseUnits: operation.dispatch.claimedAmountAtoms!,
         payoutOwner: source, payoutTokenAddress: account, mintAddress: NOS_MINT }; },

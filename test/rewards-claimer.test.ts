@@ -6,7 +6,7 @@ import { generateKeyPairSync, sign } from "node:crypto";
 import https from "node:https";
 import type { spawnSync } from "node:child_process";
 import { Script } from "node:vm";
-import { base58 } from "../src/backend/rewards-reader.ts";
+import { base58, amountFromResponse } from "../src/backend/rewards-reader.ts";
 import {
   claimMain,
   claimResponse,
@@ -76,7 +76,7 @@ function transport(
               options.body ??
                 JSON.stringify({
                   success: true,
-                  claimableAmount: 0.000001,
+                  claimableAmount: 1,
                   transactionSignature: signature,
                   message: "private provider prose",
                 }),
@@ -119,21 +119,35 @@ function signerFixture() {
   }) as unknown as typeof spawnSync;
   return { spawnSync: child, output, calls: () => calls };
 }
-test("claim response preserves exact positive six-decimal numeric lexemes and only public receipt fields", () => {
+test("POST claim response preserves exact atomic units independently of GET decimal NOS", () => {
   assert.equal(
-    claimResponse('{"success":true,"claimableAmount":9007199254.740991}')
+    claimResponse('{"success":true,"claimableAmount":9007199254740993}')
       .claimedAmountAtoms,
-    "9007199254740991",
+    "9007199254740993",
   );
   assert.equal(
-    claimResponse('{"success":true,"claimableAmount":1.001e-3}')
+    claimResponse('{"success":true,"claimableAmount":1.001e3}')
       .claimedAmountAtoms,
     "1001",
   );
   assert.equal(
-    claimResponse('{"success":true,"claimableAmount":0.000001}')
+    claimResponse('{"success":true,"claimableAmount":1.000}')
       .claimedAmountAtoms,
     "1",
+  );
+  assert.equal(
+    claimResponse('{"success":true,"claimableAmount":18446744073709551615}')
+      .claimedAmountAtoms,
+    "18446744073709551615",
+  );
+  assert.equal(
+    claimResponse('{"success":true,"claimableAmount":1234567}')
+      .claimedAmountAtoms,
+    "1234567",
+  );
+  assert.equal(
+    amountFromResponse('{"claimableUptimeNosRewards":1.234567}'),
+    "1.234567",
   );
   const result = claimResponse(
     JSON.stringify({
@@ -148,7 +162,8 @@ test("claim response preserves exact positive six-decimal numeric lexemes and on
   assert.deepEqual(result, {
     status: "acknowledged",
     success: true,
-    claimedAmountAtoms: "1000000",
+    amountUnit: "base-units",
+    claimedAmountAtoms: "1",
     signature,
   });
   assert.equal(
@@ -159,6 +174,9 @@ test("claim response preserves exact positive six-decimal numeric lexemes and on
     '{"success":true,"claimableAmount":1,"claimableAmount":2}',
     '{"success":true,"claimableAmount":"1"}',
     '{"success":true,"claimableAmount":0.0000001}',
+    '{"success":true,"claimableAmount":1.234567}',
+    '{"success":true,"claimableAmount":1e-6}',
+    '{"success":true,"claimableAmount":18446744073709551616}',
     '{"success":true,"claimableAmount":-1}',
     '{"success":true,"success":false}',
     '{"success":true,"transactionSignature":"bad"}',
@@ -211,7 +229,8 @@ test("one fixed HTTPS empty-body POST keeps authorization inside the helper and 
     Authorization: authorization,
   });
   assert.deepEqual(result, {
-    schema: 1,
+    schema: 2,
+    amountUnit: "base-units",
     address: owner,
     status: "acknowledged",
     success: true,
@@ -260,7 +279,8 @@ test("an API-echoed authentication signature never leaves the source helper as a
     monotonic: () => 0,
   });
   assert.deepEqual(result, {
-    schema: 1,
+    schema: 2,
+    amountUnit: "base-units",
     address: owner,
     status: "uncertain",
     success: null,
@@ -286,6 +306,7 @@ test("rate limits carry bounded Retry-After without leaking response messages or
   assert.deepEqual(result, {
     status: "rate-limited",
     success: null,
+    amountUnit: "base-units",
     observedAtMs: now,
     retryAfterSeconds: 180,
   });
@@ -398,6 +419,8 @@ test("standalone generated helper executes without app imports and exports only 
   assert.equal(network.requests.length, 1);
   const parsed = JSON.parse(output);
   assert.equal(parsed.status, "acknowledged");
+  assert.equal(parsed.schema, 2);
+  assert.equal(parsed.amountUnit, "base-units");
   assert.equal(parsed.claimedAmountAtoms, "1");
   assert(!output.includes(authorization));
   assert(!output.includes("private provider prose"));

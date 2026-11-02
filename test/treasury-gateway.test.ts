@@ -80,7 +80,7 @@ async function fixture(t: TestContext, claimsEnabled = false, markerBroken = fal
     async dispatch(_quote, authorize) {
       authorize(); claimCalls.dispatch++;
       if (uncertainClaim) throw new Error("Synthetic lost claim response");
-      return { status: "acknowledged", success: true, observedAtMs: Date.now(), claimedAmountAtoms: "43500000",
+      return { status: "acknowledged", success: true, amountUnit: "base-units", observedAtMs: Date.now(), claimedAmountAtoms: "43500000",
         signature: getBase58Decoder().decode(new Uint8Array(64).fill(claimCalls.dispatch)) };
     },
     async reconcile({ quote, dispatch }) {

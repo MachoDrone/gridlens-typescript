@@ -13,7 +13,6 @@ import {
   sign,
   signerSource,
   retryAfter,
-  exactAmount,
 } from "./rewards-reader.ts";
 import type { ClaimsDispatchResult } from "./treasury-claims.ts";
 
@@ -23,7 +22,8 @@ const ENV = Object.freeze({ PATH: "/usr/local/bin:/usr/bin:/bin", LANG: "C" });
 const MAX_RETRY_SECONDS = 2147483647;
 const MAX_CLAIM_RESPONSE_BYTES = 16_384;
 export interface ClaimHelperResult extends ClaimsDispatchResult {
-  schema: 1;
+  schema: 2;
+  amountUnit: "base-units";
   address: string;
 }
 export interface ClaimHelperDeps {
@@ -46,13 +46,36 @@ export function isClaimSignature(value: unknown): value is string {
   }
   return size + (value.match(/^1*/)?.[0].length ?? 0) === 64;
 }
+/** POST /nodes/payment reports atomic units. This is deliberately separate
+ * from the GET rewards reader, which reports decimal NOS. Parse the original
+ * numeric token without IEEE-754 rounding and never infer a different unit. */
+export function claimAtomicAmount(token: unknown): string {
+  if (typeof token !== "string" || token.length > 128) throw Error();
+  const match = /^(0|[1-9]\d*)(?:\.(\d+))?(?:[eE]([+-]?\d+))?$/.exec(token);
+  if (!match) throw Error();
+  const exponent = Number(match[3] ?? 0);
+  if (!Number.isSafeInteger(exponent) || Math.abs(exponent) > 100)
+    throw Error();
+  const fraction = match[2] ?? "";
+  let amount = BigInt(match[1]! + fraction);
+  const scale = fraction.length - exponent;
+  if (scale > 0) {
+    const divisor = 10n ** BigInt(scale);
+    if (amount % divisor !== 0n) throw Error();
+    amount /= divisor;
+  } else {
+    amount *= 10n ** BigInt(-scale);
+  }
+  if (amount > 18_446_744_073_709_551_615n) throw Error();
+  return amount.toString();
+}
 /** Preserve numeric lexemes and reject duplicate top-level fields. Never retain
  * the upstream message, raw response, or arbitrary additional fields. */
 export function claimResponse(
   raw: string,
 ): Pick<
   ClaimsDispatchResult,
-  "status" | "success" | "claimedAmountAtoms" | "signature"
+  "status" | "success" | "claimedAmountAtoms" | "signature" | "amountUnit"
 > {
   if (Buffer.byteLength(raw) > MAX_CLAIM_RESPONSE_BYTES) throw Error();
   const value: unknown = JSON.parse(raw);
@@ -116,10 +139,8 @@ export function claimResponse(
   }
   let claimedAmountAtoms: string | undefined;
   if (tokens.has("claimableAmount")) {
-    const amount = exactAmount(tokens.get("claimableAmount")),
-      [whole, fraction] = amount.split(".");
-    const atoms = BigInt(whole!) * 1_000_000n + BigInt(fraction!);
-    if (atoms > 0n) claimedAmountAtoms = atoms.toString();
+    const amount = claimAtomicAmount(tokens.get("claimableAmount"));
+    if (amount !== "0") claimedAmountAtoms = amount;
   }
   if (
     parsed.transactionSignature !== undefined &&
@@ -129,6 +150,7 @@ export function claimResponse(
   return {
     status: parsed.success ? "acknowledged" : "rejected",
     success: parsed.success,
+    amountUnit: "base-units",
     ...(claimedAmountAtoms === undefined ? {} : { claimedAmountAtoms }),
     ...(typeof parsed.transactionSignature === "string"
       ? { signature: parsed.transactionSignature }
@@ -149,6 +171,7 @@ export function createClaimRequest(deps: ClaimHelperDeps = {}) {
     const uncertain = (): ClaimsDispatchResult => ({
       status: "uncertain",
       success: null,
+      amountUnit: "base-units",
       observedAtMs: now(),
     });
     if (used) return Promise.resolve(uncertain());
@@ -257,7 +280,8 @@ export async function claimMain(
     monotonic = deps.monotonic ?? (() => performance.now()),
     owner = argv[1];
   const result: ClaimHelperResult = {
-    schema: 1,
+    schema: 2,
+    amountUnit: "base-units",
     address: ownerValid(owner) ? owner : "",
     status: "uncertain",
     success: null,
@@ -303,7 +327,8 @@ export async function claimMain(
     )
       throw Error();
     return {
-      schema: 1,
+      schema: 2,
+      amountUnit: "base-units",
       address: owner,
       ...(await createClaimRequest(deps)(authorization, monotonic() + 60_000)),
     };
@@ -342,7 +367,7 @@ export function rewardsClaimerSource(): string {
       sign,
       signerSource,
       retryAfter,
-      exactAmount,
+      claimAtomicAmount,
       isClaimSignature,
       claimResponse,
       createClaimRequest,

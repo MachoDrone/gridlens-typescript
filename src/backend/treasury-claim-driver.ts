@@ -8,6 +8,7 @@ import { SolanaRpcError } from "../../scripts/solana-rpc.ts";
 import type { SolanaRpc } from "../../scripts/solana-rpc.ts";
 import type { FleetContext } from "../contracts/fleet.ts";
 import type { PcAssociation } from "../contracts/shared.ts";
+import { claimAmount } from "../contracts/treasury-claims.ts";
 import { NOS_MINT } from "../fleet/nos.ts";
 import { parseReward, sameBinding } from "../fleet/pc-observations.ts";
 import type { RewardObservation } from "../fleet/pc-observations.ts";
@@ -86,12 +87,14 @@ function normalizedResult(
           "status",
           "success",
           "claimedAmountAtoms",
+          "amountUnit",
           "signature",
           "observedAtMs",
           "retryAfterSeconds",
         ].includes(key),
     ) ||
-    value.schema !== 1 ||
+    value.schema !== 2 ||
+    value.amountUnit !== "base-units" ||
     value.address !== owner ||
     ![
       "acknowledged",
@@ -110,9 +113,7 @@ function normalizedResult(
     Number(value.observedAtMs) < 0 ||
     Number(value.observedAtMs) > 8_640_000_000_000_000 ||
     (value.claimedAmountAtoms !== undefined &&
-      (typeof value.claimedAmountAtoms !== "string" ||
-        !/^[1-9]\d{0,18}$/.test(value.claimedAmountAtoms) ||
-        BigInt(value.claimedAmountAtoms) > 9_223_372_036_854_775_807n)) ||
+      !claimAmount(value.claimedAmountAtoms)) ||
     (value.signature !== undefined && !isClaimSignature(value.signature)) ||
     (value.retryAfterSeconds !== undefined &&
       (!Number.isSafeInteger(value.retryAfterSeconds) ||
@@ -123,6 +124,7 @@ function normalizedResult(
   return {
     status: value.status as ClaimsDispatchResult["status"],
     success: value.success as boolean | null,
+    amountUnit: "base-units",
     observedAtMs: now,
     ...(typeof value.claimedAmountAtoms === "string"
       ? { claimedAmountAtoms: value.claimedAmountAtoms }
@@ -350,6 +352,7 @@ export function createTreasuryClaimDriver(
       const uncertain = (): ClaimsDispatchResult => ({
         status: "uncertain",
         success: null,
+        amountUnit: "base-units",
         observedAtMs: now(),
       });
       try {
@@ -429,8 +432,9 @@ export function createTreasuryClaimDriver(
         input.dispatch.status !== "acknowledged" ||
         input.dispatch.success !== true ||
         !isClaimSignature(input.dispatch.signature) ||
-        typeof input.dispatch.claimedAmountAtoms !== "string" ||
-        !/^[1-9]\d{0,18}$/.test(input.dispatch.claimedAmountAtoms)
+        !claimAmount(input.dispatch.claimedAmountAtoms) ||
+        (input.dispatch.amountUnit !== undefined &&
+          input.dispatch.amountUnit !== "base-units")
       )
         return uncertain;
       const provider = receiptSession.eligible();
@@ -461,7 +465,47 @@ export function createTreasuryClaimDriver(
           signal,
           deadline,
         );
-        const receipt = await verifyClaimReceipt(input, result, now());
+        const observedAtMs = now();
+        const receipt = await verifyClaimReceipt(input, result, observedAtMs);
+        // Records made by the old helper have no amount-unit marker. Preserve
+        // their captured value unless that exact value fails strict proof and
+        // reversing the known million-fold normalization passes the SAME strict
+        // validator against this SAME finalized response. This never retries a
+        // claim or weakens the destination, mint, instruction or delta checks.
+        if (
+          receipt.status === "uncertain" &&
+          input.dispatch.amountUnit === undefined
+        ) {
+          const original = BigInt(input.dispatch.claimedAmountAtoms);
+          if (original % 1_000_000n === 0n && original / 1_000_000n > 0n) {
+            const correctedClaimedAmountAtoms = (
+              original / 1_000_000n
+            ).toString();
+            const corrected = await verifyClaimReceipt(
+              {
+                quote: input.quote,
+                dispatch: {
+                  ...input.dispatch,
+                  amountUnit: "base-units",
+                  claimedAmountAtoms: correctedClaimedAmountAtoms,
+                },
+              },
+              result,
+              observedAtMs,
+            );
+            if (corrected.status === "confirmed") {
+              receiptSession.success(provider, healthVersion);
+              return {
+                ...corrected,
+                amountCorrection: {
+                  kind: "legacy-post-base-units",
+                  originalClaimedAmountAtoms: input.dispatch.claimedAmountAtoms,
+                  correctedClaimedAmountAtoms,
+                },
+              };
+            }
+          }
+        }
         receiptSession.success(provider, healthVersion);
         return receipt;
       } catch (error) {

@@ -7,7 +7,7 @@ import { address } from "@solana/kit";
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
 import { NOS_MINT } from "../src/fleet/nos.ts";
 import { createTreasuryClaims, ClaimsNotDispatchedError, TREASURY_CLAIMS_LEDGER_KEY } from "../src/backend/treasury-claims.ts";
-import type { ClaimsAuthorization, ClaimsDriver, ClaimsQuote, ClaimsDispatchResult, ClaimsReceipt } from "../src/backend/treasury-claims.ts";
+import type { ClaimsAuthorization, ClaimsDriver, ClaimsQuote, ClaimsDispatchResult, ClaimsReceipt, ClaimsAmountCorrection } from "../src/backend/treasury-claims.ts";
 import { openTreasuryVault } from "../src/backend/treasury-vault.ts";
 import type { PrivateState } from "../src/backend/access.ts";
 import type { TreasuryClaimPlan, TreasuryClaimOperation } from "../src/contracts/treasury-claims.ts";
@@ -19,6 +19,11 @@ import { initializeClaimsMarker } from "../src/backend/treasury-claims-marker.ts
 
 const sourceA = "1".repeat(31) + "2", sourceB = "1".repeat(31) + "3", serverId = "generated-server";
 const denied = (status: number) => (error: unknown) => error instanceof SharedHttpError && error.status === status;
+interface TestStored {
+  public: TreasuryClaimOperation; quote: ClaimsQuote; dispatch: ClaimsDispatchResult | null;
+  configurationRevision: number; planId: string; reviewDigest: string; requestKeyHash: string; reconcileAttempts: number; nextReconcileAtMs: number;
+  amountCorrection?: ClaimsAmountCorrection & { version: 1; factor: "1000000"; signature: string; verifiedSlot: number; verifiedAtMs: number };
+}
 function deferred() { let release!: () => void; const promise = new Promise<void>(resolve => { release = resolve; }); return { promise, release }; }
 async function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-claims-")); chmodSync(directory, 0o700);
@@ -62,7 +67,7 @@ async function fixture() {
       calls.helper++;
       if (reply) await reply.promise;
       if (lost) throw new Error("Synthetic helper reply lost after possible payment.");
-      const response: ClaimsDispatchResult = { status: "acknowledged", success: true, claimedAmountAtoms: "2500000", signature: "2".repeat(88), observedAtMs: at };
+      const response: ClaimsDispatchResult = { status: "acknowledged", success: true, amountUnit: "base-units", claimedAmountAtoms: "2500000", signature: "2".repeat(88), observedAtMs: at };
       return (responseChange?.(response) ?? response) as ClaimsDispatchResult;
     },
     async reconcile(operation) {
@@ -96,6 +101,8 @@ async function fixture() {
     receiptFields(change: (value: ClaimsReceipt) => ClaimsReceipt) { receiptChange = change; }, loseReply() { lost = true; },
     blockBeforeHelper() { prelaunch = deferred(); return prelaunch.release; }, blockReply() { reply = deferred(); return reply.release; },
     failBatch(predicate: (entries: readonly (readonly [string, unknown])[]) => boolean) { batchFailure = predicate; },
+    stored(operationId: string): TestStored { return vault.open<TestStored>(values.get(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`) as string, `${serverId}:claims-v1:${operationId}`); },
+    replaceStored(operationId: string, row: TestStored) { values.set(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`, vault.seal(row, `${serverId}:claims-v1:${operationId}`)); },
     async restart(fromDispatchSnapshot = false) {
       await engine.close(); if (fromDispatchSnapshot) { assert(dispatchSnapshot); values.clear(); for (const [key, value] of dispatchSnapshot) values.set(key, structuredClone(value)); }
       engine = make();
@@ -119,6 +126,135 @@ test("full reward claim verifies host payout, preserves original NOS pilot and p
     assert.equal(f.calls.helper, 2); assert.deepEqual(f.values.get("treasury.v1"), f.oldTransfer);
     assert.deepEqual((await f.status()).attemptedHosts, [sourceA, sourceB]);
   } finally { await f.close(); }
+});
+
+/** Construct a legacy encrypted record, not a new unmarked helper response.
+ * The latter must fail closed under the corrected wire protocol. */
+async function legacyPending(f: Awaited<ReturnType<typeof fixture>>, amount = "2500000000000") {
+  f.receipt("uncertain"); const accepted = await f.confirm(await f.prepare()); await f.engine.waitForIdle();
+  const row = f.stored(accepted.operation.id); assert(row.dispatch);
+  delete row.dispatch.amountUnit; row.dispatch.claimedAmountAtoms = amount; row.public.paidAmountBaseUnits = amount;
+  f.replaceStored(accepted.operation.id, row); await f.restart();
+  return { operationId: accepted.operation.id, before: f.stored(accepted.operation.id) };
+}
+const correctedReceipt = (original = "2500000000000", corrected = "2500000") => (receipt: ClaimsReceipt): ClaimsReceipt => ({
+  ...receipt, paidAmountBaseUnits: corrected, amountCorrection: { kind: "legacy-post-base-units", originalClaimedAmountAtoms: original, correctedClaimedAmountAtoms: corrected },
+});
+
+test("legacy amount correction atomically retains provenance and confirms only the recorded signature without another claim", async () => {
+  const f = await fixture();
+  try {
+    const { operationId, before } = await legacyPending(f), oldIndex = structuredClone(f.values.get(TREASURY_CLAIMS_LEDGER_KEY)) as { entries: unknown[] };
+    const oldTransfer = structuredClone(f.values.get("treasury.v1"));
+    f.receipt("confirmed"); f.receiptFields(correctedReceipt()); f.advance(15_000); await f.engine.reconcilePending();
+    const after = f.stored(operationId); assert.equal(after.public.phase, "confirmed");
+    assert.equal(after.dispatch?.claimedAmountAtoms, "2500000"); assert.equal(after.dispatch?.amountUnit, "base-units");
+    assert.equal(after.public.paidAmountBaseUnits, "2500000"); assert.equal(after.public.signature, before.public.signature);
+    assert.deepEqual(after.amountCorrection, { version: 1, kind: "legacy-post-base-units", originalClaimedAmountAtoms: "2500000000000",
+      correctedClaimedAmountAtoms: "2500000", factor: "1000000", signature: "2".repeat(88), verifiedSlot: 42, verifiedAtMs: after.public.confirmedAtMs });
+    for (const field of ["quote", "configurationRevision", "planId", "reviewDigest", "requestKeyHash"] as const) assert.deepEqual(after[field], before[field]);
+    assert.equal(after.reconcileAttempts, before.reconcileAttempts + 1); assert.equal(after.public.id, operationId);
+    assert.deepEqual((f.values.get(TREASURY_CLAIMS_LEDGER_KEY) as { entries: unknown[] }).entries, oldIndex.entries);
+    assert.deepEqual(f.values.get("treasury.v1"), oldTransfer); assert.equal(f.calls.dispatch, 1); assert.equal(f.calls.helper, 1);
+    const saved = f.values.get(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`);
+    assert.equal(String(saved).includes("2500000000000"), false, "correction provenance remains encrypted");
+    await f.restart(); await f.engine.reconcilePending(); assert.equal(f.values.get(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`), saved);
+    assert.equal((await f.status()).unresolvedOperationId, null); await assert.rejects(f.prepare(sourceA), denied(409));
+    assert.equal(f.calls.helper, 1); assert.equal(f.calls.reconcile, 2);
+  } finally { await f.close(); }
+});
+
+test("new unmarked helper results cannot masquerade as legacy stored acknowledgments", async () => {
+  const f = await fixture();
+  try {
+    f.response(({ amountUnit: _unit, ...response }) => response);
+    const accepted = await f.confirm(await f.prepare()); await f.engine.waitForIdle();
+    const stored = f.stored(accepted.operation.id); assert.equal(stored.public.phase, "needs-verification"); assert.equal(stored.dispatch, null);
+    assert.equal(f.calls.helper, 1); assert.equal(f.calls.reconcile, 0); await f.restart(); await f.engine.reconcilePending();
+    assert.equal(f.calls.helper, 1); await assert.rejects(f.prepare(sourceB), denied(409));
+  } finally { await f.close(); }
+});
+
+test("marked base-unit records never accept a legacy scaling correction", async () => {
+  const f = await fixture();
+  try {
+    f.receipt("uncertain"); f.response(response => ({ ...response, claimedAmountAtoms: "2500000000000" }));
+    const accepted = await f.confirm(await f.prepare()); await f.engine.waitForIdle();
+    f.receipt("confirmed"); f.receiptFields(correctedReceipt()); f.advance(15_000); await f.engine.reconcilePending();
+    const row = f.stored(accepted.operation.id); assert.equal(row.public.phase, "verifying"); assert.equal(row.amountCorrection, undefined);
+    assert.equal(row.dispatch?.amountUnit, "base-units"); assert.equal(row.public.paidAmountBaseUnits, "2500000000000");
+    assert.equal(f.calls.helper, 1); await assert.rejects(f.prepare(sourceB), denied(409));
+  } finally { await f.close(); }
+});
+
+test("legacy correction rejects altered metadata, wrong payout proofs and nonintegral scaling", async () => {
+  const mutations: ((receipt: ClaimsReceipt) => ClaimsReceipt)[] = [
+    receipt => ({ ...receipt, amountCorrection: { ...receipt.amountCorrection!, originalClaimedAmountAtoms: "2500000000001" } }),
+    receipt => ({ ...receipt, amountCorrection: { ...receipt.amountCorrection!, correctedClaimedAmountAtoms: "2500001" } }),
+    receipt => ({ ...receipt, amountCorrection: { ...receipt.amountCorrection!, kind: "unknown" as never } }),
+    receipt => ({ ...receipt, amountCorrection: { ...receipt.amountCorrection!, extra: "upstream text" } as ClaimsAmountCorrection }),
+    receipt => ({ ...receipt, paidAmountBaseUnits: "2500001" }),
+    receipt => ({ ...receipt, payoutOwner: sourceB }),
+    receipt => ({ ...receipt, payoutTokenAddress: sourceB }),
+    receipt => ({ ...receipt, mintAddress: sourceB }),
+    receipt => ({ ...receipt, slot: 0 }),
+    receipt => ({ ...receipt, observedAtMs: 8_640_000_000_000_000 }),
+  ];
+  for (const mutate of mutations) {
+    const f = await fixture();
+    try {
+      const { operationId, before } = await legacyPending(f);
+      f.receipt("confirmed"); f.receiptFields(receipt => mutate(correctedReceipt()(receipt))); f.advance(15_000); await f.engine.reconcilePending();
+      const after = f.stored(operationId); assert.equal(after.public.phase, "verifying"); assert.equal(after.amountCorrection, undefined);
+      assert.deepEqual(after.dispatch, before.dispatch); assert.equal(after.public.paidAmountBaseUnits, before.public.paidAmountBaseUnits);
+      assert.equal((await f.status()).unresolvedOperationId, operationId); assert.equal(f.calls.helper, 1);
+    } finally { await f.close(); }
+  }
+});
+
+test("legacy as-recorded confirmation needs no unit correction and settled legacy history is never rewritten", async () => {
+  const f = await fixture();
+  try {
+    const { operationId } = await legacyPending(f, "2500000");
+    f.receipt("confirmed"); f.advance(15_000); await f.engine.reconcilePending();
+    const row = f.stored(operationId); assert.equal(row.public.phase, "confirmed"); assert.equal(row.dispatch?.amountUnit, undefined); assert.equal(row.amountCorrection, undefined);
+    const encrypted = f.values.get(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`);
+    await f.restart(); await f.engine.reconcilePending();
+    assert.equal(f.values.get(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`), encrypted); assert.equal(f.calls.reconcile, 2); assert.equal(f.calls.helper, 1);
+  } finally { await f.close(); }
+});
+
+test("migration write failure leaves the original amount and unresolved reservation intact until atomic recovery", async () => {
+  const f = await fixture();
+  try {
+    const { operationId, before } = await legacyPending(f); f.receipt("confirmed"); f.receiptFields(correctedReceipt());
+    f.failBatch(entries => entries.some(([key, value]) => key.endsWith('/'+operationId)
+      && f.vault.open<TestStored>(value as string, `${serverId}:claims-v1:${operationId}`).amountCorrection !== undefined));
+    f.advance(15_000); await assert.rejects(f.engine.reconcilePending(), denied(503));
+    assert.equal((await f.status()).state, "recovery-required");
+    const retained = f.stored(operationId); assert.deepEqual(retained.dispatch, before.dispatch); assert.equal(retained.amountCorrection, undefined);
+    assert.equal(retained.public.paidAmountBaseUnits, before.public.paidAmountBaseUnits);
+    assert.equal((f.values.get(TREASURY_CLAIMS_LEDGER_KEY) as { unresolvedId: string }).unresolvedId, operationId);
+    f.failBatch(() => false); await f.restart(); f.advance(30_000); await f.engine.reconcilePending();
+    assert.equal(f.stored(operationId).public.phase, "confirmed"); assert.equal(f.calls.helper, 1); assert.equal(f.calls.dispatch, 1);
+    assert.deepEqual(f.values.get("treasury.v1"), f.oldTransfer);
+  } finally { await f.close(); }
+});
+
+test("tampered retained correction provenance fails closed without rearming a host", async () => {
+  for (const field of ["signature", "factor", "originalClaimedAmountAtoms", "verifiedSlot", "verifiedAtMs"] as const) {
+    const f = await fixture();
+    try {
+      const { operationId } = await legacyPending(f); f.receipt("confirmed"); f.receiptFields(correctedReceipt()); f.advance(15_000); await f.engine.reconcilePending();
+      const row = f.stored(operationId); assert(row.amountCorrection);
+      if (field === "signature") row.amountCorrection.signature = "3".repeat(88);
+      else if (field === "factor") row.amountCorrection.factor = "1000" as never;
+      else if (field === "originalClaimedAmountAtoms") row.amountCorrection.originalClaimedAmountAtoms = "1";
+      else row.amountCorrection[field]++;
+      f.replaceStored(operationId, row); await f.restart(); assert.equal((await f.status()).state, "recovery-required");
+      await assert.rejects(f.prepare(), denied(503)); assert.equal(f.calls.helper, 1); assert.deepEqual(f.values.get("treasury.v1"), f.oldTransfer);
+    } finally { await f.close(); }
+  }
 });
 
 test("missing signature, malformed response, rejection and lost reply block all later claims without replay", async () => {
