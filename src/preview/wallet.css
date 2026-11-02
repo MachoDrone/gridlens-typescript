@@ -43,6 +43,10 @@ dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 .operation h3 { margin: 0; font-size: 16px; }
 .operation p { margin: 6px 0; }
 .operation a { overflow-wrap: anywhere; }
+.claim-review { margin-top: 20px; padding: 16px; border: 1px solid #65748b; border-radius: 8px; }
+.claim-review h3, .claim-history > h3 { color: #44dd83; font-size: 18px; margin: 0 0 12px; }
+.claim-history { margin-top: 24px; border-top: 1px solid #354357; padding-top: 20px; }
+#claims-status { overflow-wrap: anywhere; }
 :focus-visible { outline: 3px solid #75bbff; outline-offset: 3px; }
 [hidden] { display: none !important; }
 @media (max-width: 440px) { body { padding: 12px; } section { padding: 14px; } h1 { font-size: 24px; } header nav { gap: 8px; } .actions > * { flex: 1; } }

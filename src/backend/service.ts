@@ -18,6 +18,9 @@ import { createHash } from "node:crypto";
 import { createTreasury } from "./treasury.ts";
 import type { TreasuryDriver } from "./treasury.ts";
 import type { TreasuryVault } from "./treasury-vault.ts";
+import { createTreasuryClaims } from "./treasury-claims.ts";
+import type { ClaimsDriver } from "./treasury-claims.ts";
+import { REWARD_AMOUNT, sameBinding } from "../fleet/pc-observations.ts";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
   now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates, treasury: treasuryOptions, treasuryUnavailable = false,
@@ -25,7 +28,9 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
   providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer;
   build?: UpdateBuild; updates?: (body: Record<string, unknown>) => Promise<unknown>;
   treasuryUnavailable?: boolean;
-  treasury?: { vault: TreasuryVault; driver: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => TreasuryDriver } } = {}) {
+  treasury?: { vault: TreasuryVault; driver: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => TreasuryDriver;
+    claims?: { driver: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => ClaimsDriver;
+      initialize: (serverId: string) => boolean } } } = {}) {
   const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
   const browserSecurity = createBrowserSecurity(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
@@ -36,7 +41,34 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       if (!status.available || status.status !== "ready") throw new SharedHttpError(503);
       return { httpsOrigin: status.httpsOrigin, serverCertificateSha256: status.serverCertificateSha256 };
     }, hosts: context => observations.read(context).associations.map(row => ({ address: row.address, label: row.name })) }) : undefined;
-  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : []), ...(wallet ? ["treasury-v1"] : [])];
+  let claims: ReturnType<typeof createTreasuryClaims> | undefined;
+  if (wallet && treasuryOptions?.claims) {
+    // A missing/corrupt initialization witness disables claims alone. Never
+    // reinterpret recovery as a fresh allowance or disturb the original pilot.
+    try {
+      const initialize = treasuryOptions.claims.initialize(access.serverId);
+      claims = createTreasuryClaims(state, { serverId: access.serverId, vault: treasuryOptions.vault,
+        driver: treasuryOptions.claims.driver(access, observations), authorizeOperation: wallet.authorizeOperation, initialize, now,
+        hosts(context) {
+          const data = observations.read(context), at = now();
+          return data.associations.filter(row => {
+            const permission = state.get<PcPermission>(`permission:${context.scopeId}:${row.binding.pcId}`);
+            const observed = data.observations.find(item => item.address === row.address), reward = observed?.rewards;
+            const denial = state.get<{ approvedAtMs: number }>(`monitor:reward-denial:${context.scopeId}:${row.binding.pcId}:${row.address}`);
+            return permission?.version === 1 && permission.rewards && !permission.paused && permission.revokedAtMs === null
+              && permission.rosterRevision === context.rosterRevision && permission.computer.id === row.binding.pcId
+              && (!denial || denial.approvedAtMs < permission.approvedAtMs)
+              && permission.computer.fingerprint === row.sshFingerprint
+              && permission.associations.some(item => item.address === row.address && item.sshFingerprint === row.sshFingerprint && sameBinding(item.binding, row.binding))
+              && observed && sameBinding(observed.binding, row.binding) && reward?.status === "ok" && reward.address === row.address
+              && at >= reward.observedAtMs && at < reward.observedAtMs + 300_000 && typeof reward.amount === "string"
+              && REWARD_AMOUNT.test(reward.amount) && BigInt(reward.amount.replace(".", "")) > 0n;
+          }).map(row => ({ address: row.address, label: row.name }));
+        } });
+    } catch { /* Retained state recovery does not disable Fleet or the Wallet owner. */ }
+  }
+  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : []),
+    ...(wallet ? ["treasury-v1"] : []), ...(claims ? ["treasury-claims-pilot-v1"] : [])];
   function browserSecurityBinding() {
     const { status } = browserSecurity.read();
     if (!status.available || status.status !== "ready" || status.httpOrigin === null) throw new SharedHttpError(409);
@@ -223,7 +255,14 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
         serverId: access.serverId, scopeId: principal.context.scopeId, revision: 0 };
     }
     if (!wallet) throw new SharedHttpError(503);
+    if (typeof body.operation === "string" && body.operation.startsWith("claims-")) {
+      if (claims) return claims.dispatch(body);
+      wallet.authorizeOperation(body).guard();
+      if (body.operation !== "claims-status") throw new SharedHttpError(503);
+      if (Object.keys(body).some(key => !["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"].includes(key))) throw new SharedHttpError(400);
+      return { version: 1, supported: false, state: "recovery-required", unresolvedOperationId: null, attemptedHosts: [], eligibleHosts: [] };
+    }
     return wallet.dispatch(body);
   }
-  return { read, control, treasury, wallet, access, observations, setup };
+  return { read, control, treasury, wallet, claims, access, observations, setup };
 }

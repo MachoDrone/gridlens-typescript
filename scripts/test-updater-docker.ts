@@ -12,6 +12,7 @@ import type { Browser } from "@playwright/test";
 import { Coordinator } from "../src/installer/coordinator.ts";
 import { parseBrowserSecurityStatus } from "../src/contracts/browser-security.ts";
 import { parseTreasuryConfiguration, parseTreasuryStatus, parseTreasuryUnlock } from "../src/contracts/treasury.ts";
+import { parseClaimsStatus } from "../src/contracts/treasury-claims.ts";
 import { verifyGateway } from "../src/installer/health.ts";
 import { privateAddress } from "../src/installer/config.ts";
 import { ensureVpnWeb } from "../src/installer/vpn-web.ts";
@@ -349,20 +350,27 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     // fixture. No source hosts, source keys or transfer requests are introduced.
     let walletPassword: string | undefined, walletUnlock: string | undefined;
     const walletDestination = "1".repeat(31) + "9";
-    interface WalletStateProof { keyDigest: string; configurationDigest: string; verifierDigest: string; keyMatchesLedger: boolean; consumed: boolean; noOperation: boolean }
+    const targetStatus = await call(web.origin, "/api/shared/status");
+    const claimsSupported = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("treasury-claims-pilot-v1");
+    interface WalletStateProof { keyDigest: string; configurationDigest: string; verifierDigest: string; keyMatchesLedger: boolean; consumed: boolean; noOperation: boolean;
+      claimLedgerDigest: string | null; claimMarkerDigest: string | null }
     const walletStateProof = (): WalletStateProof => {
       const result = checked(runner, ["exec", resourceName(instance, "owner"), "node", "--input-type=module", "-e",
-        'import{readFileSync}from"node:fs";import{createHash}from"node:crypto";import{DatabaseSync}from"node:sqlite";'
+        'import{readFileSync,existsSync}from"node:fs";import{createHash}from"node:crypto";import{DatabaseSync}from"node:sqlite";'
         + 'const hash=value=>createHash("sha256").update(value).digest("hex"),key=readFileSync("/credentials/treasury-key-v1");'
         + 'if(key.length!==32)throw Error("Fixture Wallet key has an invalid size");const keyDigest=hash(key);key.fill(0);'
         + 'const db=new DatabaseSync("/ledger/ledger.sqlite",{readOnly:true});try{const row=db.prepare("SELECT value FROM private_state WHERE key = ?").get("treasury.v1");'
         + 'if(!row||typeof row.value!=="string")throw Error("Fixture Wallet state is unavailable");const value=JSON.parse(row.value);'
         + 'if(!value.owner||typeof value.configuration!=="string")throw Error("Fixture Wallet was not configured");'
-        + 'process.stdout.write(JSON.stringify({keyDigest,configurationDigest:hash(value.configuration),verifierDigest:hash(JSON.stringify(value.owner)),keyMatchesLedger:keyDigest===value.keyId,consumed:value.consumed,noOperation:value.operation===null}));}finally{db.close();}'
+        + 'const claims=db.prepare("SELECT value FROM private_state WHERE key = ?").get("treasury.claims.v1"),marker="/credentials/treasury-claims-v1.marker";'
+        + 'process.stdout.write(JSON.stringify({keyDigest,configurationDigest:hash(value.configuration),verifierDigest:hash(JSON.stringify(value.owner)),keyMatchesLedger:keyDigest===value.keyId,consumed:value.consumed,noOperation:value.operation===null,'
+        + 'claimLedgerDigest:claims?hash(claims.value):null,claimMarkerDigest:existsSync(marker)?hash(readFileSync(marker)):null}));}finally{db.close();}'
       ]);
       const proof = JSON.parse(result) as WalletStateProof;
       assert.ok([proof.keyDigest, proof.configurationDigest, proof.verifierDigest].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)), "Invalid fixture Wallet state proof");
       assert.ok(proof.keyMatchesLedger && proof.consumed === false && proof.noOperation === true, "The empty fixture unexpectedly consumed its Wallet pilot");
+      if (claimsSupported) assert.ok([proof.claimLedgerDigest, proof.claimMarkerDigest].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)),
+        "Fixture claims require both retained initialization records");
       return proof;
     };
     const walletCall = (path: string, body?: unknown, unlockToken?: string) => {
@@ -371,8 +379,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         { cookie: browserCookie, ...(body === undefined ? {} : { body }), ...(unlockToken ? { unlockToken } : {}) });
     };
     const checkWalletHttpDenied = async (): Promise<void> => {
-      for (const path of ["status", "setup", "unlock", "prepare", "confirm", "operations"]) {
-        const body = ["status", "operations"].includes(path) ? undefined : JSON.stringify({ version: 1 });
+      for (const path of ["status", "setup", "unlock", "prepare", "confirm", "operations", "claims/status", "claims/operations", "claims/prepare", "claims/confirm"]) {
+        const body = ["status", "operations", "claims/status", "claims/operations"].includes(path) ? undefined : JSON.stringify({ version: 1 });
         const response = await fetch(new URL(`/api/shared/treasury/${path}`, web.origin), { method: body === undefined ? "GET" : "POST",
           headers: { Origin: web.origin, "X-Forwarded-Proto": "https", ...(body ? { "Content-Type": "application/json" } : {}) },
           ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(8000) });
@@ -398,6 +406,12 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         "Fixture Wallet setup returned an unexpected fleet or receiving address");
       initialWalletProof = walletStateProof();
       const activity = await walletCall("operations", undefined, walletUnlock); assert.equal(activity.status, 200); assert.deepEqual(activity.value.operations, []);
+      if (claimsSupported) {
+        const status = await walletCall("claims/status", undefined, walletUnlock); assert.equal(status.status, 200);
+        const claims = parseClaimsStatus(status.value); assert.equal(claims.state, "ready"); assert.deepEqual(claims.eligibleHosts, []);
+        const history = await walletCall("claims/operations", undefined, walletUnlock); assert.equal(history.status, 200); assert.deepEqual(history.value.operations, []);
+        evidence.claimsAfterUpgrade = { retainedInitializationEstablished: true, httpsOwnerStatusVerified: true, emptyFleet: true, claimsRequested: 0 };
+      }
       evidence.walletAfterUpgrade = { sourceCapability: (previous ?? base).treasury ? 1 : 0, targetCapability: 1,
         minimumCoordinator: target.release.minimumCoordinator, socketIsolation: "owner and HTTPS gateway only; absent from HTTP gateway and updater",
         httpsCertificateValidated: true, httpFinancialRequestsDenied: true, terminalSetupAndOwnerPasswordVerified: true,
@@ -429,6 +443,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       assert.ok(after.keyDigest === initialWalletProof.keyDigest, "Rollback changed the fixture Wallet encryption key");
       assert.ok(after.configurationDigest === initialWalletProof.configurationDigest, "Rollback changed the encrypted fixture Wallet configuration");
       assert.ok(after.verifierDigest === initialWalletProof.verifierDigest, "Rollback changed the fixture Wallet password verifier");
+      assert.equal(after.claimLedgerDigest, initialWalletProof.claimLedgerDigest, "Rollback changed the fixture claim ledger");
+      assert.equal(after.claimMarkerDigest, initialWalletProof.claimMarkerDigest, "Rollback changed the fixture claim initialization marker");
       assert.equal((await walletCall("configuration", undefined, walletUnlock)).status, 401, "Old Wallet unlock unexpectedly survived owner replacement");
       const reopened = await walletCall("unlock", { version: 1, password: walletPassword }); assert.equal(reopened.status, 200);
       walletPassword = undefined; const unlocked = parseTreasuryUnlock(reopened.value); walletUnlock = unlocked.unlockToken;
@@ -437,6 +453,10 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       assert.ok(restoredConfiguration.destinationAddress === walletDestination && restoredConfiguration.hosts.length === 0 && !restoredConfiguration.pilotConsumed,
         "Fixture Wallet configuration was not retained through rollback");
       const activity = await walletCall("operations", undefined, walletUnlock); assert.equal(activity.status, 200); assert.deepEqual(activity.value.operations, []);
+      if (claimsSupported) {
+        const status = await walletCall("claims/status", undefined, walletUnlock); assert.equal(status.status, 200); assert.equal(parseClaimsStatus(status.value).state, "ready");
+        evidence.claimsAfterRollback = { ledgerAndMarkerPreserved: true, httpsOwnerStatusVerified: true, claimsRequested: 0 };
+      }
       assert.equal((await walletCall("lock", { version: 1 }, walletUnlock)).status, 200); walletUnlock = undefined;
       evidence.walletAfterRollback = { socketIsolationPreserved: true, httpFinancialRequestsDenied: true, httpsCertificateValidated: true,
         encryptionKeyPreserved: true, encryptedConfigurationPreserved: true, passwordVerifierPreserved: true,

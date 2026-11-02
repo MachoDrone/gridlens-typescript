@@ -13,6 +13,7 @@ export const BROWSER_ASSETS = {
   "/contracts/updates.js": ["contracts/updates.js", "text/javascript; charset=utf-8"],
   "/contracts/browser-security.js": ["contracts/browser-security.js", "text/javascript; charset=utf-8"],
   "/contracts/treasury.js": ["contracts/treasury.js", "text/javascript; charset=utf-8"],
+  "/contracts/treasury-claims.js": ["contracts/treasury-claims.js", "text/javascript; charset=utf-8"],
   "/preview/wallet.js": ["preview/wallet.js", "text/javascript; charset=utf-8"],
   "/wallet.css": ["wallet.css", "text/css; charset=utf-8"],
   "/preview/secure-setup.js": ["preview/secure-setup.js", "text/javascript; charset=utf-8"],

@@ -27,7 +27,8 @@ async function fixture(page: Page): Promise<Fixture> {
   const configuration = (): TreasuryConfiguration => ({ version: 1, revision: 1, destinationAddress: state.destination,
     hosts: [{ address: SOURCE, label: "Synthetic host" }], amountBaseUnits: "1000000", reserveLamports: "50000000", maxCostLamports: "5000000", pilotConsumed: state.consumed });
   const assets: Record<string, string> = { "/wallet": "wallet.html", "/wallet.css": "wallet.css", "/preview/wallet.js": "preview/wallet.js",
-    "/contracts/treasury.js": "contracts/treasury.js", "/fleet/host-metadata.js": "fleet/host-metadata.js" };
+    "/contracts/treasury.js": "contracts/treasury.js", "/contracts/treasury-claims.js": "contracts/treasury-claims.js",
+    "/fleet/nos.js": "fleet/nos.js", "/fleet/sol.js": "fleet/sol.js", "/fleet/host-metadata.js": "fleet/host-metadata.js" };
   await page.route("**/*", async route => {
     const request = route.request(), url = new URL(request.url());
     if (![ORIGIN, ORIGIN.replace("https:", "http:")].includes(url.origin)) throw new Error(`Unexpected external request: ${url.origin}`);
@@ -50,6 +51,8 @@ async function fixture(page: Page): Promise<Fixture> {
       await send({ version: 1, unlockToken: TOKEN, expiresAtMs: Date.now() + 300_000, configuration: configuration() }); return;
     }
     if (token !== TOKEN) { await send({ version: 1, error: "denied" }, 403); return; }
+    if (path === "/claims/status") { await send({ version: 1, supported: true, state: "ready", unresolvedOperationId: null, attemptedHosts: [], eligibleHosts: [] }); return; }
+    if (path === "/claims/operations") { await send({ version: 1, operations: [], total: 0 }); return; }
     if (path === "/lock") { state.lockCalls++; await send({ version: 1, locked: true }); return; }
     if (path === "/configuration") {
       if (request.method() === "POST") { state.destination = String(body?.destinationAddress); await send({ version: 1, locked: true }); }

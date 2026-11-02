@@ -324,7 +324,7 @@ test("preflight failure contract permits only finite codes and scheduler eligibi
   for (const code of TREASURY_PREFLIGHT_CODES) {
     const result = parseTreasuryPreflightFailure({ version: 1, kind: "preflight-failure", code });
     assert.equal(result.code, code);
-    assert.equal(treasuryPreflightStatus(code), code === "budget-wait" ? 429 : ["provider-unavailable", "preflight-unavailable"].includes(code) ? 503 : 409);
+    assert.equal(treasuryPreflightStatus(code), code === "budget-wait" ? 429 : ["provider-unavailable", "preflight-unavailable", "rewards-unavailable"].includes(code) ? 503 : 409);
   }
   for (const code of ["budget-wait", "provider-unavailable"]) assert.equal(parseTreasuryPreflightFailure({ version: 1, kind: "preflight-failure", code,
     retryAtMs: 1_800_000_060_000 }).retryAtMs, 1_800_000_060_000);
@@ -423,4 +423,47 @@ test("missing or corrupt retained ledger cannot silently create a new owner or p
     assert.equal((await f.request("status") as { state: string }).state, "recovery-required");
     assert.equal(f.calls.sign, 0);
   } finally { await f.close(); }
+});
+
+test("claim authorization works after the consumed NOS pilot without changing its receipt or allowance", async () => {
+  const f = fixture();
+  try {
+    const unlock = await f.setup(), plan = await f.prepare(unlock);
+    await f.confirm(unlock, plan); await f.treasury.waitForIdle();
+    const before = structuredClone(f.values.get(TREASURY_LEDGER_KEY));
+    const input = { token: f.operator.token, unlockToken: unlock.unlockToken, ...security };
+    const auth = f.treasury.authorizeOperation(input);
+    assert.equal(auth.deviceId, f.operator.deviceId);
+    assert.deepEqual(auth.context, f.context);
+    assert.notEqual(auth.authorizationId, unlock.unlockToken);
+    // The bridge captures immutable authorization inputs, not its caller's object.
+    input.token = "mutated"; input.unlockToken = "mutated";
+    auth.guard(); auth.touch();
+    assert.deepEqual(f.values.get(TREASURY_LEDGER_KEY), before);
+    await f.request("lock", { unlockToken: unlock.unlockToken });
+    assert.throws(auth.guard, denied(401));
+    const reopened = await f.request("unlock", { password }) as TreasuryUnlock;
+    assert.notEqual(f.treasury.authorizeOperation({ token: f.operator.token, unlockToken: reopened.unlockToken, ...security }).authorizationId,
+      auth.authorizationId);
+    assert.throws(auth.guard, denied(401));
+  } finally { await f.close(); }
+});
+
+test("claim owner bridge revalidates TLS identity, access, expiry and terminal recovery", async () => {
+  for (const change of ["tls", "revoke", "expiry", "reset"] as const) {
+    const f = fixture();
+    try {
+      const unlock = await f.setup();
+      const auth = f.treasury.authorizeOperation({ token: f.operator.token, unlockToken: unlock.unlockToken, ...security });
+      assert.throws(() => f.treasury.authorizeOperation({ token: f.operator.token, unlockToken: unlock.unlockToken,
+        ...security, httpsOrigin: "http://192.168.42.10:8789" }), denied(403));
+      if (change === "tls") f.changeTlsIdentity();
+      if (change === "revoke") f.access.revoke(f.employee.token, f.operator.deviceId);
+      if (change === "expiry") f.advance(300_001);
+      if (change === "reset") f.treasury.control({ operation: "treasury-reset", scopeId: "main" });
+      assert.throws(auth.guard, error => error instanceof SharedHttpError);
+      assert.throws(auth.touch, error => error instanceof SharedHttpError);
+      assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+    } finally { await f.close(); }
+  }
 });

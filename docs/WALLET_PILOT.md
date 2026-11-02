@@ -1,8 +1,9 @@
-# Wallet: controlled 1 NOS pilot
+# Wallet: controlled NOS transfer and rewards pilots
 
-This candidate adds owner-controlled Wallet setup and a single NOS transfer. It
-does not establish publication, live enablement or a completed transfer. Rewards
-monitoring stays read-only; reward claims and combined collection remain later work.
+Wallet provides owner-controlled setup and the original single NOS transfer.
+The separate rewards pilot below adds one reviewed full-rewards claim per host.
+Source implementation does not establish publication or live claim acceptance.
+Combined collection and forwarding rewards remain later work.
 
 ## Operator flow
 
@@ -35,9 +36,10 @@ RPC capacity and expired reviews block signing. Staked NOS is untouched.
 Confirmation reserves the installation's entire **1 NOS total** pilot allowance.
 The application stops after this operation. Even an unsuccessful or uncertain
 attempt stays locked for review; settings changes, password recovery, restart
-and rollback cannot create another allowance. The specific source and receiving
+and rollback cannot create another transfer allowance. The specific source and receiving
 address must be reviewed before the live test. Repeated transfers, sweeping and
-reward claims require later work.
+combined forwarding require later work. The separate rewards pilot does not reset
+this transfer allowance.
 
 ## Authority and transaction boundary
 
@@ -140,7 +142,7 @@ keys, isolated stores and injected providers, never existing node keys or live
 transactions. Physical browser checks, publication, migration and the reviewed
 live receipt remain separate from automated implementation checks.
 
-## Candidate verification — November 2, 2026
+## Original transfer candidate verification — November 2, 2026
 
 The final pinned-toolchain `npm run check` passed: 1,106 Node tests and 473
 browser tests. Coverage includes real CA-validated loopback TLS and the dedicated
@@ -167,3 +169,92 @@ the exact published setup/upgrade commands during the compatibility-first rollou
 before advancing the live runtime. Physical browser review and the explicitly
 reviewed one-host/one-wallet 1 NOS receipt are still pending. No existing wallet
 key was accessed and no live transfer or reward claim was made during this work.
+
+## Rewards claim pilot — implementation candidate
+
+The operator subsequently verified the original 1 NOS transfer and manually
+observed that a Nosana uptime claim pays the entire available amount into the
+claiming host's standard NOS associated token account. The new Wallet flow uses
+that fixed payout behavior. It does not send rewards to Wallet's separate
+receiving/consolidation address, and does not offer a partial 1 NOS claim.
+
+Unlock the saved HTTPS Wallet, choose one host with current positive rewards,
+and review **Claim ALL available rewards**. The review shows the host, its payout
+owner and token account, the last reported amount and its time. Nosana determines
+the final amount; it can differ from the review. Confirmation authorizes only
+this host. After a finalized verified receipt, a different host can be selected
+for a demonstration. Each public host has one attempt in this initial rollout,
+and only one unresolved claim is allowed across the installation. Even a known
+pre-dispatch cancellation conservatively retains that host's attempt.
+
+No extension or web-wallet switching is involved. The owner revalidates the
+approved PC, pinned SSH identity, exact running node container, active rewards
+permission, provider waits and a current reward observation (at most five
+minutes old). It does not substitute a retained amount after a failed read.
+The helper signs the public address for Nosana authorization inside that node,
+then sends one empty-body POST to the fixed official payment endpoint. Source
+keys and authorization headers never leave the node. The helper accepts no
+amount, destination, arbitrary URL or transaction instruction and follows no
+redirects. Network time is bounded to 60 seconds; the parent command to 75.
+Planned upgrades and rollback give the collection owner up to 90 seconds to
+stop, allowing an already dispatched claim response to be journaled. An idle
+owner exits immediately; gateway and updater stop limits remain unchanged.
+Power loss or forced termination can still leave a claim needing verification.
+
+`treasury.claims.v1` and its encrypted per-operation records are separate from
+`treasury.v1`, in the retained safety ledger. A private initialization marker in
+the existing credential volume binds the journal to the installation and its
+encryption identity. Missing/corrupt records or marker disable claims while
+preserving the original Wallet. Owner reset, restart and paired rollback never
+replenish claim attempts. The journal records intent before dispatch; the
+already dispatched response is retained even if the browser locks or closes.
+
+No automatic claim retries occur. Lost responses, missing signatures, rejected
+or malformed responses, and interrupted dispatches remain **Needs verification**.
+They block another claim because a payment may already have occurred. An API
+success alone is not a receipt. Read-only reconciliation uses the captured
+signature and exact reported amount through the existing shared RPC budget.
+Finalized legacy/v0 transactions must prove the official NOS mint, classic Token
+program, six decimals, expected host/ATA and exact credit. Known Transfer and
+TransferChecked layouts and narrowly validated ATA setup are supported; unknown
+layouts remain unverified. This validator does not relax the original transfer's
+exact signed-message checks.
+
+Wallet keeps a separate Rewards activity section, with the full transaction
+link and payout details after reload/unlock. Reads never refresh the owner
+inactivity deadline or submit claims. The HTTPS-only API adds
+`claims/status`, `claims/prepare`, `claims/confirm`, `claims/operations` and
+`claims/operations/:id` under `/api/shared/treasury/`. POSTs retain the versioned
+body, exact origin and separate owner unlock. Reviews bind the exact unlock
+session, owner/configuration revision, fleet and source identities. The ordinary
+read socket has no claim authority.
+
+Implementation tests use generated fixtures and injected providers. Live host
+selection, full-amount confirmation, publication and installation remain separate
+from those checks; no live claim is part of implementation verification.
+
+### Rewards candidate verification — November 2, 2026
+
+The final pinned-toolchain `npm run check` passed: **1,163 Node tests and 501
+browser tests**. Generated fixtures cover the HTTPS financial socket, owner
+session changes, both sequential host claims, exact payout verification, lost
+acknowledgments, clock changes, duplicate confirmation, retained SQLite history
+and the existing NOS transfer. A malformed API response that reflects the
+authentication signature is withheld inside the source helper; it cannot become
+a public transaction link or leave that container.
+
+Isolated Docker acceptance passed from dev.19 to the candidate through the actual
+worker, including worker replacement, browser return and recovery from an
+intentionally failing update. Wallet ownership, its encryption identity, the
+claim initialization marker and ledger survived rollback. HTTP financial access
+remained blocked. These upgrade fixtures used an empty fleet and requested zero
+financial operations.
+
+A separate network-disabled Docker fixture exercised the real claims engine
+and SQLite with a generated acknowledgment arriving 35 seconds after SIGTERM.
+The owner exited cleanly, preserved the acknowledgment and reconciled its recorded
+signature after restart without repeating the synthetic claim. Idle shutdown
+took about 0.4 seconds; the 90-second limit is a maximum grace period. All fixture
+containers and volumes were cleaned up. These results do not establish live
+Nosana claim acceptance or publication; existing source wallet keys were not
+accessed and no real funds were moved during implementation verification.

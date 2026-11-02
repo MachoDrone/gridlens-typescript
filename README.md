@@ -12,8 +12,11 @@ The live preview uses public Nosana/node APIs and Solana RPC without wallet keys
 The [Wallet pilot candidate](docs/WALLET_PILOT.md) adds a separate password-protected
 owner and one receiving public wallet address. Setup and financial actions require
 the saved HTTPS connection. The first milestone permits one reviewed **1 NOS total**
-transfer from one host, verifies its receipt, then stops. Rewards claiming remains
-unavailable. Compatibility-first installer/updater rollout is required; source
+transfer from one host, verifies its receipt, then stops. The separate rewards
+pilot claims **all available uptime rewards** for one reviewed host into that
+host's wallet, with a persistent verified receipt and no forwarding. One unresolved
+claim blocks further claims; after confirmation a different host can be tested.
+Compatibility-first installer/updater rollout is required; source
 implementation does not establish publication, live enablement or a transfer.
 
 A separate [shared backend candidate](docs/SHARED_BACKEND.md) adds durable SQLite

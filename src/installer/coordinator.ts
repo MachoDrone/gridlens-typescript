@@ -11,6 +11,8 @@ import { readVpnWebEndpoint } from "./vpn-web.ts";
 export const UPDATER_PROTOCOL_LABEL = "io.gridlens.updater-protocol";
 export const BROWSER_SECURITY_PROTOCOL_LABEL = "io.gridlens.browser-security-protocol";
 export const TREASURY_PROTOCOL_LABEL = "io.gridlens.treasury-protocol";
+/** Let a dispatched claim's bounded 75-second helper return and journal its ACK. */
+export const OWNER_STOP_GRACE_SECONDS = 90;
 export interface BrowserSecurityPublication {
   version: 1; instance: string; httpsOrigin: string; httpOrigin: string | null;
   certificatePem: string; serverCertificatePem: string; serverCertificateSha256: string;
@@ -123,7 +125,7 @@ export class Coordinator {
     for (const role of ["gateway", "owner"]) {
       const name = resourceName(instance, role);
       if (!inspectOwned(this.runner, "container", name, instance)) continue;
-      checked(this.runner, ["stop", "--time", "30", name]);
+      checked(this.runner, ["stop", "--time", role === "owner" ? String(OWNER_STOP_GRACE_SECONDS) : "30", name]);
       checked(this.runner, ["rm", name]);
     }
   }

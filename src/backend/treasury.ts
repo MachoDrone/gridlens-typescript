@@ -33,6 +33,17 @@ export interface TreasuryAccess {
   requireAccess(token: unknown, role?: "operator" | "viewer"): DeviceAccess;
   fleet(scopeId: string): FleetContext;
 }
+/** Internal, memory-only authority shared by distinct financial workflows.
+ * No password, bearer token, verifier or receiving-wallet configuration leaves
+ * this owner component through the authorization result. */
+export interface TreasuryOwnerAuthorization {
+  context: FleetContext;
+  deviceId: string;
+  configurationRevision: number;
+  authorizationId: string;
+  guard(): void;
+  touch(): void;
+}
 interface PasswordVerifier { salt: string; hash: string }
 interface Ticket { hash: string; scopeId: string; binding: string; expiresAtMs: number }
 interface Ledger {
@@ -180,6 +191,25 @@ export function createTreasury(state: PrivateState, options: {
       || session.rosterRevision !== principal.context.rosterRevision || session.revision !== saved.revision || session.expiresAtMs <= now()
       || session.expiresAtMs > now() + WINDOW || session.binding !== binding().hash) fail(401);
     return { principal, unlock: session };
+  }
+  function authorizeOperation(body: Record<string, unknown>): TreasuryOwnerAuthorization {
+    // Capture primitives, never a mutable request object supplied by another
+    // workflow. The financial socket's trusted TLS facts remain mandatory.
+    const input = { token: body.token, unlockToken: body.unlockToken,
+      httpsOrigin: body.httpsOrigin, serverCertificateSha256: body.serverCertificateSha256 };
+    const expected = binding();
+    if (input.httpsOrigin !== expected.value.httpsOrigin || input.serverCertificateSha256 !== expected.value.serverCertificateSha256) fail(403);
+    const initial = requireUnlock(input), context = structuredClone(initial.principal.context);
+    const configurationRevision = available().revision, authorizationId = initial.unlock.hash, deviceId = initial.principal.deviceId;
+    const guard = (): void => {
+      if (binding().hash !== expected.hash) fail(403);
+      const current = requireUnlock(input);
+      if (current.principal.deviceId !== deviceId || current.unlock.hash !== authorizationId
+        || available().revision !== configurationRevision || current.principal.context.scopeId !== context.scopeId
+        || current.principal.context.rosterRevision !== context.rosterRevision) fail(409);
+    };
+    return { context, deviceId, configurationRevision, authorizationId, guard,
+      touch() { guard(); initial.unlock.expiresAtMs = now() + WINDOW; } };
   }
   function configuration(principal: DeviceAccess): TreasuryConfiguration {
     const saved = available(), rows = options.hosts?.(principal.context) ?? principal.context.addresses.map(address => ({ address, label: address }));
@@ -430,7 +460,7 @@ export function createTreasury(state: PrivateState, options: {
       await reconcileOne(current.public.id);
     } finally { reconciling = false; }
   }
-  return { dispatch, control, reconcilePending,
+  return { dispatch, control, reconcilePending, authorizeOperation,
     async waitForIdle() { await Promise.allSettled([...pending]); },
     async close() { closed = true; clearAuthority(); await Promise.allSettled([...pending]); },
   };

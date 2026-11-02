@@ -7,11 +7,20 @@ Wallet pilot requirement — November 2, 2026:
   alone grant no financial ownership. Keep the financial socket away from HTTP.
 - Reserve exactly 1 NOS total for one reviewed source and receiving wallet, then
   stop. Reset, settings changes, restart and rollback cannot replenish the pilot.
-  Rewards claiming stays disabled. Tests use generated keys and isolated stores.
+  The separate rewards pilot may claim all available uptime rewards for one
+  reviewed host into that host's standard NOS token account. Never forward in
+  this milestone. Keep one unresolved claim globally and one submitted attempt
+  per public host; a confirmed first host permits a different host for the demo.
+  Tests use generated keys and isolated stores. Live claims require explicit
+  owner review and confirmation in the saved HTTPS Wallet.
 - Sign only inside the exact approved source container with independently
   validated instructions. Never export existing node keys. Journal the signed
   transaction before submission; never automatically re-sign or resend it.
-- Start from published dev.16 commit `191bc6d`, preserving the original workspace.
+- The rewards pilot starts from published dev.19 commit `386b658`, preserving the original workspace.
+  Preserve the completed transfer pilot, owner configuration and TLS identities.
+  Keep the encrypted claim journal separate and outside rollbackable snapshots;
+  record dispatch intent before the single fixed claim POST. Never retry a claim
+  automatically. Lost/ambiguous responses block further claims until verified.
   Publish compatible coordinator/updater support before enabling protocol 1
   Wallet images. Existing review/publication approval requirements still apply.
 

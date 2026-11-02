@@ -20,6 +20,13 @@ import { TREASURY_PREFLIGHT_CODES, parseTreasuryConfiguration, parseTreasuryOper
 import type { BrowserSecurityPublication } from "../src/contracts/browser-security.ts";
 import { startFleetServer } from "../src/server/application.ts";
 import { NOS_MINT } from "../src/fleet/nos.ts";
+import { address as solanaAddress, getBase58Decoder } from "@solana/kit";
+import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from "@solana-program/token";
+import type { ClaimsDriver } from "../src/backend/treasury-claims.ts";
+import { TREASURY_LEDGER_KEY } from "../src/backend/treasury.ts";
+import { initializeClaimsMarker } from "../src/backend/treasury-claims-marker.ts";
+import { parseClaimsPlan, parseClaimsOperation, parseClaimsStatus } from "../src/contracts/treasury-claims.ts";
+import type { PcPermission } from "../src/backend/pc-monitor.ts";
 
 const address = (last: string) => "1".repeat(31) + last;
 const SOURCE = address("2"), DESTINATION = address("3"), PASSWORD = "isolated owner Wallet password";
@@ -28,7 +35,7 @@ interface Reply { code: number; text: string; headers: IncomingHttpHeaders }
 
 /** Actual CA-validated loopback TLS and Unix sockets, with a transaction driver
  * that only returns synthetic values and never contacts a provider or wallet. */
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, claimsEnabled = false, markerBroken = false) {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-wallet-gateway-"));
   const run = (args: string[]) => execFileSync("openssl", args, { cwd: directory, stdio: "ignore" });
   run(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.crt", "-days", "3",
@@ -59,14 +66,56 @@ async function fixture(t: TestContext) {
     async submit() { calls.submit++; },
     async reconcile() { calls.reconcile++; return { status: "confirmed", observedAtMs: Date.now(), slot: 42 }; },
   };
-  const service = createSharedService(state, { treasury: { vault, driver: () => driver } });
+  const claimCalls = { prepare: 0, dispatch: 0, reconcile: 0 };
+  let uncertainClaim = false;
+  const claimDriver: ClaimsDriver = {
+    assertReady() { if (admissionFailure !== undefined) throw admissionFailure; },
+    async prepare(context, sourceAddress) {
+      claimCalls.prepare++; if (prepareFailure !== undefined) throw prepareFailure;
+      const [sourceTokenAddress] = await findAssociatedTokenPda({ owner: solanaAddress(sourceAddress), mint: solanaAddress(NOS_MINT), tokenProgram: TOKEN_PROGRAM_ADDRESS });
+      return { scopeId: context.scopeId, rosterRevision: context.rosterRevision, sourceAddress, sourceTokenAddress, mintAddress: NOS_MINT, decimals: 6,
+        lastReportedAmountBaseUnits: "42500000", checkedAtMs: Date.now(), expiresAtMs: Date.now() + 60_000,
+        sourceBinding: { pcId: "a".repeat(64), nodeId: "b".repeat(64), containerId: "c".repeat(64), sshIdentity: `SHA256:${"d".repeat(43)}` } };
+    },
+    async dispatch(_quote, authorize) {
+      authorize(); claimCalls.dispatch++;
+      if (uncertainClaim) throw new Error("Synthetic lost claim response");
+      return { status: "acknowledged", success: true, observedAtMs: Date.now(), claimedAmountAtoms: "43500000",
+        signature: getBase58Decoder().decode(new Uint8Array(64).fill(claimCalls.dispatch)) };
+    },
+    async reconcile({ quote, dispatch }) {
+      claimCalls.reconcile++;
+      return { status: "confirmed", observedAtMs: Date.now(), slot: 123, paidAmountBaseUnits: dispatch.claimedAmountAtoms!,
+        payoutOwner: quote.sourceAddress, payoutTokenAddress: quote.sourceTokenAddress, mintAddress: NOS_MINT };
+    },
+  };
+  const service = createSharedService(state, { treasury: { vault, driver: () => driver, ...(claimsEnabled ? { claims: {
+    driver: () => claimDriver, initialize(serverId: string) {
+      if (markerBroken) throw new Error("Synthetic missing initialization witness");
+      return initializeClaimsMarker(directory, serverId, vault.keyId, false);
+    },
+  } } : {}) } });
   const servers: Server[] = [];
   t.after(async () => {
     for (const server of servers.reverse()) await stop(server);
-    await service.wallet?.close(); await service.setup.close(); vault.close(); await state.close(); rmSync(directory, { recursive: true, force: true });
+    await service.wallet?.close(); await service.claims?.close(); await service.setup.close(); vault.close(); await state.close(); rmSync(directory, { recursive: true, force: true });
   });
   const grant = randomBytes(32).toString("base64url");
-  service.access.setFleet("default", [SOURCE]); service.access.registerGateway("default", grant);
+  const context = service.access.setFleet("default", claimsEnabled ? [SOURCE, address("9")] : [SOURCE]); service.access.registerGateway("default", grant);
+  if (claimsEnabled) {
+    const associations = context.addresses.map(host => ({ address: host, name: "Generated host", sshFingerprint: `SHA256:${"d".repeat(43)}`,
+      verifiedAtMs: Date.now(), privateIp: "192.168.42.10", gpuUuids: [], binding: { pcId: "a".repeat(64), runtime: "docker" as const,
+        wrapperId: null, nodeContainerId: "c".repeat(64) } }));
+    service.observations.associate(context, associations);
+    // Only the permission fields exercised by the service host list are needed;
+    // the injected fixture driver never connects or reads credentials.
+    const permission: PcPermission = { version: 1, computer: { id: "a".repeat(64), fingerprint: `SHA256:${"d".repeat(43)}`,
+      host: "192.168.42.10", port: 22, name: "Generated PC", hostKey: "generated-unused-public-host-key" }, associations,
+      rosterRevision: context.rosterRevision, rewards: true, automaticIp: false, gpu: false, paused: false, revokedAtMs: null, approvedAtMs: Date.now() };
+    state.set(`permission:default:${"a".repeat(64)}`, permission);
+    for (const row of associations) service.observations.ingest(context, { address: row.address, binding: row.binding,
+      rewards: { schema: 1, address: row.address, observedAtMs: Date.now(), status: "ok", amount: "42.500000" } });
+  }
   const operator = service.access.pair(service.access.createCode("default", "operator").code, "Synthetic independent operator");
   await service.control({ operation: "browser-security-publish", ...publication });
   const readSocket = join(directory, "read.sock"), treasurySocket = join(directory, "treasury.sock"), controlSocket = join(directory, "control.sock");
@@ -96,7 +145,8 @@ async function fixture(t: TestContext) {
     const result = await treasury("setup", { version: 1, ticket: ticket.ticket, password: PASSWORD, destinationAddress: DESTINATION });
     assert.equal(result.code, 200, result.text); return parseTreasuryUnlock(JSON.parse(result.text));
   };
-  return { directory, service, calls, readSocket, treasurySocket, controlSocket, grant, operator, browser, publication, servers, call, treasury, setup,
+  return { directory, service, state, calls, claimCalls, readSocket, treasurySocket, controlSocket, grant, operator, browser, publication, servers, call, treasury, setup,
+    loseClaimResponse() { uncertainClaim = true; },
     failPreparation(error: unknown) { prepareFailure = error; }, failAdmission(error: unknown) { admissionFailure = error; } };
 }
 
@@ -223,4 +273,99 @@ test("owner configuration changes relock reviews and parent browser revocation r
   assert.equal((await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, reopened.unlockToken)).code, 401);
   assert.equal((await f.treasury("operations", undefined, reopened.unlockToken)).code, 401);
   assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+});
+
+test("real TLS claims pay the reviewed host and permit a second host while preserving the completed NOS pilot", async t => {
+  const f = await fixture(t, true), unlock = await f.setup();
+  const transfer = parseTreasuryPlan(JSON.parse((await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken)).text));
+  assert.equal((await f.treasury("confirm", { version: 1, planId: transfer.planId, reviewDigest: transfer.reviewDigest,
+    idempotencyKey: "synthetic_transfer_once" }, unlock.unlockToken)).code, 200);
+  await f.service.wallet!.waitForIdle();
+  const original = f.state.get(TREASURY_LEDGER_KEY);
+  assert.equal(parseTreasuryConfiguration(JSON.parse((await f.treasury("configuration", undefined, unlock.unlockToken)).text)).pilotConsumed, true);
+  const initial = parseClaimsStatus(JSON.parse((await f.treasury("claims/status", undefined, unlock.unlockToken)).text));
+  assert.deepEqual(initial.eligibleHosts.map(row => row.address), [SOURCE, address("9")]);
+  for (const host of [SOURCE, address("9")]) {
+    const prepared = await f.treasury("claims/prepare", { version: 1, sourceAddress: host }, unlock.unlockToken);
+    assert.equal(prepared.code, 200, prepared.text);
+    const plan = parseClaimsPlan(JSON.parse(prepared.text));
+    assert.equal(plan.quote.payoutOwner, host); assert.notEqual(plan.quote.payoutOwner, DESTINATION);
+    assert.equal(plan.quote.amountMode, "full-available");
+    const body = { version: 1, planId: plan.planId, reviewDigest: plan.reviewDigest, idempotencyKey: `synthetic_claim_host_${host}` };
+    const confirmed = await f.treasury("claims/confirm", body, unlock.unlockToken); assert.equal(confirmed.code, 200, confirmed.text);
+    const operation = parseClaimsOperation(JSON.parse(confirmed.text).operation);
+    await f.service.claims!.waitForIdle();
+    const receiptReply = await f.treasury(`claims/operations/${operation.id}`, undefined, unlock.unlockToken);
+    assert.equal(receiptReply.code, 200, receiptReply.text);
+    const receipt = parseClaimsOperation(JSON.parse(receiptReply.text).operation);
+    assert.equal(receipt.phase, "confirmed"); assert.equal(receipt.payoutOwner, host); assert.equal(receipt.paidAmountBaseUnits, "43500000");
+    assert.equal((await f.treasury("claims/confirm", body, unlock.unlockToken)).code, 200, "same confirmation reads the durable receipt");
+    assert.equal((await f.treasury("claims/prepare", { version: 1, sourceAddress: host }, unlock.unlockToken)).code, 409);
+    assert.deepEqual(f.state.get(TREASURY_LEDGER_KEY), original);
+  }
+  assert.equal(f.claimCalls.dispatch, 2); assert.equal(f.claimCalls.reconcile, 2);
+  const status = parseClaimsStatus(JSON.parse((await f.treasury("claims/status", undefined, unlock.unlockToken)).text));
+  assert.equal(status.unresolvedOperationId, null); assert.deepEqual(status.eligibleHosts, []);
+  assert.equal(JSON.parse((await f.treasury("claims/operations", undefined, unlock.unlockToken)).text).total, 2);
+  assert.equal(f.calls.submit, 1);
+});
+
+test("claim endpoints enforce real HTTPS, exact requests and current owner unlock without read-socket authority", async t => {
+  const f = await fixture(t, true), unlock = await f.setup();
+  for (const route of ["claims/status", "claims/operations", "claims/prepare", "claims/confirm"]) {
+    assert.equal((await f.call(false, `/api/shared/treasury/${route}`, undefined, { "X-Forwarded-Proto": "https", ...f.browser })).code, 403);
+    assert.equal((await f.treasury(route, route.endsWith("prepare") ? { version: 1, sourceAddress: SOURCE }
+      : route.endsWith("confirm") ? { version: 1, planId: "unreviewed", reviewDigest: "a".repeat(64), idempotencyKey: "synthetic_invalid_review" } : undefined)).code, 401);
+  }
+  assert.equal((await f.treasury("claims/prepare", { version: 1, sourceAddress: SOURCE, amount: "1" }, unlock.unlockToken)).code, 400);
+  assert.equal((await f.treasury("claims/prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken, { Origin: "https://wrong.invalid" })).code, 403);
+  for (const operation of ["claims-status", "claims-operations", "claims-prepare", "claims-confirm"]) {
+    await assert.rejects(ownerCall(f.readSocket, { operation, token: f.operator.token, unlockToken: unlock.unlockToken,
+      httpsOrigin: f.publication.httpsOrigin, serverCertificateSha256: f.publication.serverCertificateSha256 }), SharedHttpError);
+  }
+  const prepared = await f.treasury("claims/prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken);
+  const plan = parseClaimsPlan(JSON.parse(prepared.text));
+  await f.treasury("lock", { version: 1 }, unlock.unlockToken);
+  assert.equal((await f.treasury("claims/confirm", { version: 1, planId: plan.planId, reviewDigest: plan.reviewDigest,
+    idempotencyKey: "synthetic_locked_claim" }, unlock.unlockToken)).code, 401);
+  assert.equal(f.claimCalls.dispatch, 0);
+});
+
+test("lost claim responses remain visible and block another host without a second POST", async t => {
+  const f = await fixture(t, true), unlock = await f.setup(); f.loseClaimResponse();
+  const plan = parseClaimsPlan(JSON.parse((await f.treasury("claims/prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken)).text));
+  assert.equal((await f.treasury("claims/confirm", { version: 1, planId: plan.planId, reviewDigest: plan.reviewDigest,
+    idempotencyKey: "synthetic_lost_claim_response" }, unlock.unlockToken)).code, 200);
+  await f.service.claims!.waitForIdle();
+  await f.service.claims!.reconcilePending();
+  const history = JSON.parse((await f.treasury("claims/operations", undefined, unlock.unlockToken)).text);
+  assert.equal(parseClaimsOperation(history.operations[0]).phase, "needs-verification");
+  assert.equal((await f.treasury("claims/prepare", { version: 1, sourceAddress: address("9") }, unlock.unlockToken)).code, 409);
+  assert.equal(f.claimCalls.dispatch, 1); assert.equal(f.claimCalls.reconcile, 0);
+});
+
+test("claims initialization recovery leaves the configured owner and original transfer pilot usable", async t => {
+  const f = await fixture(t, true, true), unlock = await f.setup();
+  const reply = await f.treasury("claims/status", undefined, unlock.unlockToken);
+  assert.equal(reply.code, 200); assert.equal(parseClaimsStatus(JSON.parse(reply.text)).state, "recovery-required");
+  assert.equal((await f.treasury("claims/prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken)).code, 503);
+  assert.equal((await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken)).code, 200);
+  assert.equal((await f.treasury("configuration", undefined, unlock.unlockToken)).code, 200);
+  assert.equal(f.claimCalls.dispatch, 0);
+});
+
+test("claim host choices exclude failed retained readings and paused permissions without additional provider reads", async t => {
+  const f = await fixture(t, true), unlock = await f.setup(), context = f.service.access.contexts()[0]!;
+  const association = f.service.observations.read(context).associations[0]!;
+  f.service.observations.ingest(context, { address: SOURCE, binding: association.binding,
+    rewards: { schema: 1, address: SOURCE, status: "unavailable", observedAtMs: Date.now() + 1 } });
+  const status = () => f.treasury("claims/status", undefined, unlock.unlockToken).then(reply => parseClaimsStatus(JSON.parse(reply.text)));
+  assert.deepEqual((await status()).eligibleHosts.map(row => row.address), [address("9")], "retained last-good amounts never authorize a claim choice");
+  const key = `permission:default:${"a".repeat(64)}`, permission = f.state.get<PcPermission>(key)!;
+  f.state.set(key, { ...permission, paused: true });
+  assert.deepEqual((await status()).eligibleHosts, []);
+  f.state.set(key, permission);
+  f.state.set(`monitor:reward-denial:default:${"a".repeat(64)}:${address("9")}`, { approvedAtMs: permission.approvedAtMs });
+  assert.deepEqual((await status()).eligibleHosts, []);
+  assert.equal(f.claimCalls.prepare, 0); assert.equal(f.claimCalls.dispatch, 0); assert.equal(f.claimCalls.reconcile, 0);
 });

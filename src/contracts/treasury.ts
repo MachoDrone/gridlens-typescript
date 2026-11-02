@@ -35,7 +35,7 @@ export interface TreasuryUnlock {
 /** This rejected request has not authorized signing or consumed a pilot allowance.
  * No upstream text, account details or transport URLs are permitted here. */
 export const TREASURY_PREFLIGHT_CODES = ["budget-wait", "provider-unavailable", "insufficient-nos", "insufficient-sol-reserve", "cost-limit",
-  "account-invalid", "source-changed", "review-expired", "preflight-unavailable"] as const;
+  "account-invalid", "source-changed", "review-expired", "preflight-unavailable", "no-claimable-rewards", "rewards-unavailable"] as const;
 export type TreasuryPreflightCode = typeof TREASURY_PREFLIGHT_CODES[number];
 export interface TreasuryPreflightFailure {
   version: 1; kind: "preflight-failure"; code: TreasuryPreflightCode;
@@ -53,7 +53,7 @@ export function parseTreasuryPreflightFailure(value: unknown): TreasuryPreflight
 }
 export function treasuryPreflightStatus(code: TreasuryPreflightCode): 409 | 429 | 503 {
   if (!(TREASURY_PREFLIGHT_CODES as readonly unknown[]).includes(code)) throw new Error("Invalid Wallet preflight code.");
-  return code === "budget-wait" ? 429 : code === "provider-unavailable" || code === "preflight-unavailable" ? 503 : 409;
+  return code === "budget-wait" ? 429 : code === "provider-unavailable" || code === "preflight-unavailable" || code === "rewards-unavailable" ? 503 : 409;
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;

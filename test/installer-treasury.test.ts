@@ -120,6 +120,19 @@ test("Wallet IPC initialization failure prevents capable runtime start and later
   const initial=structuredClone(f.runner.config);f.runner.initializationFails=false;const ready=f.install(2);
   assert.deepEqual(ready.config.active,initial!.active);assert.equal(ready.config.certificateSha256,initial!.certificateSha256);assert.equal(ready.config.phase,"ready");
 });
+test("planned runtime replacement grants only the owned owner ninety seconds to retain an in-flight claim acknowledgment",t=>{
+  const f=fixture(t);f.install(2);
+  const before=f.runner.calls.length;f.install(3,"upgrade");
+  const stops=f.runner.calls.slice(before).filter(args=>args[0]==="stop");
+  assert.deepEqual(stops,[["stop","--time","30",resourceName(f.instance,"gateway")],["stop","--time","90",resourceName(f.instance,"owner")]]);
+  const rollback=f.runner.calls.length;f.install(3,"rollback");
+  assert.deepEqual(f.runner.calls.slice(rollback).filter(args=>args[0]==="stop"),stops);
+  const owned=f.container("owner");
+  (owned.Config as {Labels:Record<string,string>}).Labels["io.gridlens.instance"]="foreign-installation";
+  const rejected=f.runner.calls.length;
+  assert.throws(()=>f.install(3,"upgrade"),/owned|belongs|ownership|GridLens/i);
+  assert(!f.runner.calls.slice(rejected).some(args=>args[0]==="stop"||args[0]==="rm"),"A longer grace never authorizes touching a foreign runtime");
+});
 test("terminal Wallet setup and explicit reset use only fixed owner control and verify saved HTTPS link",async t=>{
   const f=fixture(t),installed=f.install(2);reconcileInstalledServices(f.runner,installed,release(2),{action:"setup"});
   const objects=structuredClone(f.runner.objects),config=structuredClone(f.runner.config),setup=terminal();

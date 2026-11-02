@@ -47,12 +47,15 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
       let operation: string, input: Record<string, unknown>;
       if (request.method === "GET" && ["status", "configuration", "operations"].includes(route)) { operation = route; input = {}; }
       else if (request.method === "GET" && /^operations\/[a-zA-Z0-9-]{1,80}$/.test(route)) { operation = "operations"; input = { id: route.slice(11) }; }
+      else if (request.method === "GET" && ["claims/status", "claims/operations"].includes(route)) { operation = route.replace("/", "-"); input = {}; }
+      else if (request.method === "GET" && /^claims\/operations\/[a-zA-Z0-9-]{1,80}$/.test(route)) { operation = "claims-operations"; input = { id: route.slice(18) }; }
       else {
         const allowed: Record<string, string[]> = { setup: ["ticket", "password", "destinationAddress"], unlock: ["password"], lock: [],
-          configuration: ["currentPassword", "destinationAddress", "newPassword"], prepare: ["sourceAddress"], confirm: ["planId", "reviewDigest", "idempotencyKey"] };
+          configuration: ["currentPassword", "destinationAddress", "newPassword"], prepare: ["sourceAddress"], confirm: ["planId", "reviewDigest", "idempotencyKey"],
+          "claims/prepare": ["sourceAddress"], "claims/confirm": ["planId", "reviewDigest", "idempotencyKey"] };
         if (request.method !== "POST" || !allowed[route]) throw new SharedHttpError(405);
         if (request.headers.origin !== security.httpsOrigin) throw new SharedHttpError(403);
-        operation = route === "configuration" ? "configure" : route;
+        operation = route === "configuration" ? "configure" : route.replace("/", "-");
         input = await readJson(request, 8192);
         if (input.version !== 1) throw new SharedHttpError(400);
         delete input.version;
@@ -64,15 +67,15 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
       try {
         const result = await ownerCall(options.treasurySocket, { ...input, operation, token: options.token(request),
           ...(unlockToken === undefined ? {} : { unlockToken }), httpsOrigin: security.httpsOrigin, serverCertificateSha256: options.certificateSha256 }, undefined,
-          operation === "prepare" ? 35_000 : 60_000);
-        if ((operation === "prepare" || operation === "confirm") && result && typeof result === "object"
+          operation === "prepare" || operation === "claims-prepare" ? 35_000 : 60_000);
+        if (["prepare", "confirm", "claims-prepare", "claims-confirm"].includes(operation) && result && typeof result === "object"
           && "kind" in result && result.kind === "preflight-failure") {
           const failure = parseTreasuryPreflightFailure(result);
           sendJson(response, treasuryPreflightStatus(failure.code), failure);
         } else sendJson(response, 200, result);
       } finally { delete input.password; delete input.currentPassword; delete input.newPassword; delete input.ticket; }
     } catch (error) {
-      if (url.pathname === `${prefix}prepare` && error instanceof SharedHttpError && error.status === 504)
+      if ([`${prefix}prepare`, `${prefix}claims/prepare`].includes(url.pathname) && error instanceof SharedHttpError && error.status === 504)
         sendJson(response, 503, { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
       else fail(error instanceof SharedHttpError ? error.status : 503);
     }
