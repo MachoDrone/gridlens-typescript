@@ -56,10 +56,12 @@ export class SolanaRpcError extends Error {
   kind: FailureKind;
   retryAtMs: number | null;
   scope: "asset" | "transport";
-  constructor(message: string, kind: FailureKind = "provider", retryAtMs: number | null = null, scope: "asset" | "transport" = "asset") {
+  readonly deferSource?: "budget" | "provider";
+  constructor(message: string, kind: FailureKind = "provider", retryAtMs: number | null = null, scope: "asset" | "transport" = "asset", deferSource?: "budget" | "provider") {
     super(message);
     this.kind = kind;
     this.scope = scope;
+    if (deferSource !== undefined) this.deferSource = deferSource;
     this.retryAtMs = retryAtMs;
   }
 }
@@ -109,8 +111,8 @@ function parseJson(text: string): unknown {
   });
 }
 
-function transportError(message: string, kind: FailureKind = "provider", retryAtMs: number | null = null): SolanaRpcError {
-  return new SolanaRpcError(message, kind, retryAtMs, "transport");
+function transportError(message: string, kind: FailureKind = "provider", retryAtMs: number | null = null, deferSource?: "budget" | "provider"): SolanaRpcError {
+  return new SolanaRpcError(message, kind, retryAtMs, "transport", deferSource);
 }
 export interface SolanaRpcOptions {
   fetch?: typeof globalThis.fetch;
@@ -160,14 +162,14 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
       for (;;) {
         throwIfAborted(signal);
         if (provider.disabled) throw transportError("Solana provider is disabled for this process.", "disabled");
-        if (provider.retryAtMs > now()) throw transportError("Solana provider requested a Retry-After pause.", "deferred", provider.retryAtMs);
+        if (provider.retryAtMs > now()) throw transportError("Solana provider requested a Retry-After pause.", "deferred", provider.retryAtMs, "provider");
         const dispatchAt = budget.nextAt(now());
-        if (dispatchAt >= deadline) throw transportError("Solana reads are pending within the shared request budget.", "deferred", dispatchAt);
+        if (dispatchAt >= deadline) throw transportError("Solana reads are pending within the shared request budget.", "deferred", dispatchAt, "budget");
         if (dispatchAt > now()) await sleep(dispatchAt - now(), signal);
         throwIfAborted(signal);
         if (now() >= deadline) throw transportError("Solana refresh deadline elapsed before dispatch.", "deferred", budget.nextAt(now()));
         if (provider.disabled) throw transportError("Solana provider is disabled for this process.", "disabled");
-        if (provider.retryAtMs > now()) throw transportError("Solana provider requested a Retry-After pause.", "deferred", provider.retryAtMs);
+        if (provider.retryAtMs > now()) throw transportError("Solana provider requested a Retry-After pause.", "deferred", provider.retryAtMs, "provider");
         // Financial authorization may expire while this operation waits for the
         // shared allowance. The trusted caller rechecks immediately before the
         // reservation and network dispatch; browser fields cannot supply a hook.

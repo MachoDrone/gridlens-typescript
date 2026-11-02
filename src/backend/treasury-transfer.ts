@@ -15,6 +15,7 @@ import { cleanNodeRuntime, verifyNode } from "./pc-rewards.ts";
 import { shellQuote, withSsh } from "./ssh.ts";
 import type { SshCredential, SshRun } from "./ssh.ts";
 import type { TreasuryDriver, TreasuryQuote, TreasurySigned } from "./treasury.ts";
+import { TreasuryPreflightError } from "./treasury-errors.ts";
 import { canonicalBase64, transferAccounts, transferTransaction, validatedTransferMessage, validateSignedTransfer,
   TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_NOS_MINT, TREASURY_RESERVE } from "./treasury-transaction.ts";
 
@@ -28,34 +29,38 @@ export interface TreasuryTransferOptions {
   signerSource?: string;
 }
 interface Source { context: FleetContext; association: PcAssociation; permission: PcPermission; credential: SshCredential; binding: TreasuryQuote["sourceBinding"] }
-interface ChainSnapshot { slot:number; sourceNos:bigint; destinationNos:bigint; sourceSol:bigint; createDestinationAta:boolean }
+interface ChainSnapshot { slot:number; blockTimeMs:number; sourceNos:bigint; destinationNos:bigint; sourceSol:bigint; createDestinationAta:boolean }
+const PREFLIGHT_MAX_AGE_MS = 15_000;
+interface PreparedReview { slot: number; expiresAtMs: number; signing: boolean }
+interface SignedPreflight { reviewKey: string; wireHash: string; checkedAtMs: number; slot: number; attempted: boolean }
 const integer = (value: unknown): bigint => {
   if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) return BigInt(value);
   if (typeof value === "string" && /^(0|[1-9]\d{0,19})$/.test(value) && BigInt(value) <= 18_446_744_073_709_551_615n) return BigInt(value);
-  throw new Error("Invalid exact chain amount.");
+  throw new TreasuryPreflightError("preflight-unavailable");
 };
 const slotNumber = (value: unknown): number => {
-  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new Error("Invalid chain slot.");
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1) throw new TreasuryPreflightError("preflight-unavailable");
   return value;
 };
 function tokenBytes(account: unknown, size: number): Buffer {
   if (!rpcObject(account) || account.owner !== TOKEN_PROGRAM_ADDRESS || account.executable !== false
     || account.space !== undefined && account.space !== size || !Array.isArray(account.data) || account.data.length !== 2 || account.data[1] !== "base64")
-    throw new Error("The token account has an unexpected program or layout.");
-  const bytes = canonicalBase64(account.data[0], size);
+    throw new TreasuryPreflightError("account-invalid");
+  let bytes: Buffer;
+  try { bytes = canonicalBase64(account.data[0], size); } catch { throw new TreasuryPreflightError("account-invalid"); }
   if (bytes.length !== size || (size === 82 ? [0,46] : [72,109,129]).some(offset => bytes.readUInt32LE(offset) > 1))
-    throw new Error("Invalid classic token account data.");
+    throw new TreasuryPreflightError("account-invalid");
   return bytes;
 }
 function tokenAmount(account: unknown, owner: string): bigint {
   const token = getTokenDecoder().decode(tokenBytes(account, 165));
   if (token.mint !== TREASURY_NOS_MINT || token.owner !== owner || token.state !== AccountState.Initialized || token.isNative.__option !== "None")
-    throw new Error("The NOS account is frozen or does not belong to the expected wallet.");
+    throw new TreasuryPreflightError("account-invalid");
   return token.amount;
 }
 function costs(sourceSol: bigint, fee: bigint, rent: bigint): void {
-  if (fee <= 0n || fee + rent > BigInt(TREASURY_MAX_COST)) throw new Error("The transaction cost exceeds the 0.005 SOL pilot limit.");
-  if (sourceSol - fee - rent < BigInt(TREASURY_RESERVE)) throw new Error("The source must retain at least 0.05 SOL for operation.");
+  if (fee <= 0n || fee + rent > BigInt(TREASURY_MAX_COST)) throw new TreasuryPreflightError("cost-limit");
+  if (sourceSol - fee - rent < BigInt(TREASURY_RESERVE)) throw new TreasuryPreflightError("insufficient-sol-reserve");
 }
 function messageInput(quote: TreasuryQuote) {
   const { sourceAddress, destinationAddress, sourceTokenAddress, destinationTokenAddress, mintAddress, amountBaseUnits, decimals,
@@ -68,19 +73,39 @@ function messageInput(quote: TreasuryQuote) {
 export function createTreasuryTransferDriver(options: TreasuryTransferOptions): TreasuryDriver {
   const { rpc: transport, state, vault, observations, contexts, connect = withSsh, now = Date.now } = options;
   const session = transport.createSession("treasury-one-nos");
+  // Reviews and preflight attestations are process-local. Restart recovery can
+  // inspect a journaled signature, but cannot sign or broadcast it again.
+  const preparedReviews = new Map<string, PreparedReview>();
+  const signedPreflights = new Map<string, SignedPreflight>();
+  const reviewKey = (quote: TreasuryQuote): string => createHash("sha256").update(JSON.stringify([
+    quote.scopeId, quote.rosterRevision, quote.sourceAddress, quote.destinationAddress,
+    quote.sourceBinding.pcId, quote.sourceBinding.nodeId, quote.sourceBinding.containerId, quote.sourceBinding.sshIdentity,
+    quote.sourceTokenAddress, quote.destinationTokenAddress, quote.mintAddress, quote.amountBaseUnits, quote.decimals,
+    quote.createDestinationAta, quote.blockhash, quote.lastValidBlockHeight, quote.messageBase64,
+    quote.feeLamports, quote.rentLamports, quote.reserveLamports, quote.maxCostLamports,
+    quote.sourceNosBaseUnits, quote.sourceSolLamports, quote.preparedAtMs, quote.expiresAtMs,
+  ])).digest("hex");
+  const preparedReview = (quote: TreasuryQuote): PreparedReview => {
+    const record = preparedReviews.get(reviewKey(quote));
+    if (!record || record.signing || record.expiresAtMs <= now()) throw new TreasuryPreflightError("review-expired");
+    return record;
+  };
+  const freshPreflight = (checkedAtMs: number): void => {
+    if (checkedAtMs > now() || now() - checkedAtMs > PREFLIGHT_MAX_AGE_MS) throw new TreasuryPreflightError("review-expired");
+  };
   function source(scopeId: string, revision: string, sourceAddress: string): Source {
     const context = contexts().find(value => value.scopeId === scopeId && value.rosterRevision === revision);
-    if (!context || !context.addresses.includes(sourceAddress)) throw new Error("The reviewed source is no longer in this fleet.");
+    if (!context || !context.addresses.includes(sourceAddress)) throw new TreasuryPreflightError("source-changed");
     const association = observations.read(context).associations.find(row => row.address === sourceAddress);
-    if (!association) throw new Error("The source has no verified computer binding.");
+    if (!association) throw new TreasuryPreflightError("source-changed");
     const permission = state.get<PcPermission>(`permission:${scopeId}:${association.binding.pcId}`);
     const approved = permission?.associations.find(row => row.address === sourceAddress);
     if (!permission || permission.version !== 1 || permission.paused || permission.revokedAtMs !== null
       || permission.rosterRevision !== revision || permission.computer.id !== association.binding.pcId
       || permission.computer.fingerprint !== association.sshFingerprint || !approved || !sameBinding(approved.binding, association.binding)
-      || approved.sshFingerprint !== association.sshFingerprint) throw new Error("The source computer approval or identity changed.");
+      || approved.sshFingerprint !== association.sshFingerprint) throw new TreasuryPreflightError("source-changed");
     const credential = vault.read(scopeId, permission.computer.id);
-    if (!credential) throw new Error("The source computer has no saved sign-in.");
+    if (!credential) throw new TreasuryPreflightError("source-changed");
     const binding = { pcId: permission.computer.id, containerId: association.binding.nodeContainerId, sshIdentity: association.sshFingerprint,
       nodeId: createHash("sha256").update(JSON.stringify([association.binding, permission.computer.hostKey, permission.approvedAtMs, revision])).digest("hex") };
     return { context, association, permission, credential, binding };
@@ -88,146 +113,193 @@ export function createTreasuryTransferDriver(options: TreasuryTransferOptions): 
   const sameSource = (quote: TreasuryQuote): Source => {
     const current = source(quote.scopeId, quote.rosterRevision, quote.sourceAddress);
     if ((["pcId", "nodeId", "containerId", "sshIdentity"] as const).some(key => current.binding[key] !== quote.sourceBinding[key]))
-      throw new Error("The reviewed source identity changed.");
+      throw new TreasuryPreflightError("source-changed");
     return current;
   };
   const quoteCurrent = (quote: TreasuryQuote): void => {
     if (!Number.isSafeInteger(quote.preparedAtMs) || !Number.isSafeInteger(quote.expiresAtMs) || quote.expiresAtMs - quote.preparedAtMs > 60_000
       || quote.preparedAtMs > now() || quote.expiresAtMs <= now() || quote.reserveLamports !== TREASURY_RESERVE || quote.maxCostLamports !== TREASURY_MAX_COST)
-      throw new Error("The transfer review expired. Prepare a new review before signing.");
+      throw new TreasuryPreflightError("review-expired");
     costs(integer(quote.sourceSolLamports), integer(quote.feeLamports), integer(quote.rentLamports));
-    if (integer(quote.sourceNosBaseUnits) < 1_000_000n) throw new Error("The source has less than 1 NOS.");
+    if (integer(quote.sourceNosBaseUnits) < 1_000_000n) throw new TreasuryPreflightError("insufficient-nos");
   };
-  const remainingCapacity = (quote: TreasuryQuote, count: number): void => {
+  const remainingCapacity = (quote: TreasuryQuote, count: number, freshUntilMs = Infinity): void => {
     // Advisory lookahead uses the existing global budget without reserving a
     // second allowance. Leave time for the bounded source-container helper.
+    if (quote.expiresAtMs - 10_000 <= now()) throw new TreasuryPreflightError("review-expired");
     const provider = session.eligible();
-    if (!provider || !transport.canDispatchBefore(count + (provider.genesisVerified ? 0 : 1),
-      Math.min(quote.expiresAtMs - 10_000, now() + transport.refreshDeadlineMs - 10_000)))
-      throw new Error("The shared Solana allowance cannot finish this review yet. Prepare a new review later.");
+    const next = session.nextEligibleAt(), retryAtMs = next !== null && next > now() ? next : undefined;
+    if (!provider) throw new TreasuryPreflightError("provider-unavailable", retryAtMs);
+    if (!transport.canDispatchBefore(count + (provider.genesisVerified ? 0 : 1),
+      Math.min(quote.expiresAtMs - 10_000, now() + transport.refreshDeadlineMs - 10_000, freshUntilMs)))
+      throw new TreasuryPreflightError("budget-wait", retryAtMs);
   };
   async function usingRpc<T>(work: (provider: SolanaProviderState, read: (method:string,params:unknown[],beforeDispatch?:()=>void)=>Promise<unknown>) => Promise<T>): Promise<T> {
     const provider = session.eligible();
-    if (!provider) throw new Error("The shared Solana connection is waiting. Try preparing the review later.");
-    const signal = new AbortController().signal, deadline = now() + transport.refreshDeadlineMs, healthVersion = provider.healthVersion;
+    if (!provider) { const next = session.nextEligibleAt(); throw new TreasuryPreflightError("provider-unavailable", next !== null && next > now() ? next : undefined); }
+    const duration = Math.min(transport.refreshDeadlineMs, 28_000);
+    const signal = AbortSignal.timeout(duration), deadline = now() + duration, healthVersion = provider.healthVersion;
     try {
       await transport.verifyMainnet(provider, signal, deadline);
       const result = await work(provider, (method, params, beforeDispatch) => transport.rpc(provider, method, params, signal, deadline, beforeDispatch));
       session.success(provider, healthVersion); return result;
-    } catch (error) { if (error instanceof SolanaRpcError) session.failure(provider, error); throw error; }
+    } catch (error) {
+      if (error instanceof SolanaRpcError) {
+        session.failure(provider, error);
+        const next = error.retryAtMs ?? session.nextEligibleAt();
+        const code=error.kind === "deferred" ? error.deferSource === "budget" ? "budget-wait"
+          : error.deferSource === "provider" ? "provider-unavailable" : "preflight-unavailable"
+          : error.kind === "parameters" ? "preflight-unavailable" : "provider-unavailable";
+        throw new TreasuryPreflightError(code,code!=="preflight-unavailable"&&next !== null && next > now() ? next : undefined);
+      }
+      if (signal.aborted) throw new TreasuryPreflightError("preflight-unavailable");
+      throw error;
+    }
   }
   async function snapshot(read: (method:string,params:unknown[])=>Promise<unknown>, input: {sourceAddress:string;destinationAddress:string;sourceTokenAddress:string;destinationTokenAddress:string}): Promise<ChainSnapshot> {
     const data = await read("getMultipleAccounts", [[TREASURY_NOS_MINT, input.sourceTokenAddress, input.destinationTokenAddress, input.sourceAddress], { commitment: "confirmed", encoding: "base64" }]);
-    if (!rpcObject(data) || !rpcObject(data.context) || !Array.isArray(data.value) || data.value.length !== 4) throw new Error("Invalid source account response.");
+    if (!rpcObject(data) || !rpcObject(data.context) || !Array.isArray(data.value) || data.value.length !== 4) throw new TreasuryPreflightError("preflight-unavailable");
     const slot = slotNumber(data.context.slot), mintBytes = tokenBytes(data.value[0], 82), mint = getMintDecoder().decode(mintBytes);
-    if (mint.decimals !== 6 || !mint.isInitialized || mintBytes[45] !== 1) throw new Error("The official NOS mint did not validate.");
+    if (mint.decimals !== 6 || !mint.isInitialized || mintBytes[45] !== 1) throw new TreasuryPreflightError("account-invalid");
+    if (data.value[1] === null) throw new TreasuryPreflightError("insufficient-nos");
     const sourceNos = tokenAmount(data.value[1], input.sourceAddress), createDestinationAta = data.value[2] === null;
     const destinationNos = createDestinationAta ? 0n : tokenAmount(data.value[2], input.destinationAddress), wallet = data.value[3];
     if (!rpcObject(wallet) || wallet.owner !== SYSTEM || wallet.executable !== false || wallet.space !== undefined && wallet.space !== 0
       || !Array.isArray(wallet.data) || wallet.data.length !== 2 || wallet.data[0] !== "" || wallet.data[1] !== "base64")
-      throw new Error("The source fee payer is not a normal wallet.");
+      throw new TreasuryPreflightError("account-invalid");
     const sourceSol = integer(wallet.lamports);
     const blockTime = await read("getBlockTime", [slot]);
     if (typeof blockTime !== "number" || !Number.isSafeInteger(blockTime) || now() - blockTime * 1000 > 60_000 || blockTime * 1000 - now() > 15_000)
-      throw new Error("The source account observation is not current.");
-    if (sourceNos < 1_000_000n) throw new Error("The source has less than 1 NOS.");
-    return { slot, sourceNos, destinationNos, sourceSol, createDestinationAta };
+      throw new TreasuryPreflightError("preflight-unavailable");
+    if (sourceNos < 1_000_000n) throw new TreasuryPreflightError("insufficient-nos");
+    if (sourceSol <= BigInt(TREASURY_RESERVE)) throw new TreasuryPreflightError("insufficient-sol-reserve");
+    return { slot, blockTimeMs:blockTime*1000, sourceNos, destinationNos, sourceSol, createDestinationAta };
   }
-  async function fee(read: (method:string,params:unknown[])=>Promise<unknown>, quote: Pick<TreasuryQuote,"messageBase64">): Promise<bigint> {
-    const result = await read("getFeeForMessage", [quote.messageBase64, { commitment: "confirmed" }]);
-    if (!rpcObject(result) || !rpcObject(result.context)) throw new Error("The current transaction fee is unavailable.");
-    return integer(result.value);
+  async function fee(read: (method:string,params:unknown[])=>Promise<unknown>, quote: Pick<TreasuryQuote,"messageBase64">,
+    minimumSlot: number): Promise<{amount:bigint;slot:number}> {
+    const result = await read("getFeeForMessage", [quote.messageBase64, { commitment: "confirmed", minContextSlot: minimumSlot }]);
+    if (!rpcObject(result) || !rpcObject(result.context) || result.value === null || slotNumber(result.context.slot) < minimumSlot)
+      throw new TreasuryPreflightError("preflight-unavailable");
+    return { amount: integer(result.value), slot: slotNumber(result.context.slot) };
   }
   async function simulate(read: (method:string,params:unknown[])=>Promise<unknown>, quote:TreasuryQuote, before:ChainSnapshot|undefined,
-    signed?:TreasurySigned, discoverRent=false): Promise<bigint> {
+    minimumSlot: number): Promise<{rent:bigint;slot:number;checkedAtMs:number}> {
     const tx = await validatedTransferMessage(quote);
-    const simulation = await read("simulateTransaction", [signed?.transactionBase64??Buffer.from(getTransactionEncoder().encode(tx)).toString("base64"),
-      { encoding:"base64",commitment:"confirmed",sigVerify:!!signed,replaceRecentBlockhash:false,...(before?{minContextSlot:before.slot}:{}),
+    const simulation = await read("simulateTransaction", [Buffer.from(getTransactionEncoder().encode(tx)).toString("base64"),
+      { encoding:"base64",commitment:"confirmed",sigVerify:false,replaceRecentBlockhash:false,minContextSlot:minimumSlot,
         accounts:{encoding:"base64",addresses:[quote.sourceTokenAddress,quote.destinationTokenAddress,quote.sourceAddress]} }]);
-    if (!rpcObject(simulation) || !rpcObject(simulation.context) || slotNumber(simulation.context.slot) < (before?.slot??1) || !rpcObject(simulation.value)
+    if (!rpcObject(simulation) || !rpcObject(simulation.context) || slotNumber(simulation.context.slot) < minimumSlot || !rpcObject(simulation.value)
       || simulation.value.err !== null || !Array.isArray(simulation.value.accounts) || simulation.value.accounts.length !== 3)
-      throw new Error("The exact 1 NOS transfer did not pass simulation.");
+      throw new TreasuryPreflightError("preflight-unavailable");
     const sourceNos=tokenAmount(simulation.value.accounts[0],quote.sourceAddress),destinationNos=tokenAmount(simulation.value.accounts[1],quote.destinationAddress);
     if (before&&(sourceNos !== before.sourceNos - 1_000_000n || destinationNos !== before.destinationNos + 1_000_000n) || destinationNos<1_000_000n)
-      throw new Error("Simulation did not show the exact reviewed token movement.");
+      throw new TreasuryPreflightError("account-invalid");
     // The fixed ATA instruction creates only this classic 165-byte account. Its
     // simulated lamports supply the rent quote without an extra RPC allowance.
     const destination=simulation.value.accounts[1];
-    const rent=discoverRent&&quote.createDestinationAta&&rpcObject(destination)?integer(destination.lamports):integer(quote.rentLamports);
+    const rent=quote.createDestinationAta&&rpcObject(destination)?integer(destination.lamports):0n;
     const payer = simulation.value.accounts[2];
-    if (!rpcObject(payer) || payer.owner !== SYSTEM || payer.executable !== false || integer(payer.lamports) < BigInt(TREASURY_RESERVE)
-      || before&&(before.sourceSol - integer(payer.lamports) > integer(quote.feeLamports)+rent || before.sourceSol<integer(payer.lamports)))
-      throw new Error("Simulation exceeded the reviewed SOL cost or reserve.");
+    if (!rpcObject(payer) || payer.owner !== SYSTEM || payer.executable !== false || payer.space !== undefined && payer.space !== 0
+      || !Array.isArray(payer.data) || payer.data.length !== 2 || payer.data[0] !== "" || payer.data[1] !== "base64")
+      throw new TreasuryPreflightError("account-invalid");
+    if (integer(payer.lamports) < BigInt(TREASURY_RESERVE)) throw new TreasuryPreflightError("insufficient-sol-reserve");
+    if (before&&(before.sourceSol - integer(payer.lamports) > integer(quote.feeLamports)+rent || before.sourceSol<integer(payer.lamports)))
+      throw new TreasuryPreflightError("cost-limit");
     costs(integer(payer.lamports)+integer(quote.feeLamports)+rent,integer(quote.feeLamports),rent);
-    return rent;
+    return {rent,slot:slotNumber(simulation.context.slot),checkedAtMs:now()};
   }
   return {
-    assertReady(quote) { quoteCurrent(quote);sameSource(quote);remainingCapacity(quote,6); },
+    assertReady(quote) { quoteCurrent(quote);sameSource(quote);preparedReview(quote);remainingCapacity(quote,3); },
     async prepare(context, sourceAddress, destinationAddress) {
+      preparedReviews.clear();
       const approved = source(context.scopeId, context.rosterRevision, sourceAddress), accounts = await transferAccounts(sourceAddress,destinationAddress);
       return usingRpc(async (_provider, read) => {
         const before = await snapshot(read,{sourceAddress,destinationAddress,...accounts});
         const latest = await read("getLatestBlockhash",[{commitment:"confirmed",minContextSlot:before.slot}]);
         if (!rpcObject(latest) || !rpcObject(latest.context) || slotNumber(latest.context.slot)<before.slot || !rpcObject(latest.value)
-          || typeof latest.value.blockhash!=="string") throw new Error("A current transaction blockhash is unavailable.");
+          || typeof latest.value.blockhash!=="string") throw new TreasuryPreflightError("preflight-unavailable");
         const lastValidBlockHeight=slotNumber(latest.value.lastValidBlockHeight), preparedAtMs=now();
+        // Later fee/simulation responses cannot renew this bank-time witness.
+        // Retain the existing 60-second chain-age bound through key use and send.
+        const expiresAtMs=Math.min(preparedAtMs+60_000,before.blockTimeMs+60_000);
+        if(expiresAtMs<=preparedAtMs)throw new TreasuryPreflightError("review-expired");
         const quote:TreasuryQuote={scopeId:context.scopeId,rosterRevision:context.rosterRevision,sourceAddress,destinationAddress,...accounts,
           mintAddress:TREASURY_NOS_MINT,amountBaseUnits:TREASURY_AMOUNT,decimals:6,createDestinationAta:before.createDestinationAta,
           sourceBinding:approved.binding,sourceNosBaseUnits:before.sourceNos.toString(),sourceSolLamports:before.sourceSol.toString(),
-          blockhash:latest.value.blockhash,lastValidBlockHeight,preparedAtMs,expiresAtMs:preparedAtMs+60_000,messageBase64:"",
+          blockhash:latest.value.blockhash,lastValidBlockHeight,preparedAtMs,expiresAtMs,messageBase64:"",
           feeLamports:"0",rentLamports:"0",reserveLamports:TREASURY_RESERVE,maxCostLamports:TREASURY_MAX_COST};
         const transaction=await transferTransaction(quote); quote.messageBase64=Buffer.from(transaction.messageBytes).toString("base64");
-        quote.feeLamports=(await fee(read,quote)).toString();
-        quote.rentLamports=(await simulate(read,quote,before,undefined,true)).toString();
+        const currentFee=await fee(read,quote,slotNumber(latest.context.slot));
+        quote.feeLamports=currentFee.amount.toString();
+        costs(before.sourceSol,currentFee.amount,0n);
+        const simulation=await simulate(read,quote,before,currentFee.slot);
+        quote.rentLamports=simulation.rent.toString();
         costs(before.sourceSol,integer(quote.feeLamports),integer(quote.rentLamports));
-        sameSource(quote);quoteCurrent(quote);remainingCapacity(quote,6);return quote;
+        // A validated read-only review remains useful while future execution
+        // allowance recovers. Admission is checked only when the owner confirms.
+        sameSource(quote);quoteCurrent(quote);
+        preparedReviews.set(reviewKey(quote),{slot:simulation.slot,expiresAtMs:quote.expiresAtMs,signing:false});return quote;
       });
     },
     async sign(quote, authorize = () => {}) {
-      authorize();quoteCurrent(quote);remainingCapacity(quote,6);await validatedTransferMessage(quote);authorize();const approved=sameSource(quote);
-      await usingRpc(async (_provider,read)=>{
-        const before=await snapshot(read,quote);
-        // The idempotent create remains safe if the receiver created its ATA meanwhile.
-        if(before.createDestinationAta&&!quote.createDestinationAta) throw new Error("The receiving account changed. Prepare a new review.");
-        // The simulation's actual payer debit checks the reviewed fee+rent total.
-        costs(before.sourceSol,integer(quote.feeLamports),integer(quote.rentLamports));await simulate(read,quote,before);
-      });
-      authorize();quoteCurrent(quote);sameSource(quote);remainingCapacity(quote,3);
-      const helper=options.signerSource??readFileSync(new URL("../../dist/backend/treasury-signer.cjs",import.meta.url),"utf8");
-      if(helper.length<1||Buffer.byteLength(helper)>120_000) throw new Error("The restricted transaction helper is unavailable.");
-      const output=await connect(approved.permission.computer,approved.credential,async run=>{
-        const guarded:SshRun=(command,settings)=>{
-          authorize();quoteCurrent(quote);sameSource(quote);remainingCapacity(quote,3);
-          return run(approved.credential.sudoPassword===undefined?command:`/usr/bin/sudo -S -p '' -- ${command}`,
-            {...settings,...(approved.credential.sudoPassword===undefined?{}:{input:approved.credential.sudoPassword+"\n"})});
-        };
-        if(await verifyNode(guarded,approved.association)!=="ok") throw new Error("The source container or public wallet identity changed.");
-        const prelude='ulimit -S -c 0 && ulimit -H -c 0 && printf 0 > /proc/self/coredump_filter && exec /usr/local/bin/node -e "$1" -- --gridlens-one-nos-transfer "$2"';
-        return guarded(`${cleanNodeRuntime(approved.association)} exec${CLEAN} ${approved.association.binding.nodeContainerId} /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C /bin/sh -c ${shellQuote(prelude)} gridlens-one-nos-transfer ${shellQuote(helper)} ${shellQuote(JSON.stringify(messageInput(quote)))}`,{maximum:4096,timeoutMs:10_000});
-      });
-      if(output.code!==0) throw new Error("The restricted source-wallet signer did not complete.");
-      let response:unknown;try{response=JSON.parse(output.stdout);}catch{throw new Error("Invalid source-wallet signing result.");}
-      if(!rpcObject(response)||Object.keys(response).sort().join(",")!=="signature,transactionBase64"||typeof response.transactionBase64!=="string"||typeof response.signature!=="string")
-        throw new Error("Invalid source-wallet signing result.");
-      await validateSignedTransfer(quote,response.transactionBase64,response.signature);authorize();quoteCurrent(quote);sameSource(quote);
-      return {quote,transactionBase64:response.transactionBase64,signature:response.signature};
+      authorize();quoteCurrent(quote);remainingCapacity(quote,3);
+      const review=preparedReview(quote),key=reviewKey(quote);
+      review.signing=true;
+      try {
+        await validatedTransferMessage(quote);authorize();const approved=sameSource(quote);
+        const preflight=await usingRpc(async (_provider,read)=>{
+          const currentFee=await fee(read,quote,review.slot);
+          if(currentFee.amount>integer(quote.feeLamports))throw new TreasuryPreflightError("cost-limit");
+          // Reconstructing the allowlist fixes the only possible token movement.
+          // Validate current simulated POST accounts, not balances from an older
+          // review that may have changed through normal host activity.
+          const result=await simulate(read,quote,undefined,currentFee.slot);
+          if(result.rent>integer(quote.rentLamports))throw new TreasuryPreflightError("cost-limit");
+          return result;
+        });
+        const guard=():void=>{authorize();quoteCurrent(quote);sameSource(quote);freshPreflight(preflight.checkedAtMs);remainingCapacity(quote,1,preflight.checkedAtMs+PREFLIGHT_MAX_AGE_MS);};
+        guard();
+        const helper=options.signerSource??readFileSync(new URL("../../dist/backend/treasury-signer.cjs",import.meta.url),"utf8");
+        if(helper.length<1||Buffer.byteLength(helper)>120_000) throw new TreasuryPreflightError("preflight-unavailable");
+        const output=await connect(approved.permission.computer,approved.credential,async run=>{
+          const guarded:SshRun=(command,settings)=>{
+            guard();
+            return run(approved.credential.sudoPassword===undefined?command:`/usr/bin/sudo -S -p '' -- ${command}`,
+              {...settings,...(approved.credential.sudoPassword===undefined?{}:{input:approved.credential.sudoPassword+"\n"})});
+          };
+          if(await verifyNode(guarded,approved.association)!=="ok")throw new TreasuryPreflightError("source-changed");
+          const prelude='ulimit -S -c 0 && ulimit -H -c 0 && printf 0 > /proc/self/coredump_filter && exec /usr/local/bin/node -e "$1" -- --gridlens-one-nos-transfer "$2"';
+          return guarded(`${cleanNodeRuntime(approved.association)} exec${CLEAN} ${approved.association.binding.nodeContainerId} /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C /bin/sh -c ${shellQuote(prelude)} gridlens-one-nos-transfer ${shellQuote(helper)} ${shellQuote(JSON.stringify(messageInput(quote)))}`,{maximum:4096,timeoutMs:10_000});
+        });
+        if(output.code!==0)throw new TreasuryPreflightError("preflight-unavailable");
+        let response:unknown;try{response=JSON.parse(output.stdout);}catch{throw new TreasuryPreflightError("preflight-unavailable");}
+        if(!rpcObject(response)||Object.keys(response).sort().join(",")!=="signature,transactionBase64"||typeof response.transactionBase64!=="string"||typeof response.signature!=="string")
+          throw new TreasuryPreflightError("preflight-unavailable");
+        await validateSignedTransfer(quote,response.transactionBase64,response.signature);guard();
+        signedPreflights.clear();
+        signedPreflights.set(response.signature,{reviewKey:key,wireHash:createHash("sha256").update(response.transactionBase64).digest("hex"),
+          checkedAtMs:preflight.checkedAtMs,slot:preflight.slot,attempted:false});
+        return {quote,transactionBase64:response.transactionBase64,signature:response.signature};
+      } finally { preparedReviews.delete(key); }
     },
     async submit(signed, authorize = () => {}) {
-      authorize();quoteCurrent(signed.quote);sameSource(signed.quote);await validateSignedTransfer(signed.quote,signed.transactionBase64,signed.signature);
+      const attestation=signedPreflights.get(signed.signature);
+      const guard=():void=>{
+        authorize();quoteCurrent(signed.quote);sameSource(signed.quote);
+        if(!attestation||attestation.attempted||attestation.reviewKey!==reviewKey(signed.quote)
+          ||attestation.wireHash!==createHash("sha256").update(signed.transactionBase64).digest("hex"))
+          throw new TreasuryPreflightError("review-expired");
+        freshPreflight(attestation.checkedAtMs);
+      };
+      guard();await validateSignedTransfer(signed.quote,signed.transactionBase64,signed.signature);guard();
       // The engine durably journals the signature and wire bytes before this call.
-      // maxRetries:0 prohibits provider rebroadcast; this driver never retries send.
-      await usingRpc(async (_provider,read)=>{
-        const quote=signed.quote,currentFee=await fee(read,quote);
-        if(currentFee>integer(quote.feeLamports))throw new Error("Transaction costs increased before submission.");
-        // Re-simulate these exact signed bytes against current accounts. The
-        // allowlisted instructions fix the only token movement; the current fee,
-        // optional rent and simulated remaining SOL enforce the reviewed bounds.
-        const currentRent=await simulate(read,quote,undefined,signed,true);
-        if(currentRent>integer(quote.rentLamports))throw new Error("Account creation cost increased before submission.");
-        authorize();quoteCurrent(quote);sameSource(quote);
+      // RPC performs the signed preflight. Do not spend another fee/simulation
+      // allowance here; the process-local attestation expires after 15 seconds.
+      try { await usingRpc(async (_provider,read)=>{
         const result=await read("sendTransaction",[signed.transactionBase64,
-        {encoding:"base64",skipPreflight:false,preflightCommitment:"confirmed",maxRetries:0}],()=>{authorize();quoteCurrent(quote);sameSource(quote);});
+        {encoding:"base64",skipPreflight:false,preflightCommitment:"confirmed",maxRetries:0,minContextSlot:attestation!.slot}],()=>{guard();attestation!.attempted=true;});
         if(result!==signed.signature) throw new Error("The submission outcome is uncertain; reconcile this signature before another transfer.");});
+      } finally { signedPreflights.delete(signed.signature); }
     },
     async reconcile(signed) {
       await validateSignedTransfer(signed.quote,signed.transactionBase64,signed.signature);
@@ -236,7 +308,7 @@ export function createTreasuryTransferDriver(options: TreasuryTransferOptions): 
         if(result===null)return{status:"uncertain" as const,observedAtMs:now()};
         return finalizedReceipt(signed,result,now());
       });}catch(error){
-        const retryAtMs=error instanceof SolanaRpcError&&error.retryAtMs!==null?error.retryAtMs:session.nextEligibleAt();
+        const retryAtMs=error instanceof TreasuryPreflightError&&error.retryAtMs!==undefined?error.retryAtMs:session.nextEligibleAt();
         return{status:"uncertain",observedAtMs:now(),...(retryAtMs!==null&&retryAtMs>now()?{retryAtMs}: {})};
       }
     },

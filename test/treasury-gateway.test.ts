@@ -15,7 +15,8 @@ import { openSharedState } from "../src/backend/sqlite-state.ts";
 import { ownerCall, SharedHttpError, startOwnerSocket } from "../src/backend/ipc.ts";
 import { openTreasuryVault } from "../src/backend/treasury-vault.ts";
 import type { TreasuryDriver, TreasuryQuote } from "../src/backend/treasury.ts";
-import { parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryStatus, parseTreasuryUnlock } from "../src/contracts/treasury.ts";
+import { TreasuryPreflightError } from "../src/backend/treasury-errors.ts";
+import { TREASURY_PREFLIGHT_CODES, parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryPreflightFailure, parseTreasuryStatus, parseTreasuryUnlock, treasuryPreflightStatus } from "../src/contracts/treasury.ts";
 import type { BrowserSecurityPublication } from "../src/contracts/browser-security.ts";
 import { startFleetServer } from "../src/server/application.ts";
 import { NOS_MINT } from "../src/fleet/nos.ts";
@@ -40,9 +41,12 @@ async function fixture(t: TestContext) {
     certificatePem: ca, serverCertificatePem: leaf, serverCertificateSha256: createHash("sha256").update(new X509Certificate(leaf).raw).digest("hex") };
   const state = openSharedState(join(directory, "state")), vault = openTreasuryVault(directory, { create: true });
   const calls = { prepare: 0, sign: 0, submit: 0, reconcile: 0 };
+  let prepareFailure: unknown, admissionFailure: unknown;
   const driver: TreasuryDriver = {
+    assertReady() { if (admissionFailure !== undefined) throw admissionFailure; },
     async prepare(context, sourceAddress, destinationAddress) {
-      calls.prepare++; const now = Date.now();
+      calls.prepare++; if (prepareFailure !== undefined) throw prepareFailure;
+      const now = Date.now();
       const quote: TreasuryQuote = { scopeId: context.scopeId, rosterRevision: context.rosterRevision, sourceAddress, destinationAddress,
         sourceTokenAddress: address("4"), destinationTokenAddress: address("5"), mintAddress: NOS_MINT, amountBaseUnits: "1000000", decimals: 6,
         feeLamports: "5000", rentLamports: "2039280", reserveLamports: "50000000", maxCostLamports: "5000000",
@@ -92,8 +96,59 @@ async function fixture(t: TestContext) {
     const result = await treasury("setup", { version: 1, ticket: ticket.ticket, password: PASSWORD, destinationAddress: DESTINATION });
     assert.equal(result.code, 200, result.text); return parseTreasuryUnlock(JSON.parse(result.text));
   };
-  return { directory, service, calls, readSocket, treasurySocket, controlSocket, grant, operator, browser, publication, servers, call, treasury, setup };
+  return { directory, service, calls, readSocket, treasurySocket, controlSocket, grant, operator, browser, publication, servers, call, treasury, setup,
+    failPreparation(error: unknown) { prepareFailure = error; }, failAdmission(error: unknown) { admissionFailure = error; } };
 }
+
+test("typed review failures cross real TLS and dedicated IPC without consuming the pilot or reaching a signer", async t => {
+  const f = await fixture(t), unlock = await f.setup();
+  for (const code of TREASURY_PREFLIGHT_CODES) {
+    const retryAtMs = code === "budget-wait" || code === "provider-unavailable" ? Date.now() + 60_000 : undefined;
+    f.failPreparation(new TreasuryPreflightError(code, retryAtMs));
+    const response = await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken);
+    assert.equal(response.code, treasuryPreflightStatus(code));
+    assert.deepEqual(parseTreasuryPreflightFailure(JSON.parse(response.text)), { version: 1, kind: "preflight-failure", code,
+      ...(retryAtMs === undefined ? {} : { retryAtMs }) });
+    const configuration = await f.treasury("configuration", undefined, unlock.unlockToken);
+    assert.equal(parseTreasuryConfiguration(JSON.parse(configuration.text)).pilotConsumed, false);
+    assert.deepEqual(JSON.parse((await f.treasury("operations", undefined, unlock.unlockToken)).text).operations, []);
+    assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0); assert.equal(f.calls.reconcile, 0);
+  }
+  f.failPreparation(undefined);
+  const recovered = await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken);
+  assert.equal(recovered.code, 200); assert.equal(parseTreasuryPlan(JSON.parse(recovered.text)).quote.amountBaseUnits, "1000000");
+  assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+});
+
+test("unknown provider errors are sanitized through TLS and IPC and preserve the unused allowance", async t => {
+  const f = await fixture(t), unlock = await f.setup();
+  f.failPreparation(Object.assign(new Error("Authorization: private-provider-value; https://private.invalid/account"),
+    { code: "budget-wait", retryAtMs: Date.now() + 60_000, cause: { secret: "never expose this" } }));
+  const response = await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken);
+  assert.equal(response.code, 503);
+  assert.deepEqual(JSON.parse(response.text), { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
+  assert.doesNotMatch(response.text, /Authorization|private-provider|private\.invalid|never expose/);
+  assert.equal(parseTreasuryConfiguration(JSON.parse((await f.treasury("configuration", undefined, unlock.unlockToken)).text)).pilotConsumed, false);
+  assert.deepEqual(f.calls, { prepare: 1, sign: 0, submit: 0, reconcile: 0 });
+});
+
+test("known confirmation admission deferral returns a typed rejection and keeps the same reviewed plan usable", async t => {
+  const f = await fixture(t), unlock = await f.setup();
+  const prepared = await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken); assert.equal(prepared.code, 200);
+  const plan = parseTreasuryPlan(JSON.parse(prepared.text)), retryAtMs = Date.now() + 1000;
+  const body = { version: 1, planId: plan.planId, reviewDigest: plan.reviewDigest, idempotencyKey: "known_preflight_failure_retry" };
+  f.failAdmission(new TreasuryPreflightError("budget-wait", retryAtMs));
+  const deferred = await f.treasury("confirm", body, unlock.unlockToken);
+  assert.equal(deferred.code, 429);
+  assert.deepEqual(JSON.parse(deferred.text), { version: 1, kind: "preflight-failure", code: "budget-wait", retryAtMs });
+  assert.equal(parseTreasuryConfiguration(JSON.parse((await f.treasury("configuration", undefined, unlock.unlockToken)).text)).pilotConsumed, false);
+  assert.deepEqual(JSON.parse((await f.treasury("operations", undefined, unlock.unlockToken)).text).operations, []);
+  assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+  f.failAdmission(undefined);
+  const confirmed = await f.treasury("confirm", body, unlock.unlockToken); assert.equal(confirmed.code, 200);
+  await f.service.wallet!.waitForIdle();
+  assert.equal(f.calls.sign, 1); assert.equal(f.calls.submit, 1);
+});
 
 test("real HTTPS and dedicated IPC complete owner setup, bounded review, one send and verified receipt", async t => {
   const f = await fixture(t);

@@ -39,3 +39,23 @@ for (const denied of [false, true]) test(`unsupported Wallet RPC leaves the Flee
   assert.notEqual(treasury.eligible(), provider);
   assert.deepEqual(await transport.rpc(provider, "getMultipleAccounts", [], new AbortController().signal, Date.now() + 5000), { context: { slot: 1 }, value: [] });
 });
+
+test("RPC deferrals distinguish GridLens allowance from an upstream provider pause without dispatching", async () => {
+  let calls = 0;
+  const transport = createSolanaRpc({ fetch: (async (_url, options) => {
+    calls++; const body = JSON.parse(String(options?.body));
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: body.id, result: "fixture" }));
+  }) as typeof fetch });
+  const provider = transport.createSession("treasury").eligible()!, signal = new AbortController().signal;
+  provider.retryAtMs = Date.now() + 60_000;
+  await assert.rejects(transport.rpc(provider, "getFeeForMessage", [], signal, Date.now() + 5000), error => {
+    assert(error instanceof SolanaRpcError); assert.equal(error.deferSource, "provider"); assert.equal(error.retryAtMs, provider.retryAtMs); return true;
+  });
+  assert.equal(calls, 0);
+  provider.retryAtMs = 0;
+  await transport.rpc(provider, "getFeeForMessage", [], signal, Date.now() + 5000);
+  await assert.rejects(transport.rpc(provider, "getFeeForMessage", [], signal, Date.now() + 10), error => {
+    assert(error instanceof SolanaRpcError); assert.equal(error.deferSource, "budget"); assert.equal(error.kind, "deferred"); return true;
+  });
+  assert.equal(calls, 1);
+});

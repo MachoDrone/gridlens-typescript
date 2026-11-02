@@ -78,6 +78,35 @@ Financial records remain outside rollbackable observation snapshots. Reset
 cancels unsent work; submitted work continues reconciliation. Closing a browser
 cannot reverse an already submitted blockchain transaction.
 
+### Preparing a review while Fleet is collecting
+
+A validated review is returned even when execution capacity is temporarily busy.
+Preparation does not reserve the 1 NOS allowance or access a source signing key.
+Confirmation checks capacity before reserving that allowance. A known rejection
+keeps the review available until expiry and requires another explicit owner action;
+an ambiguous confirmation response still requires checking activity before retrying.
+
+The transfer path uses eight RPC methods with an already verified mainnet provider
+(nine when genesis verification is needed), sharing the unchanged Fleet request
+limits. Before signing, a current fee check and unsigned simulation validate the
+fixed transfer, current token-account identities/states and resulting SOL reserve.
+Normal balance changes need not equal the earlier review's balances. The resulting
+preflight proof expires after 15 seconds and is bound to the exact signed bytes;
+submission still requests RPC signature verification/preflight and no retries.
+The review expires no later than 60 seconds after its verified bank timestamp;
+a later response at the same stalled bank cannot renew that freshness proof.
+The finalized receipt must still prove the exact token movement. Concurrent
+external spending cannot be atomically prevented by these application checks.
+
+Blocked reviews carry a finite reason code, distinguishing GridLens request
+capacity, provider availability, balances, costs, account/source changes and
+expired reviews. Raw exceptions, credentials, URLs and authorization material are
+never forwarded. Retry times are shown only when the scheduler supplies one;
+they describe local eligibility, not a promised provider recovery time.
+Preparation has a 28-second RPC-phase bound including queue waits, a 35-second
+owner-call bound and a 55-second browser bound including the preceding security
+check. Other browser requests retain their existing 20-second bound.
+
 ## Interfaces and staged release
 
 The HTTPS-only `/api/shared/treasury/*` API provides status, setup, unlock, lock,

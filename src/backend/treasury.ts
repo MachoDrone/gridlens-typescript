@@ -3,6 +3,7 @@ import type { FleetContext } from "../contracts/fleet.ts";
 import type { DeviceAccess, PrivateState } from "./access.ts";
 import type { TreasuryVault } from "./treasury-vault.ts";
 import { SharedHttpError } from "./ipc.ts";
+import { TreasuryPreflightError, treasuryPreflightFailure } from "./treasury-errors.ts";
 import { isMetadataAddress } from "../fleet/host-metadata.ts";
 import { NOS_MINT } from "../fleet/nos.ts";
 import { TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_RESERVE, parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryQuote } from "../contracts/treasury.ts";
@@ -343,8 +344,9 @@ export function createTreasury(state: PrivateState, options: {
       try {
         const quote = parseQuote(await driver.prepare(structuredClone(principal.context), body.sourceAddress, recipient));
         requireUnlock(body);
+        if (now() >= quote.expiresAtMs) throw new TreasuryPreflightError("review-expired");
         if (available().consumed || available().revision !== revision || quote.sourceAddress !== body.sourceAddress || quote.destinationAddress !== recipient
-          || quote.scopeId !== principal.context.scopeId || quote.rosterRevision !== principal.context.rosterRevision || now() >= quote.expiresAtMs
+          || quote.scopeId !== principal.context.scopeId || quote.rosterRevision !== principal.context.rosterRevision
           || quote.preparedAtMs > now() + 15_000 || binding().hash !== securityBinding.hash) fail(409);
         const planId = randomUUID(), publicQuote = parseTreasuryQuote(quote);
         const reviewDigest = digest(JSON.stringify([access.serverId, principal.context.scopeId, principal.context.rosterRevision, revision, planId, quote]));
@@ -352,7 +354,13 @@ export function createTreasury(state: PrivateState, options: {
         plans.clear(); plans.set(planId, { public: publicValue, quote, revision, deviceId: principal.deviceId, unlockHash: authorization.unlock.hash, binding: securityBinding.hash });
         authorization.unlock.expiresAtMs = now() + WINDOW;
         return structuredClone(publicValue);
-      } catch (error) { if (error instanceof SharedHttpError) throw error; return fail(503); }
+      } catch (error) {
+        if (error instanceof SharedHttpError) throw error;
+        // Do not return financial preflight information after access was revoked
+        // while the read was waiting for the provider or shared allowance.
+        requireUnlock(body);
+        return treasuryPreflightFailure(error);
+      }
       finally { preparing = false; }
     }
     if (name === "confirm") {
@@ -366,10 +374,11 @@ export function createTreasury(state: PrivateState, options: {
       const prepared = plans.get(body.planId);
       if (available().consumed || !prepared || prepared.public.reviewDigest !== body.reviewDigest || prepared.revision !== available().revision
         || prepared.deviceId !== principal.deviceId || prepared.unlockHash !== authorization.unlock.hash || prepared.binding !== securityBinding.hash
-        || prepared.quote.expiresAtMs <= now() || prepared.quote.rosterRevision !== principal.context.rosterRevision) fail(409);
+        || prepared.quote.rosterRevision !== principal.context.rosterRevision) fail(409);
+      if (prepared.quote.expiresAtMs <= now()) return treasuryPreflightFailure(new TreasuryPreflightError("review-expired"));
       // Known budget deferrals must not consume the sole pilot before any
       // signer starts. This does not increase or reset the shared allowance.
-      try { driver.assertReady?.(structuredClone(prepared.quote)); } catch { fail(409); }
+      try { driver.assertReady?.(structuredClone(prepared.quote)); } catch (error) { return treasuryPreflightFailure(error); }
       const at = now(), id = randomUUID();
       const created: StoredOperation = { public: { id, phase: "authorized", sourceAddress: prepared.quote.sourceAddress,
         destinationAddress: prepared.quote.destinationAddress, amountBaseUnits: TREASURY_AMOUNT, signature: null,

@@ -1,7 +1,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
-import type { TreasuryConfiguration, TreasuryOperation, TreasuryPlan } from "../../src/contracts/treasury.ts";
+import { treasuryPreflightStatus } from "../../src/contracts/treasury.ts";
+import type { TreasuryConfiguration, TreasuryOperation, TreasuryPlan, TreasuryPreflightCode } from "../../src/contracts/treasury.ts";
 
 const ORIGIN = "https://wallet.gridlens.invalid";
 const SOURCE = "11111111111111111111111111111111";
@@ -16,10 +17,13 @@ interface Fixture {
   configured: boolean; consumed: boolean; destination: string; requests: RequestRecord[]; operations: TreasuryOperation[];
   confirmCalls: number; lockCalls: number; loseConfirmReply: boolean; rejectUnlock: boolean;
   quoteDestination: string | undefined; amount: string; lastPlan: TreasuryPlan | undefined; clockOffsetMs: number;
+  prepareWait: Promise<void> | undefined; unlockWait: Promise<void> | undefined;
+  prepareFailure: { status: number; value: unknown } | undefined; confirmFailure: { status: number; value: unknown } | undefined;
 }
 async function fixture(page: Page): Promise<Fixture> {
   const state: Fixture = { configured: true, consumed: false, destination: DESTINATION, requests: [], operations: [], confirmCalls: 0,
-    lockCalls: 0, loseConfirmReply: false, rejectUnlock: false, quoteDestination: undefined, amount: "1000000", lastPlan: undefined, clockOffsetMs: 0 };
+    lockCalls: 0, loseConfirmReply: false, rejectUnlock: false, quoteDestination: undefined, amount: "1000000", lastPlan: undefined, clockOffsetMs: 0,
+    prepareWait: undefined, unlockWait: undefined, prepareFailure: undefined, confirmFailure: undefined };
   const configuration = (): TreasuryConfiguration => ({ version: 1, revision: 1, destinationAddress: state.destination,
     hosts: [{ address: SOURCE, label: "Synthetic host" }], amountBaseUnits: "1000000", reserveLamports: "50000000", maxCostLamports: "5000000", pilotConsumed: state.consumed });
   const assets: Record<string, string> = { "/wallet": "wallet.html", "/wallet.css": "wallet.css", "/preview/wallet.js": "preview/wallet.js",
@@ -40,6 +44,7 @@ async function fixture(page: Page): Promise<Fixture> {
     const send = async (value: unknown, status = 200) => route.fulfill({ status, contentType: "application/json", json: value });
     if (path === "/status") { await send({ version: 1, supported: true, state: state.configured ? "locked" : "setup-required", pilotConsumed: state.consumed, serverId: "synthetic-server", scopeId: "synthetic-fleet", revision: 1 }); return; }
     if (path === "/unlock" || path === "/setup") {
+      if (state.unlockWait) await state.unlockWait;
       if (state.rejectUnlock || body?.password !== PASSWORD || path === "/setup" && body?.ticket !== TICKET) { await send({ version: 1, error: "denied" }, 403); return; }
       if (path === "/setup") { state.configured = true; state.destination = String(body?.destinationAddress); }
       await send({ version: 1, unlockToken: TOKEN, expiresAtMs: Date.now() + 300_000, configuration: configuration() }); return;
@@ -53,6 +58,8 @@ async function fixture(page: Page): Promise<Fixture> {
     }
     if (path === "/operations") { await send({ version: 1, operations: state.operations }); return; }
     if (path === "/prepare") {
+      if (state.prepareWait) await state.prepareWait;
+      if (state.prepareFailure) { await send(state.prepareFailure.value, state.prepareFailure.status); return; }
       const now = Date.now() + state.clockOffsetMs;
       state.lastPlan = { version: 1, planId: "synthetic-plan", reviewDigest: "b".repeat(64), expiresAtMs: now + 120_000,
         quote: { sourceAddress: SOURCE, destinationAddress: state.quoteDestination ?? state.destination, sourceTokenAddress: SOURCE,
@@ -62,7 +69,9 @@ async function fixture(page: Page): Promise<Fixture> {
       await send(state.lastPlan); return;
     }
     if (path === "/confirm") {
-      state.confirmCalls++; state.consumed = true;
+      state.confirmCalls++;
+      if (state.confirmFailure) { await send(state.confirmFailure.value, state.confirmFailure.status); return; }
+      state.consumed = true;
       const now = Date.now();
       const operation: TreasuryOperation = { id: "synthetic-operation", phase: state.loseConfirmReply ? "uncertain" : "confirmed", sourceAddress: SOURCE,
         destinationAddress: state.destination, amountBaseUnits: "1000000", signature: SIGNATURE, startedAtMs: now, updatedAtMs: now,
@@ -85,6 +94,111 @@ async function prepare(page: Page): Promise<void> {
   await page.getByLabel("Source host", { exact: true }).selectOption(SOURCE);
   await page.getByRole("button", { name: "Review 1 NOS transfer", exact: true }).click();
 }
+function delayedResponse(): { promise: Promise<void>; finish(): void } {
+  let finish!: () => void;
+  const promise = new Promise<void>(resolve => { finish = resolve; });
+  return { promise, finish };
+}
+
+test("a delayed balance review remains pending past twenty seconds and completes without another request", async ({ page }) => {
+  await page.clock.install({ time: new Date() });
+  const state = await fixture(page), gate = delayedResponse(); state.prepareWait = gate.promise;
+  try {
+    await unlock(page); await prepare(page);
+    await expect.poll(() => state.requests.filter(request => request.path === "/prepare").length).toBe(1);
+    await page.clock.fastForward(25_000); state.clockOffsetMs = 25_000;
+    await expect(page.locator("#prepare-transfer")).toBeDisabled(); await expect(page.locator("#wallet-review")).toBeHidden();
+    await expect(page.locator("#wallet-message")).toHaveText("Checking balances and costs…");
+    gate.finish(); await expect(page.locator("#wallet-review")).toBeVisible();
+    expect(state.requests.filter(request => request.path === "/prepare")).toHaveLength(1);
+    expect(state.confirmCalls).toBe(0); expect(state.consumed).toBe(false);
+  } finally { gate.finish(); }
+});
+
+test("balance review stops at its fifty-five second deadline without automatic retry or authorization", async ({ page }) => {
+  const at = Date.now(); await page.clock.install({ time: new Date(at) });
+  await page.clock.pauseAt(new Date(at + 1000));
+  const state = await fixture(page), gate = delayedResponse(); state.prepareWait = gate.promise;
+  try {
+    await unlock(page); await prepare(page);
+    await expect.poll(() => state.requests.filter(request => request.path === "/prepare").length).toBe(1);
+    await page.clock.fastForward(54_999); await expect(page.locator("#prepare-transfer")).toBeDisabled();
+    await page.clock.fastForward(2); await expect(page.locator("#wallet-message")).toContainText("could not complete");
+    await expect(page.locator("#prepare-transfer")).toBeEnabled(); await expect(page.locator("#wallet-review")).toBeHidden();
+    expect(state.requests.filter(request => request.path === "/prepare")).toHaveLength(1);
+    expect(state.confirmCalls).toBe(0); expect(state.consumed).toBe(false);
+  } finally { gate.finish(); }
+});
+
+test("ordinary Wallet requests retain their twenty second deadline", async ({ page }) => {
+  await page.clock.install({ time: new Date() });
+  const state = await fixture(page), gate = delayedResponse(); state.unlockWait = gate.promise;
+  try {
+    await page.goto(`${ORIGIN}/wallet`); await page.locator("#unlock-password").fill(PASSWORD);
+    await page.getByRole("button", { name: "Unlock Wallet", exact: true }).click();
+    await expect.poll(() => state.requests.filter(request => request.path === "/unlock").length).toBe(1);
+    await page.clock.fastForward(20_001); await expect(page.locator("#wallet-message")).toContainText("could not complete");
+    await expect(page.locator("#wallet-unlocked")).toBeHidden();
+    expect(state.requests.filter(request => request.path === "/unlock")).toHaveLength(1);
+  } finally { gate.finish(); }
+});
+
+const preflightCopy: [TreasuryPreflightCode, string][] = [
+  ["budget-wait", "GridLens is waiting for enough shared blockchain request capacity"], ["provider-unavailable", "balance provider could not complete"],
+  ["insufficient-nos", "does not have 1 NOS available"], ["insufficient-sol-reserve", "retain its 0.05 SOL reserve"],
+  ["cost-limit", "above the amount you reviewed or the 0.005 SOL limit"], ["account-invalid", "token account could not be validated"],
+  ["source-changed", "host's identity or access changed"], ["review-expired", "review can no longer be used"],
+  ["preflight-unavailable", "could not finish checking this transfer"],
+];
+for (const [code, copy] of preflightCopy) test(`a ${code} review failure gives a precise reason without consuming the pilot`, async ({ page }) => {
+  const state = await fixture(page);
+  state.prepareFailure = { status: treasuryPreflightStatus(code), value: { version: 1, kind: "preflight-failure", code,
+    ...(code === "budget-wait" ? { retryAtMs: Date.now() + 60_000 } : {}) } };
+  await unlock(page); await prepare(page);
+  await expect(page.locator("#wallet-message")).toContainText(copy);
+  await expect(page.locator("#wallet-message")).toContainText("No transfer was authorized.");
+  await expect(page.locator("#wallet-message")).not.toContainText("Check your connection");
+  if (code === "budget-wait") await expect(page.locator("#wallet-message")).toContainText("Try again after");
+  await expect(page.locator("#prepare-transfer")).toBeEnabled(); await expect(page.locator("#pilot-finished")).toBeHidden();
+  expect(state.requests.filter(request => request.path === "/prepare")).toHaveLength(1); expect(state.confirmCalls).toBe(0);
+  expect(state.consumed).toBe(false); expect(state.operations).toHaveLength(0);
+});
+
+test("a known confirmation admission failure preserves the review and permits only an explicit retry", async ({ page }) => {
+  const state = await fixture(page); await unlock(page); await prepare(page);
+  state.confirmFailure = { status: 429, value: { version: 1, kind: "preflight-failure", code: "budget-wait", retryAtMs: Date.now() + 1000 } };
+  await page.getByRole("button", { name: "Send exactly 1 NOS", exact: true }).click();
+  await expect(page.locator("#wallet-message")).toContainText("No transfer was authorized.");
+  await expect(page.locator("#wallet-message")).not.toContainText("do not send again");
+  await expect(page.locator("#wallet-review")).toBeVisible(); await expect(page.locator("#confirm-transfer")).toBeEnabled();
+  await expect(page.locator("#pilot-finished")).toBeHidden(); expect(state.consumed).toBe(false); expect(state.operations).toHaveLength(0);
+  expect(state.confirmCalls).toBe(1); state.confirmFailure = undefined;
+  await page.getByRole("button", { name: "Send exactly 1 NOS", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Confirmed · 1 NOS received", exact: true })).toBeVisible();
+  expect(state.confirmCalls).toBe(2);
+  const confirms = state.requests.filter(request => request.path === "/confirm");
+  expect(confirms[0]?.body?.planId).toBe(confirms[1]?.body?.planId);
+  expect(confirms[0]?.body?.reviewDigest).toBe(confirms[1]?.body?.reviewDigest);
+});
+
+test("an explicitly expired review keeps its details but requires a new review before confirmation", async ({ page }) => {
+  const state = await fixture(page); await unlock(page); await prepare(page);
+  state.confirmFailure = { status: 409, value: { version: 1, kind: "preflight-failure", code: "review-expired" } };
+  await page.getByRole("button", { name: "Send exactly 1 NOS", exact: true }).click();
+  await expect(page.locator("#wallet-review")).toBeVisible(); await expect(page.locator("#confirm-transfer")).toBeDisabled();
+  await expect(page.locator("#prepare-transfer")).toBeEnabled(); expect(state.consumed).toBe(false);
+  expect(state.confirmCalls).toBe(1); expect(state.operations).toHaveLength(0);
+});
+
+for (const oversized of [false, true]) test(`untrusted ${oversized ? "oversized" : "extended"} error data is never rendered or accepted as a preauthorization result`, async ({ page }) => {
+  const state = await fixture(page); await unlock(page); await prepare(page);
+  const malicious = "<img src=x onerror=alert(1)>secret-provider-token";
+  state.confirmFailure = { status: 429, value: { version: 1, kind: "preflight-failure", code: "budget-wait", message: malicious.repeat(oversized ? 300 : 1) } };
+  await page.getByRole("button", { name: "Send exactly 1 NOS", exact: true }).click();
+  await expect(page.locator("#wallet-message")).toContainText("result is not yet known");
+  await expect(page.locator("body")).not.toContainText("secret-provider-token"); await expect(page.locator("#wallet-message img")).toHaveCount(0);
+  await expect(page.locator("#prepare-transfer")).toBeDisabled(); expect(state.confirmCalls).toBe(1);
+});
 
 test("Wallet blocks password entry and every financial API read on HTTP", async ({ page }) => {
   const state = await fixture(page);

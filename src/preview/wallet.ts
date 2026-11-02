@@ -1,5 +1,5 @@
-import { parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryStatus, parseTreasuryUnlock } from "../contracts/treasury.ts";
-import type { TreasuryConfiguration, TreasuryOperation, TreasuryPlan, TreasuryUnlock } from "../contracts/treasury.ts";
+import { parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryPreflightFailure, parseTreasuryStatus, parseTreasuryUnlock, treasuryPreflightStatus } from "../contracts/treasury.ts";
+import type { TreasuryConfiguration, TreasuryOperation, TreasuryPlan, TreasuryPreflightFailure, TreasuryUnlock } from "../contracts/treasury.ts";
 
 const element = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
 const text = (id: string, value: string): void => { element(id).textContent = value; };
@@ -14,7 +14,7 @@ let setupTicket: string | undefined = fragment.size === 1 && /^[A-Za-z0-9_-]{43}
 const hadTicket = location.hash.length > 0;
 if (location.hash) history.replaceState(null, "", location.pathname);
 let unlockToken: string | undefined, configuration: TreasuryConfiguration | undefined, review: TreasuryPlan | undefined;
-let expiresAtMs = 0, lastInteractionAtMs = 0, busy = false, generation = 0, authorizationUncertain = false;
+let expiresAtMs = 0, lastInteractionAtMs = 0, busy = false, generation = 0, authorizationUncertain = false, reviewInvalidated = false;
 let controller = new AbortController();
 let pollTimer: ReturnType<typeof setTimeout> | undefined, reviewTimer: ReturnType<typeof setTimeout> | undefined;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -34,7 +34,7 @@ function passwordsClear(): void {
   }
 }
 function cancelReview(): void {
-  review = undefined; clearTimeout(reviewTimer); element("wallet-review").hidden = true;
+  review = undefined; reviewInvalidated = false; clearTimeout(reviewTimer); element("wallet-review").hidden = true;
   element("transfer-review").replaceChildren(); text("review-expiry", "");
 }
 function controls(): void {
@@ -45,43 +45,86 @@ function controls(): void {
   element("pilot-finished").hidden = !consumed;
   element<HTMLButtonElement>("prepare-transfer").disabled = busy || consumed || !configuration?.hosts.length;
   element<HTMLSelectElement>("wallet-source").disabled = busy || consumed || !configuration?.hosts.length;
-  element<HTMLButtonElement>("confirm-transfer").disabled = busy || !review || review.expiresAtMs <= Date.now() || consumed;
+  element<HTMLButtonElement>("confirm-transfer").disabled = busy || !review || reviewInvalidated || review.expiresAtMs <= Date.now() || consumed;
   element<HTMLButtonElement>("cancel-transfer").disabled = busy;
   element<HTMLButtonElement>("refresh-activity").disabled = busy;
 }
 class WalletHttpError extends Error {
   readonly status: number;
-  constructor(status: number) { super("Wallet request failed."); this.status = status; }
+  readonly preflight: TreasuryPreflightFailure | undefined;
+  constructor(status: number, preflight?: TreasuryPreflightFailure) { super("Wallet request failed."); this.status = status; this.preflight = preflight; }
 }
 async function json(path: string, body?: Record<string, unknown>, token = unlockToken): Promise<unknown> {
   if (!SECURE) throw new Error("HTTPS required.");
   const expectedGeneration = generation;
-  const timeout = AbortSignal.timeout(20_000);
-  const response = await fetch(`${API}${path}`, {
+  const timeout = new AbortController();
+  const timer = setTimeout(() => timeout.abort(new DOMException("Wallet request timed out.", "TimeoutError")), path === "/prepare" ? 55_000 : 20_000);
+  try {
+    const response = await fetch(`${API}${path}`, {
     method: body === undefined ? "GET" : "POST", credentials: "same-origin", cache: "no-store", redirect: "error",
     headers: { Accept: "application/json", ...(token ? { "X-GridLens-Wallet": token } : {}), ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
     ...(body === undefined ? {} : { body: JSON.stringify({ version: 1, ...body }) }),
-    signal: AbortSignal.any([controller.signal, timeout]),
-  });
-  if (!response.ok) { await response.body?.cancel(); throw new WalletHttpError(response.status); }
-  if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) throw new Error("Invalid Wallet response.");
-  const reader = response.body?.getReader(); if (!reader) throw new Error("Missing Wallet response.");
-  let size = 0, data = ""; const decoder = new TextDecoder("utf-8", { fatal: true });
-  for (;;) {
-    const { done, value } = await reader.read(); if (done) break;
-    size += value.byteLength;
-    if (size > 1024 * 1024) { await reader.cancel(); throw new Error("Wallet response too large."); }
-    data += decoder.decode(value, { stream: true });
-  }
-  if (expectedGeneration !== generation || controller.signal.aborted) throw new Error("Wallet locked.");
-  return JSON.parse(data + decoder.decode());
+      signal: AbortSignal.any([controller.signal, timeout.signal]),
+    });
+    if (!response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+      await response.body?.cancel();
+      throw response.ok ? new Error("Invalid Wallet response.") : new WalletHttpError(response.status);
+    }
+    const reader = response.body?.getReader();
+    if (!reader) throw response.ok ? new Error("Missing Wallet response.") : new WalletHttpError(response.status);
+    let size = 0, data = ""; const decoder = new TextDecoder("utf-8", { fatal: true });
+    let value: unknown;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read(); if (done) break;
+        size += value.byteLength;
+        if (size > (response.ok ? 1024 * 1024 : 8192)) { await reader.cancel(); throw new Error("Wallet response too large."); }
+        data += decoder.decode(value, { stream: true });
+      }
+      value = JSON.parse(data + decoder.decode());
+    } catch (error) {
+      await reader.cancel().catch(() => {});
+      if (!response.ok) throw new WalletHttpError(response.status);
+      throw error;
+    }
+    if (expectedGeneration !== generation || controller.signal.aborted) throw new Error("Wallet locked.");
+    if (!response.ok) {
+      let preflight: TreasuryPreflightFailure | undefined;
+      if (path === "/prepare" || path === "/confirm") {
+        try {
+          const failure = parseTreasuryPreflightFailure(value);
+          if (response.status === treasuryPreflightStatus(failure.code)) preflight = failure;
+        } catch { /* An unknown or extended error envelope supplies no authority or prose. */ }
+      }
+      throw new WalletHttpError(response.status, preflight);
+    }
+    return value;
+  } finally { clearTimeout(timer); }
 }
 function publicError(error: unknown): string {
   if (error instanceof WalletHttpError) {
+    if (error.preflight) {
+      const failure = error.preflight;
+      const retry = failure.retryAtMs !== undefined && failure.retryAtMs > Date.now()
+        ? ` Try again after ${new Date(failure.retryAtMs).toLocaleString()}.` : " Try again later.";
+      const reason = {
+        "budget-wait": `GridLens is waiting for enough shared blockchain request capacity.${retry}`,
+        "provider-unavailable": `The balance provider could not complete this check.${retry}`,
+        "insufficient-nos": "This host does not have 1 NOS available to send. Choose another host or review again after its balance changes.",
+        "insufficient-sol-reserve": "This host needs enough SOL to pay the costs and retain its 0.05 SOL reserve. Review again after its balance changes.",
+        "cost-limit": "The cost is above the amount you reviewed or the 0.005 SOL limit. Prepare a new review.",
+        "account-invalid": "The source or receiving token account could not be validated for this NOS transfer. Check the receiving wallet and selected host.",
+        "source-changed": "The selected host's identity or access changed. Check it in Hosts, then prepare a new review.",
+        "review-expired": "This review can no longer be used. Prepare a new review before sending.",
+        "preflight-unavailable": "GridLens could not finish checking this transfer. Prepare a new review later.",
+      }[failure.code];
+      return `${reason} No transfer was authorized.`;
+    }
     if (error.status === 429) return "Too many attempts. Wait a moment before trying again.";
     if (error.status === 401 || error.status === 403) return "Wallet access was denied or expired. Check your owner password and browser connection.";
     if (error.status === 409) return "Wallet changed or this operation is unavailable. Refresh Wallet and check recent activity.";
     if (error.status === 400) return "Check the wallet address and password, then try again.";
+    return "Wallet could not complete this request. Try again later.";
   }
   return "Wallet could not complete this request. Check your connection and try again.";
 }
@@ -274,6 +317,7 @@ element("wallet-prepare-form").addEventListener("submit", event => {
   if (!configuration || configuration.pilotConsumed || authorizationUncertain || !configuration.hosts.some(host => host.address === sourceAddress)) return;
   cancelReview();
   void act(async () => {
+    message("Checking balances and costs…", "pending");
     const plan = parseTreasuryPlan(await json("/prepare", { sourceAddress }));
     if (plan.quote.sourceAddress !== sourceAddress || plan.quote.destinationAddress !== configuration?.destinationAddress || plan.expiresAtMs <= Date.now()) throw new Error("Wallet review changed.");
     renewAfterAction(); review = plan; renderReview(plan); message("Review the receiving address and costs before sending.");
@@ -281,10 +325,9 @@ element("wallet-prepare-form").addEventListener("submit", event => {
 });
 element("confirm-transfer").addEventListener("click", () => {
   const plan = review;
-  if (!plan || plan.expiresAtMs <= Date.now() || !configuration || configuration.pilotConsumed || authorizationUncertain || busy) return;
-  const idempotencyKey = crypto.randomUUID(); cancelReview();
+  if (!plan || reviewInvalidated || plan.expiresAtMs <= Date.now() || !configuration || configuration.pilotConsumed || authorizationUncertain || busy) return;
+  const idempotencyKey = crypto.randomUUID(), startedGeneration = generation;
   void act(async () => {
-    authorizationUncertain = true; controls();
     try {
       const response = await json("/confirm", { planId: plan.planId, reviewDigest: plan.reviewDigest, idempotencyKey });
       if (!response || typeof response !== "object" || (response as { version?: unknown }).version !== 1) throw new Error("Invalid confirmation response.");
@@ -292,9 +335,19 @@ element("confirm-transfer").addEventListener("click", () => {
       if (operation.sourceAddress !== plan.quote.sourceAddress || operation.destinationAddress !== plan.quote.destinationAddress) throw new Error("Transfer identity changed.");
       renewAfterAction();
       operations.set(operation.id, operation); configuration = { ...configuration!, pilotConsumed: true }; authorizationUncertain = false;
+      cancelReview();
       renderOperations(); schedulePoll(); message(operation.phase === "confirmed" ? "Confirmed: exactly 1 NOS reached the receiving wallet." : "Transfer authorized. Follow its result in Recent activity.", operation.phase === "confirmed" ? "success" : "pending");
-    } catch {
-      if (unlockToken) message("The transfer result is not yet known. Refresh activity before taking any further action; do not send again.", "pending");
+    } catch (error) {
+      if (startedGeneration !== generation || !unlockToken) return;
+      if (error instanceof WalletHttpError && error.preflight) {
+        authorizationUncertain = false;
+        if (error.preflight.code === "review-expired") reviewInvalidated = true;
+        message(publicError(error), "pending");
+      } else if (error instanceof WalletHttpError && [401, 403].includes(error.status)) lock(publicError(error));
+      else {
+        authorizationUncertain = true; cancelReview();
+        message("The transfer result is not yet known. Refresh activity before taking any further action; do not send again.", "pending");
+      }
     }
   });
 });

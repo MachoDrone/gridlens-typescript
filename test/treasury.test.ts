@@ -9,7 +9,9 @@ import { createTreasury, TREASURY_LEDGER_KEY } from "../src/backend/treasury.ts"
 import type { TreasuryDriver, TreasuryQuote, TreasurySigned } from "../src/backend/treasury.ts";
 import { openTreasuryVault } from "../src/backend/treasury-vault.ts";
 import type { TreasuryOperation, TreasuryPlan, TreasuryUnlock } from "../src/contracts/treasury.ts";
-import { TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_RESERVE, parseTreasuryConfiguration, parseTreasuryPlan, parseTreasuryOperation } from "../src/contracts/treasury.ts";
+import { TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_RESERVE, TREASURY_PREFLIGHT_CODES, parseTreasuryConfiguration, parseTreasuryPlan,
+  parseTreasuryOperation, parseTreasuryPreflightFailure, treasuryPreflightStatus } from "../src/contracts/treasury.ts";
+import { TreasuryPreflightError, treasuryPreflightFailure } from "../src/backend/treasury-errors.ts";
 import { NOS_MINT } from "../src/fleet/nos.ts";
 import { SharedHttpError } from "../src/backend/ipc.ts";
 
@@ -36,15 +38,20 @@ function fixture() {
   const calls = { prepare: 0, sign: 0, submit: 0, reconcile: 0 };
   let keyReaderCalls = 0;
   let quoteChange: ((quote: TreasuryQuote) => TreasuryQuote) | undefined;
+  let prepareError: unknown, admissionError: unknown;
   let signWait: ReturnType<typeof deferred<void>> | undefined;
   let submitWait: ReturnType<typeof deferred<void>> | undefined;
   let submitFailure = false, receipt: "confirmed" | "failed" | "uncertain" = "confirmed";
   let admissionReady = true, providerRetryAtMs: number | undefined;
   const signature = "2".repeat(88), transactionBase64 = Buffer.from("generated-signed-transaction-never-sent-to-a-network").toString("base64");
   const driver: TreasuryDriver = {
-    assertReady() { if (!admissionReady) throw new Error("Synthetic telemetry consumed the remaining shared allowance."); },
+    assertReady() {
+      if (admissionError !== undefined) throw admissionError;
+      if (!admissionReady) throw new TreasuryPreflightError("budget-wait", at + 60_000);
+    },
     async prepare(fleet, sourceAddress, destinationAddress) {
       calls.prepare++;
+      if (prepareError !== undefined) throw prepareError;
       const quote: TreasuryQuote = { scopeId: fleet.scopeId, rosterRevision: fleet.rosterRevision, sourceAddress, destinationAddress,
         sourceTokenAddress: address("6"), destinationTokenAddress: address("7"), mintAddress: NOS_MINT,
         amountBaseUnits: TREASURY_AMOUNT, decimals: 6, feeLamports: "5000", rentLamports: "2039280", reserveLamports: TREASURY_RESERVE,
@@ -81,6 +88,7 @@ function fixture() {
     get treasury() { return treasury; }, get vault() { return vault; }, get access() { return access; },
     get keyReaderCalls() { return keyReaderCalls; },
     advance(ms: number) { at += ms; }, setQuote(change: (quote: TreasuryQuote) => TreasuryQuote) { quoteChange = change; },
+    prepareFailure(error: unknown) { prepareError = error; }, admissionFailure(error: unknown) { admissionError = error; },
     changeTlsIdentity() { securityState.serverCertificateSha256 = "a".repeat(64); },
     blockSign() { signWait = deferred<void>(); return () => signWait!.resolve(); },
     blockSubmit() { submitWait = deferred<void>(); return () => submitWait!.resolve(); },
@@ -230,7 +238,8 @@ test("known shared-budget deferral at confirmation does not consume the pilot or
   try {
     const unlock = await f.setup(), plan = await f.prepare(unlock);
     f.admission(false);
-    await assert.rejects(f.confirm(unlock, plan), denied(409));
+    const failure = parseTreasuryPreflightFailure(await f.confirm(unlock, plan));
+    assert.equal(failure.code, "budget-wait"); assert.equal(failure.retryAtMs, 1_800_000_060_000);
     const config = await f.request("configuration", { unlockToken: unlock.unlockToken }) as { pilotConsumed: boolean };
     assert.equal(config.pilotConsumed, false); assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
     // A later explicit confirmation is allowed only because no execution was admitted.
@@ -300,13 +309,92 @@ test("changed/overbudget quotes and expired reviews never reach the signer", asy
     const unlock = await f.setup();
     for (const change of [
       (quote: TreasuryQuote) => ({ ...quote, amountBaseUnits: "2000000" as "1000000" }),
-      (quote: TreasuryQuote) => ({ ...quote, destinationAddress: address("9") }),
       (quote: TreasuryQuote) => ({ ...quote, feeLamports: "5000001" }),
       (quote: TreasuryQuote) => ({ ...quote, sourceSolLamports: "50000000" }),
       (quote: TreasuryQuote) => ({ ...quote, mintAddress: address("9") }),
-    ]) { f.setQuote(change); await assert.rejects(f.prepare(unlock)); }
+    ]) { f.setQuote(change); assert.equal(parseTreasuryPreflightFailure(await f.prepare(unlock)).code, "preflight-unavailable"); }
+    f.setQuote(quote => ({ ...quote, destinationAddress: address("9") })); await assert.rejects(f.prepare(unlock), denied(409));
     f.setQuote(quote => quote); const plan = await f.prepare(unlock); f.advance(60_001);
-    await assert.rejects(f.confirm(unlock, plan), denied(409)); assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+    assert.equal(parseTreasuryPreflightFailure(await f.confirm(unlock, plan)).code, "review-expired");
+    assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+  } finally { await f.close(); }
+});
+
+test("preflight failure contract permits only finite codes and scheduler eligibility without raw details", () => {
+  for (const code of TREASURY_PREFLIGHT_CODES) {
+    const result = parseTreasuryPreflightFailure({ version: 1, kind: "preflight-failure", code });
+    assert.equal(result.code, code);
+    assert.equal(treasuryPreflightStatus(code), code === "budget-wait" ? 429 : ["provider-unavailable", "preflight-unavailable"].includes(code) ? 503 : 409);
+  }
+  for (const code of ["budget-wait", "provider-unavailable"]) assert.equal(parseTreasuryPreflightFailure({ version: 1, kind: "preflight-failure", code,
+    retryAtMs: 1_800_000_060_000 }).retryAtMs, 1_800_000_060_000);
+  for (const malformed of [
+    { version: 1, kind: "preflight-failure", code: "upstream-secret" },
+    { version: 1, kind: "preflight-failure", code: "budget-wait", message: "secret" },
+    { version: 1, kind: "preflight-failure", code: "budget-wait", url: "https://secret.invalid" },
+    ...[null, "soon", -1, 0, Infinity, Number.NaN, 8_640_000_000_000_001].map(retryAtMs => ({ version: 1, kind: "preflight-failure", code: "budget-wait", retryAtMs })),
+    { version: 1, kind: "preflight-failure", code: "insufficient-nos", retryAtMs: 1_800_000_060_000 },
+  ]) assert.throws(() => parseTreasuryPreflightFailure(malformed));
+  const secretError = Object.assign(new Error("Bearer synthetic-secret at https://private.invalid"), { code: "budget-wait", retryAtMs: 1_800_000_060_000 });
+  assert.deepEqual(treasuryPreflightFailure(secretError), { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
+  const malformedKnown = Object.assign(new TreasuryPreflightError("budget-wait"), { code: "malformed-secret", cause: secretError });
+  assert.deepEqual(treasuryPreflightFailure(malformedKnown), { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
+});
+
+test("all expected preflight reasons survive the owner boundary without consuming allowance, signing or exposing exceptions", async () => {
+  const f = fixture();
+  try {
+    const unlock = await f.setup();
+    for (const code of TREASURY_PREFLIGHT_CODES) {
+      const error = new TreasuryPreflightError(code, ["budget-wait", "provider-unavailable"].includes(code) ? 1_800_000_060_000 : undefined);
+      error.message = "Synthetic private exception must never reach the browser";
+      f.prepareFailure(error);
+      const result = parseTreasuryPreflightFailure(await f.prepare(unlock));
+      assert.equal(result.code, code); assert.equal(JSON.stringify(result).includes("private"), false);
+      const configuration = await f.request("configuration", { unlockToken: unlock.unlockToken }) as { pilotConsumed: boolean };
+      assert.equal(configuration.pilotConsumed, false);
+      assert.deepEqual(await f.request("operations", { unlockToken: unlock.unlockToken }), { version: 1, operations: [] });
+    }
+    const before = f.calls.prepare;
+    await assert.rejects(f.request("prepare", { sourceAddress: source, unlockToken: unlock.unlockToken, token: f.employee.token }), denied(401));
+    assert.equal(f.calls.prepare, before, "ordinary operators cannot obtain a financial preflight result");
+    assert.equal(f.calls.sign, 0); assert.equal(f.keyReaderCalls, 0); assert.equal(f.calls.submit, 0);
+  } finally { await f.close(); }
+});
+
+test("unknown and malformed preflight errors are sanitized before Review and confirmation admission", async () => {
+  const f = fixture();
+  try {
+    const unlock = await f.setup(), plan = await f.prepare(unlock);
+    for (const error of [new Error("secret token and URL https://private.invalid"),
+      { code: "budget-wait", message: "forged upstream reason" },
+      Object.assign(new TreasuryPreflightError("budget-wait"), { retryAtMs: "malformed-secret" }),
+    ]) {
+      f.prepareFailure(error); f.admissionFailure(error);
+      assert.deepEqual(await f.prepare(unlock), { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
+      assert.deepEqual(await f.confirm(unlock, plan), { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
+      const saved = f.values.get(TREASURY_LEDGER_KEY) as { consumed: boolean; operation: unknown };
+      assert.equal(saved.consumed, false); assert.equal(saved.operation, null);
+    }
+    assert.equal(f.calls.sign, 0); assert.equal(f.keyReaderCalls, 0); assert.equal(f.calls.submit, 0);
+    // No failure consumed or invalidated this still-current review. A deliberate
+    // later click can authorize it once the preflight condition is resolved.
+    f.prepareFailure(undefined); f.admissionFailure(undefined);
+    await f.confirm(unlock, plan); await f.treasury.waitForIdle();
+    assert.equal(f.calls.sign, 1); assert.equal(f.calls.submit, 1);
+  } finally { await f.close(); }
+});
+
+test("owner revocation while a rejected preflight is settling withholds its financial reason", async () => {
+  const f = fixture();
+  try {
+    const unlock = await f.setup(); f.prepareFailure(new TreasuryPreflightError("insufficient-nos"));
+    const pending = f.prepare(unlock);
+    f.access.revoke(f.employee.token, f.operator.deviceId);
+    await assert.rejects(pending, denied(401));
+    assert.equal(f.calls.sign, 0); assert.equal(f.keyReaderCalls, 0); assert.equal(f.calls.submit, 0);
+    const saved = f.values.get(TREASURY_LEDGER_KEY) as { consumed: boolean; operation: unknown };
+    assert.equal(saved.consumed, false); assert.equal(saved.operation, null);
   } finally { await f.close(); }
 });
 

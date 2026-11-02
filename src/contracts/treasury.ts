@@ -32,6 +32,29 @@ export interface TreasuryOperation {
 export interface TreasuryUnlock {
   version: 1; unlockToken: string; expiresAtMs: number; configuration: TreasuryConfiguration;
 }
+/** This rejected request has not authorized signing or consumed a pilot allowance.
+ * No upstream text, account details or transport URLs are permitted here. */
+export const TREASURY_PREFLIGHT_CODES = ["budget-wait", "provider-unavailable", "insufficient-nos", "insufficient-sol-reserve", "cost-limit",
+  "account-invalid", "source-changed", "review-expired", "preflight-unavailable"] as const;
+export type TreasuryPreflightCode = typeof TREASURY_PREFLIGHT_CODES[number];
+export interface TreasuryPreflightFailure {
+  version: 1; kind: "preflight-failure"; code: TreasuryPreflightCode;
+  /** Earliest known retry eligibility, never a recovery or completion promise. */
+  retryAtMs?: number;
+}
+export function parseTreasuryPreflightFailure(value: unknown): TreasuryPreflightFailure {
+  if (!object(value) || value.version !== 1 || value.kind !== "preflight-failure"
+    || !(TREASURY_PREFLIGHT_CODES as readonly unknown[]).includes(value.code)
+    || Object.keys(value).some(key => !["version", "kind", "code", "retryAtMs"].includes(key))
+    || value.retryAtMs !== undefined && (!integer(value.retryAtMs) || value.retryAtMs < 1 || value.retryAtMs > 8_640_000_000_000_000
+      || value.code !== "budget-wait" && value.code !== "provider-unavailable")) throw new Error("Invalid Wallet preflight failure.");
+  return { version: 1, kind: "preflight-failure", code: value.code as TreasuryPreflightCode,
+    ...(value.retryAtMs === undefined ? {} : { retryAtMs: value.retryAtMs as number }) };
+}
+export function treasuryPreflightStatus(code: TreasuryPreflightCode): 409 | 429 | 503 {
+  if (!(TREASURY_PREFLIGHT_CODES as readonly unknown[]).includes(code)) throw new Error("Invalid Wallet preflight code.");
+  return code === "budget-wait" ? 429 : code === "provider-unavailable" || code === "preflight-unavailable" ? 503 : 409;
+}
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
 const integer = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
 const text = (value: unknown, maximum = 256): value is string => typeof value === "string" && value.length > 0 && value.length <= maximum && !/[\u0000-\u001f\u007f]/.test(value);

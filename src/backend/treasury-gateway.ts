@@ -3,6 +3,7 @@ import type { TLSSocket } from "node:tls";
 import { ownerCall, readJson, sendJson, SharedHttpError } from "./ipc.ts";
 import { parseBrowserSecurityStatus } from "../contracts/browser-security.ts";
 import type { BrowserSecurityRead } from "./browser-security.ts";
+import { parseTreasuryPreflightFailure, treasuryPreflightStatus } from "../contracts/treasury.ts";
 
 export interface TreasuryGatewayOptions {
   transport: "https" | "vpn-http"; readSocket: string; treasurySocket?: string;
@@ -62,10 +63,19 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
       if (unlockToken !== undefined && (typeof unlockToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(unlockToken))) throw new SharedHttpError(403);
       try {
         const result = await ownerCall(options.treasurySocket, { ...input, operation, token: options.token(request),
-          ...(unlockToken === undefined ? {} : { unlockToken }), httpsOrigin: security.httpsOrigin, serverCertificateSha256: options.certificateSha256 }, undefined, 60_000);
-        sendJson(response, 200, result);
+          ...(unlockToken === undefined ? {} : { unlockToken }), httpsOrigin: security.httpsOrigin, serverCertificateSha256: options.certificateSha256 }, undefined,
+          operation === "prepare" ? 35_000 : 60_000);
+        if ((operation === "prepare" || operation === "confirm") && result && typeof result === "object"
+          && "kind" in result && result.kind === "preflight-failure") {
+          const failure = parseTreasuryPreflightFailure(result);
+          sendJson(response, treasuryPreflightStatus(failure.code), failure);
+        } else sendJson(response, 200, result);
       } finally { delete input.password; delete input.currentPassword; delete input.newPassword; delete input.ticket; }
-    } catch (error) { fail(error instanceof SharedHttpError ? error.status : 503); }
+    } catch (error) {
+      if (url.pathname === `${prefix}prepare` && error instanceof SharedHttpError && error.status === 504)
+        sendJson(response, 503, { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });
+      else fail(error instanceof SharedHttpError ? error.status : 503);
+    }
     return true;
   };
 }
