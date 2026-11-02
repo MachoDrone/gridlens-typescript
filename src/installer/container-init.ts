@@ -90,6 +90,11 @@ export function publicBrowserCertificates(configDirectory = "/config", tlsDirect
   return { certificatePem: trust.join("\n") + "\n", serverCertificatePem: server[0]! + "\n" };
 }
 export function containerOperation(operation: string, body: unknown): unknown {
+  if (operation === "treasury-initialize") {
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) throw new InstallerError("Wallet initialization accepts no options.");
+    ownedDirectory("/treasury");
+    return { initialized: true };
+  }
   if (operation === "updater-initialize") {
     for (const directory of ["/updates", "/update-state"]) {
       mkdirSync(directory, { recursive: true, mode: 0o755 });

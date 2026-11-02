@@ -3,6 +3,7 @@ import { copyFileSync, mkdirSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { writeWebappAssets } from "./webapp-assets.ts";
+import { buildTreasurySigner } from "./build-treasury-signer.ts";
 
 const projectDirectory = fileURLToPath(new URL("../", import.meta.url));
 
@@ -19,10 +20,11 @@ export function buildPreview(): void {
     throw new Error(`Browser compilation failed (${result.signal ?? result.status}).`);
   }
   mkdirSync(outputDirectory, { recursive: true });
-  for (const filename of ["index.html", "styles.css", "shared-setup.html", "secure-setup.html"]) {
+  for (const filename of ["index.html", "styles.css", "shared-setup.html", "secure-setup.html", "wallet.html", "wallet.css"]) {
     copyFileSync(resolve(projectDirectory, "src/preview", filename), resolve(outputDirectory, filename));
   }
   writeWebappAssets(outputDirectory);
+  buildTreasurySigner();
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

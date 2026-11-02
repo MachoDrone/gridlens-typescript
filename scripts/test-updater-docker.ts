@@ -11,6 +11,7 @@ import { chromium } from "@playwright/test";
 import type { Browser } from "@playwright/test";
 import { Coordinator } from "../src/installer/coordinator.ts";
 import { parseBrowserSecurityStatus } from "../src/contracts/browser-security.ts";
+import { parseTreasuryConfiguration, parseTreasuryStatus, parseTreasuryUnlock } from "../src/contracts/treasury.ts";
 import { verifyGateway } from "../src/installer/health.ts";
 import { privateAddress } from "../src/installer/config.ts";
 import { ensureVpnWeb } from "../src/installer/vpn-web.ts";
@@ -48,17 +49,42 @@ export function updaterAcceptanceOptions(args: readonly string[]): UpdaterAccept
 }
 /** Inspect once and derive by immutable ID, so changing a source tag cannot replace
  * the old application's code during the transition under test. */
-export function updaterAcceptanceSource(runner: DockerRunner, image: string, previous = false): { imageId: string; version: string } {
+export interface UpdaterAcceptanceSource { imageId: string; version: string; browserSecurity: boolean; treasury: boolean; minimumCoordinator: 1 | 2 }
+export function updaterAcceptanceSource(runner: DockerRunner, image: string, previous = false): UpdaterAcceptanceSource {
   const values: unknown = JSON.parse(checked(runner, ["image", "inspect", image]));
   if (!Array.isArray(values) || values.length !== 1) throw new Error("The fixture source image could not be verified.");
   const value = values[0] as { Id?: unknown; Config?: { Labels?: Record<string, unknown> } }, identity = value?.Config?.Labels;
   if (typeof value?.Id !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.Id) || identity?.[PRODUCT_LABEL] !== PRODUCT
     || typeof identity["io.gridlens.version"] !== "string" || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(identity["io.gridlens.version"])
     || identity["io.gridlens.updater-protocol"] !== "1"
-    || (previous ? identity["io.gridlens.browser-security-protocol"] !== undefined : identity["io.gridlens.browser-security-protocol"] !== "1"))
-    throw new Error(previous ? "The previous fixture source must be an updater-capable GridLens image predating guided browser setup."
+    || ![undefined, "1"].includes(identity["io.gridlens.browser-security-protocol"] as string | undefined)
+    || ![undefined, "0", "1"].includes(identity["io.gridlens.treasury-protocol"] as string | undefined)
+    || !previous && identity["io.gridlens.browser-security-protocol"] !== "1"
+    || identity["io.gridlens.treasury-protocol"] === "1" && identity["io.gridlens.browser-security-protocol"] !== "1")
+    throw new Error(previous ? "The previous fixture source must be an updater-capable GridLens image with supported declared capabilities."
       : "The target fixture source must advertise updater and guided browser setup support.");
-  return { imageId: value.Id, version: identity["io.gridlens.version"] };
+  const treasury = identity["io.gridlens.treasury-protocol"] === "1";
+  return { imageId: value.Id, version: identity["io.gridlens.version"], browserSecurity: identity["io.gridlens.browser-security-protocol"] === "1",
+    treasury, minimumCoordinator: treasury ? 2 : 1 };
+}
+/** Inspect only mount topology and public environment names. The updater's
+ * Docker authority is separate from having a mounted financial socket. */
+export function verifyUpdaterTreasuryBindings(instance: string, role: string, value: Record<string, unknown>, enabled: boolean): void {
+  assert.ok(["owner", "gateway", "vpn-web", "updater"].includes(role), "Unknown fixture runtime role");
+  const financial = resourceName(instance, "treasury-ipc"), expected = enabled && ["owner", "gateway"].includes(role);
+  const mounts = value.Mounts;
+  assert.ok(Array.isArray(mounts), "Fixture container mounts could not be inspected");
+  const matches = (mounts as { Name?: string; Destination?: string; RW?: boolean; Type?: string }[])
+    .filter(item => item.Name === financial || item.Destination === "/treasury" || item.Destination?.startsWith("/treasury/"));
+  assert.equal(matches.length, expected ? 1 : 0, `Unexpected Wallet socket mount for ${role}`);
+  if (expected) {
+    assert.equal(matches[0]!.Type, "volume"); assert.equal(matches[0]!.Name, financial); assert.equal(matches[0]!.Destination, "/treasury");
+    assert.equal(matches[0]!.RW, role === "owner", `Wrong Wallet socket mount mode for ${role}`);
+  }
+  const environment = (value.Config as { Env?: unknown } | undefined)?.Env;
+  assert.ok(Array.isArray(environment), "Fixture container environment could not be inspected");
+  const socket = (environment as unknown[]).filter(item => typeof item === "string" && item.startsWith("GRIDLENS_TREASURY_SOCKET="));
+  assert.deepEqual(socket, expected ? ["GRIDLENS_TREASURY_SOCKET=/treasury/treasury.sock"] : [], `Unexpected Wallet socket selection for ${role}`);
 }
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
@@ -90,13 +116,13 @@ async function call(origin: string, path: string, body?: unknown): Promise<Recor
   return JSON.parse(Buffer.concat(parts).toString("utf8")) as Record<string, unknown>;
 }
 /** Real certificate validation, with fixture session material retained only in memory. */
-async function secureCall(origin: string, path: string, ca: string, { body, cookie }: { body?: unknown; cookie?: string } = {}): Promise<{
+async function secureCall(origin: string, path: string, ca: string, { body, cookie, unlockToken }: { body?: unknown; cookie?: string; unlockToken?: string } = {}): Promise<{
   status: number; value: Record<string, unknown>; cookie?: string;
 }> {
   return new Promise((resolve, reject) => {
     const encoded = body === undefined ? undefined : JSON.stringify(body);
     const req = httpsRequest(new URL(path, origin), { ca, rejectUnauthorized: true, agent: false, method: encoded ? "POST" : "GET",
-      headers: { Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}),
+      headers: { Accept: "application/json", ...(cookie ? { Cookie: cookie } : {}), ...(unlockToken ? { "X-GridLens-Wallet": unlockToken } : {}),
         ...(encoded ? { Origin: origin, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(encoded) } : {}) } }, response => {
       let size = 0; const chunks: Buffer[] = [];
       response.on("data", (chunk: Buffer) => { size += chunk.length; if (size > 1024 * 1024) req.destroy(new Error("Fixture HTTPS response exceeded its bound.")); else chunks.push(chunk); });
@@ -141,11 +167,17 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }));
     return { config, roles };
   };
+  const checkTreasuryIsolation = (enabled: boolean): void => {
+    for (const role of ["owner", "gateway", "vpn-web", "updater"]) {
+      const value = inspectOwned(runner, "container", resourceName(instance, role), instance);
+      assert.ok(value, `Missing fixture ${role}`); verifyUpdaterTreasuryBindings(instance, role, value, enabled);
+    }
+  };
   try {
     evidence.dockerVersion = checked(runner, ["version", "--format", "{{.Server.Version}}"]);
     const base = updaterAcceptanceSource(runner, options.baseImage);
     const previous = options.previousImage ? updaterAcceptanceSource(runner, options.previousImage, true) : undefined;
-    evidence.baseImageId = base.imageId;
+    evidence.baseImageId = base.imageId; evidence.targetCapabilities = { browserSecurity: base.browserSecurity, treasury: base.treasury, minimumCoordinator: base.minimumCoordinator };
     if (previous) evidence.previousSource = { reference: options.previousImage, ...previous,
       codePreserved: "Only fixture build metadata, update public key and fetch transport are replaced; application and worker source stay from this older image." };
     for (const kind of ["container", "volume", "network"] as const) {
@@ -162,19 +194,19 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     claimed = true;
     const keys = generateKeyPairSync("ed25519"), publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
-    const buildImage = (sequence: number, failingOwner = false): { tag: string; imageId: string; version: string } => {
+    const buildImage = (sequence: number, failingOwner = false): { tag: string; imageId: string; version: string; minimumCoordinator: 1 | 2 } => {
       const tag = `gridlens-modern-${instance}:${sequence}`, version = `0.0.${sequence}-updater-fixture`;
       const files = { "build.json": JSON.stringify({ version, sequence, buildId: `${sequence}:${version}` }), "update-public-key.pem": publicKey, "fixture-fetch.mjs": fixtureFetch,
         ...(failingOwner ? { "scripts/shared-owner.ts": 'throw new Error("Generated isolated updater startup failure.");\n' } : {}) };
       const program = `const fs=require("node:fs");const files=JSON.parse(Buffer.from("${Buffer.from(JSON.stringify(files)).toString("base64")}","base64"));for(const [name,text] of Object.entries(files))fs.writeFileSync("/app/"+name,text);`;
       const source = sequence === 1 && previous ? previous : base;
       checked(runner, ["build", "--pull=false", "--tag", tag, "-"], `FROM ${source.imageId}\nUSER 0:0\nRUN node -e '${program}'\nLABEL io.gridlens.version="${version}" ${INSTANCE_LABEL}="${instance}"\nENV NODE_OPTIONS="--import=/app/fixture-fetch.mjs"\nUSER 1000:1000\n`);
-      const imageId = imageInfo(tag).Id; imageTags.set(tag, imageId); return { tag, imageId, version };
+      const imageId = imageInfo(tag).Id; imageTags.set(tag, imageId); return { tag, imageId, version, minimumCoordinator: source.minimumCoordinator };
     };
     progress("building the three isolated versioned fixture images");
     const first = buildImage(1), second = buildImage(2), third = buildImage(3, true);
     const firstRelease: ModernRelease = { format: "gridlens-modern-release-v1", imageId: first.imageId, version: first.version, sequence: 1, platform: "linux-x64",
-      minimumCoordinator: 1, runtime: { name: "gridlens-runtime-fixture-bootstrap.tar", bytes: 1, sha256: hash("bootstrap fixture") } };
+      minimumCoordinator: first.minimumCoordinator, runtime: { name: "gridlens-runtime-fixture-bootstrap.tar", bytes: 1, sha256: hash("bootstrap fixture") } };
     progress("installing an empty isolated fleet and both gateways");
     const installed = coordinator.install({ instance, release: firstRelease, action: "setup", bindAddress: options.address, port: options.httpsPort, enableUpdater: true });
     const web = ensureVpnWeb(runner, installed.config, firstRelease, options.webPort, { upgrade: true });
@@ -185,7 +217,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const publicCertificateSha256 = hash(new X509Certificate(installed.certificate).raw);
     const initialBrowserSecurity = { serverId: initialStatus.serverId, certificateSha256: publicCertificateSha256,
       serverCertificateSha256: installed.config.certificateSha256, httpsOrigin: installed.config.origin, httpOrigin: web.origin };
-    if (previous) {
+    const migratesBrowserSecurity = previous !== undefined && !previous.browserSecurity;
+    if (migratesBrowserSecurity) {
       // Do not seed the new ledger record here: the old worker and replacement
       // worker must perform the real migration, without a new coordinator repair.
       for (const path of ["/secure-setup", "/secure-setup/status.json"]) {
@@ -232,7 +265,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       assert.notEqual((await secureCall(installed.config.origin, "/secure-setup/connect", installed.certificate, { body: { version: 1, code: handoff.code } })).status, 200);
       evidence.secureBrowserHandoff = "Verified HTTPS browser connected once without a terminal code; no bearer in JSON";
     };
-    if (!previous) {
+    if (!migratesBrowserSecurity) {
       assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity); evidence.browserSecurityInitial = initialBrowserSecurity;
       await connectSecureBrowser();
     }
@@ -243,7 +276,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         const path="/update-state/fixture/"+input.artifact,result=spawnSync("docker",["image","save","--output",path,input.tag],{encoding:"utf8",timeout:300000});if(result.status!==0)throw Error("Fixture archive export failed");
         const hash=createHash("sha256");for await(const chunk of createReadStream(path))hash.update(chunk);process.stdout.write(JSON.stringify({bytes:statSync(path).size,sha256:hash.digest("hex")}));`, { artifact, tag: target.tag }, true)) as { bytes: number; sha256: string };
       const release: ModernRelease = { format: "gridlens-modern-release-v1", imageId: target.imageId, version: target.version, sequence, platform: "linux-x64",
-        minimumCoordinator: 1, runtime: { name: artifact, ...recorded } };
+        minimumCoordinator: target.minimumCoordinator, runtime: { name: artifact, ...recorded } };
       assert.ok(recorded.bytes < 1024 ** 3, "Fixture release must fit the real signed archive bound");
       const manifest = Buffer.from(JSON.stringify(release)), signature = sign(null, manifest, keys.privateKey);
       const channel = Buffer.from(JSON.stringify({ format: CHANNEL_FORMAT, channel: "development", platform: "linux-x64", version: target.version, sequence,
@@ -276,6 +309,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const readStatus = async () => parseUpdateStatus(await call(web.origin, "/api/shared/updates"));
     const available = await until(readStatus, value => value.candidate?.sequence === 2);
     const initial = snapshot(); evidence.initial = initial;
+    checkTreasuryIsolation((previous ?? base).treasury);
+    evidence.initialTreasuryBindings = (previous ?? base).treasury ? "Financial socket mounted only by owner and HTTPS gateway" : "Financial socket absent from all runtime roles";
     browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const pageErrors: string[] = []; page.on("pageerror", error => pageErrors.push(error.message));
@@ -294,6 +329,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected
       && !(document.querySelector("#update-dialog") as HTMLDialogElement | null)?.open, completed.current!.buildId, { timeout: 60_000 });
     const upgraded = snapshot();
+    checkTreasuryIsolation(base.treasury);
     for (const role of ["owner", "gateway", "vpn-web", "updater"]) {
       assert.equal(upgraded.roles[role]!.image, second.imageId); assert.equal(upgraded.roles[role]!.readOnlyRoot, true);
       assert.notEqual(upgraded.roles[role]!.id, initial.roles[role]!.id);
@@ -301,7 +337,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     assert.notEqual(upgraded.config.active.stateVolume, initial.config.active.stateVolume);
     assert.equal(upgraded.config.certificateSha256, initial.config.certificateSha256);
     assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity);
-    if (previous) {
+    if (migratesBrowserSecurity) {
       await connectSecureBrowser();
       evidence.browserSecurityMigration = "Older application initially returned 404; the real old-worker update and replacement worker published metadata without driver bootstrap. Original public CA, leaf and endpoints retained.";
     }
@@ -309,6 +345,65 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.browserSecurityAfterUpgrade = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
     evidence.update = { operation: completed.operation, observedPhases: [...phases], disconnectedReads: disconnected, automaticBrowserReturn: true, ...upgraded };
+    // This owner and its receiving address belong only to the empty, labeled
+    // fixture. No source hosts, source keys or transfer requests are introduced.
+    let walletPassword: string | undefined, walletUnlock: string | undefined;
+    const walletDestination = "1".repeat(31) + "9";
+    interface WalletStateProof { keyDigest: string; configurationDigest: string; verifierDigest: string; keyMatchesLedger: boolean; consumed: boolean; noOperation: boolean }
+    const walletStateProof = (): WalletStateProof => {
+      const result = checked(runner, ["exec", resourceName(instance, "owner"), "node", "--input-type=module", "-e",
+        'import{readFileSync}from"node:fs";import{createHash}from"node:crypto";import{DatabaseSync}from"node:sqlite";'
+        + 'const hash=value=>createHash("sha256").update(value).digest("hex"),key=readFileSync("/credentials/treasury-key-v1");'
+        + 'if(key.length!==32)throw Error("Fixture Wallet key has an invalid size");const keyDigest=hash(key);key.fill(0);'
+        + 'const db=new DatabaseSync("/ledger/ledger.sqlite",{readOnly:true});try{const row=db.prepare("SELECT value FROM private_state WHERE key = ?").get("treasury.v1");'
+        + 'if(!row||typeof row.value!=="string")throw Error("Fixture Wallet state is unavailable");const value=JSON.parse(row.value);'
+        + 'if(!value.owner||typeof value.configuration!=="string")throw Error("Fixture Wallet was not configured");'
+        + 'process.stdout.write(JSON.stringify({keyDigest,configurationDigest:hash(value.configuration),verifierDigest:hash(JSON.stringify(value.owner)),keyMatchesLedger:keyDigest===value.keyId,consumed:value.consumed,noOperation:value.operation===null}));}finally{db.close();}'
+      ]);
+      const proof = JSON.parse(result) as WalletStateProof;
+      assert.ok([proof.keyDigest, proof.configurationDigest, proof.verifierDigest].every(value => typeof value === "string" && /^[a-f0-9]{64}$/.test(value)), "Invalid fixture Wallet state proof");
+      assert.ok(proof.keyMatchesLedger && proof.consumed === false && proof.noOperation === true, "The empty fixture unexpectedly consumed its Wallet pilot");
+      return proof;
+    };
+    const walletCall = (path: string, body?: unknown, unlockToken?: string) => {
+      assert.ok(browserCookie, "The fixture needs its HTTPS browser session");
+      return secureCall(installed.config.origin, `/api/shared/treasury/${path}`, installed.certificate,
+        { cookie: browserCookie, ...(body === undefined ? {} : { body }), ...(unlockToken ? { unlockToken } : {}) });
+    };
+    const checkWalletHttpDenied = async (): Promise<void> => {
+      for (const path of ["status", "setup", "unlock", "prepare", "confirm", "operations"]) {
+        const body = ["status", "operations"].includes(path) ? undefined : JSON.stringify({ version: 1 });
+        const response = await fetch(new URL(`/api/shared/treasury/${path}`, web.origin), { method: body === undefined ? "GET" : "POST",
+          headers: { Origin: web.origin, "X-Forwarded-Proto": "https", ...(body ? { "Content-Type": "application/json" } : {}) },
+          ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(8000) });
+        await response.body?.cancel(); assert.equal(response.status, 403, `HTTP unexpectedly accepted fixture Wallet ${path}`);
+      }
+    };
+    let initialWalletProof: WalletStateProof | undefined;
+    if (base.treasury) {
+      progress("verifying HTTPS-only Wallet setup on the empty fixture");
+      await checkWalletHttpDenied();
+      const status = await walletCall("status"); assert.equal(status.status, 200);
+      const parsed = parseTreasuryStatus(status.value); assert.ok(parsed.supported && parsed.state === "setup-required" && !parsed.pilotConsumed);
+      const terminal = JSON.parse(checked(runner, ["exec", "-i", resourceName(instance, "owner"), "node", "scripts/shared-control.ts", "json"],
+        JSON.stringify({ operation: "treasury-setup", scopeId: "default" }))) as { ticket?: unknown; setupUrl?: unknown; httpsOrigin?: unknown };
+      assert.ok(typeof terminal.ticket === "string" && /^[A-Za-z0-9_-]{43}$/.test(terminal.ticket), "Fixture terminal Wallet setup returned no valid ticket");
+      assert.ok(terminal.httpsOrigin === installed.config.origin && terminal.setupUrl === `${installed.config.origin}/wallet#ticket=${terminal.ticket}`,
+        "Fixture terminal Wallet setup did not bind the saved HTTPS address");
+      walletPassword = randomBytes(32).toString("base64url");
+      const setup = await walletCall("setup", { version: 1, ticket: terminal.ticket, password: walletPassword, destinationAddress: walletDestination });
+      delete terminal.ticket; delete terminal.setupUrl;
+      assert.equal(setup.status, 200); const unlocked = parseTreasuryUnlock(setup.value); walletUnlock = unlocked.unlockToken;
+      assert.ok(unlocked.configuration.destinationAddress === walletDestination && unlocked.configuration.hosts.length === 0 && !unlocked.configuration.pilotConsumed,
+        "Fixture Wallet setup returned an unexpected fleet or receiving address");
+      initialWalletProof = walletStateProof();
+      const activity = await walletCall("operations", undefined, walletUnlock); assert.equal(activity.status, 200); assert.deepEqual(activity.value.operations, []);
+      evidence.walletAfterUpgrade = { sourceCapability: (previous ?? base).treasury ? 1 : 0, targetCapability: 1,
+        minimumCoordinator: target.release.minimumCoordinator, socketIsolation: "owner and HTTPS gateway only; absent from HTTP gateway and updater",
+        httpsCertificateValidated: true, httpFinancialRequestsDenied: true, terminalSetupAndOwnerPasswordVerified: true,
+        encryptedConfigurationEstablished: true, emptyFleet: true, transactionsRequested: 0 };
+    } else evidence.walletAfterUpgrade = { targetCapability: 0, minimumCoordinator: target.release.minimumCoordinator,
+      financialSocketAbsent: true, ownerSetupAttempted: false, transactionsRequested: 0 };
     progress("publishing a signed fixture with an intentionally failing owner");
     publishFixture(broken);
     await until(async () => { await call(web.origin, "/api/shared/updates/check", {}); return readStatus(); }, value => value.candidate?.sequence === 3, 90_000);
@@ -321,11 +416,32 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     assert.equal(restored.operation?.phase, "rolled-back", restored.operation?.error ?? "Fixture failure was not rolled back");
     assert.equal(restored.current?.sequence, 2); assert.ok(restored.operation?.error);
     const rolledBack = snapshot();
+    checkTreasuryIsolation(base.treasury);
     assert.equal(rolledBack.config.active.stateVolume, upgraded.config.active.stateVolume);
     for (const role of ["owner", "gateway", "vpn-web", "updater"]) assert.equal(rolledBack.roles[role]!.image, second.imageId);
     assert.equal(rolledBack.config.certificateSha256, initial.config.certificateSha256);
     assert.deepEqual(await checkBrowserSecurity(), initialBrowserSecurity);
     await checkSecureBrowser();
+    if (base.treasury) {
+      assert.ok(initialWalletProof && walletPassword && walletUnlock, "Fixture Wallet proof was not established before rollback");
+      await checkWalletHttpDenied();
+      const after = walletStateProof();
+      assert.ok(after.keyDigest === initialWalletProof.keyDigest, "Rollback changed the fixture Wallet encryption key");
+      assert.ok(after.configurationDigest === initialWalletProof.configurationDigest, "Rollback changed the encrypted fixture Wallet configuration");
+      assert.ok(after.verifierDigest === initialWalletProof.verifierDigest, "Rollback changed the fixture Wallet password verifier");
+      assert.equal((await walletCall("configuration", undefined, walletUnlock)).status, 401, "Old Wallet unlock unexpectedly survived owner replacement");
+      const reopened = await walletCall("unlock", { version: 1, password: walletPassword }); assert.equal(reopened.status, 200);
+      walletPassword = undefined; const unlocked = parseTreasuryUnlock(reopened.value); walletUnlock = unlocked.unlockToken;
+      const configuration = await walletCall("configuration", undefined, walletUnlock); assert.equal(configuration.status, 200);
+      const restoredConfiguration = parseTreasuryConfiguration(configuration.value);
+      assert.ok(restoredConfiguration.destinationAddress === walletDestination && restoredConfiguration.hosts.length === 0 && !restoredConfiguration.pilotConsumed,
+        "Fixture Wallet configuration was not retained through rollback");
+      const activity = await walletCall("operations", undefined, walletUnlock); assert.equal(activity.status, 200); assert.deepEqual(activity.value.operations, []);
+      assert.equal((await walletCall("lock", { version: 1 }, walletUnlock)).status, 200); walletUnlock = undefined;
+      evidence.walletAfterRollback = { socketIsolationPreserved: true, httpFinancialRequestsDenied: true, httpsCertificateValidated: true,
+        encryptionKeyPreserved: true, encryptedConfigurationPreserved: true, passwordVerifierPreserved: true,
+        oldUnlockDenied: true, passwordUnlockVerified: true, receivingAddressPreserved: true, emptyFleet: true, transactionsRequested: 0 };
+    }
     evidence.browserSecurityAfterRollback = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
     await page.waitForFunction(() => document.querySelector("#update-status")?.textContent === "Update failed; previous version restored", undefined, { timeout: 60_000 });

@@ -1,6 +1,7 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 
 export const RELEASE_FORMAT = "gridlens-modern-release-v1";
+export const COORDINATOR_VERSION = 2;
 export interface ReleaseArtifact { name: string; bytes: number; sha256: string }
 export interface ModernRelease {
   format: typeof RELEASE_FORMAT;
@@ -19,7 +20,8 @@ export function parseRelease(value: unknown): ModernRelease {
   if (!object(value) || value.format !== RELEASE_FORMAT || typeof value.version !== "string"
     || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(value.version) || value.version.length > 80
     || !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 1
-    || !["linux-x64", "linux-arm64"].includes(String(value.platform)) || value.minimumCoordinator !== 1
+    || !["linux-x64", "linux-arm64"].includes(String(value.platform)) || ![1, COORDINATOR_VERSION].includes(Number(value.minimumCoordinator))
+    || typeof value.minimumCoordinator !== "number"
     || typeof value.imageId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.imageId)
     || value.configImageId !== undefined && (typeof value.configImageId !== "string" || !/^sha256:[a-f0-9]{64}$/.test(value.configImageId))
     || !object(value.runtime) || typeof value.runtime.name !== "string" || !/^gridlens-runtime-[a-z0-9.-]+\.tar$/.test(value.runtime.name)
@@ -28,7 +30,7 @@ export function parseRelease(value: unknown): ModernRelease {
     throw new InstallerError("The signed release manifest is unsupported or invalid.");
   }
   return { format: RELEASE_FORMAT, version: value.version, sequence: Number(value.sequence), platform: value.platform as ModernRelease["platform"],
-    minimumCoordinator: 1, imageId: value.imageId, ...(typeof value.configImageId === "string" ? { configImageId: value.configImageId } : {}),
+    minimumCoordinator: Number(value.minimumCoordinator), imageId: value.imageId, ...(typeof value.configImageId === "string" ? { configImageId: value.configImageId } : {}),
     runtime: { name: value.runtime.name, bytes: Number(value.runtime.bytes), sha256: value.runtime.sha256 } };
 }
 export function verifyRelease(bytes: Uint8Array, signature: Uint8Array, publicKey: string): ModernRelease {

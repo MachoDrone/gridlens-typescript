@@ -14,6 +14,7 @@ import { parseBrowserSecurityStatus, parseBrowserSecurityConnectCode } from "../
 import { parsePublicBrowserCertificates } from "./browser-security.ts";
 import type { BrowserSecurityRead } from "./browser-security.ts";
 import { AppleCertificateProfileError, createAppleCertificateProfile } from "./apple-certificate.ts";
+import { treasuryGateway } from "./treasury-gateway.ts";
 
 export type GatewayTransport = "https" | "vpn-http";
 export interface BrowserSecurityAssets { html: Buffer; script: Buffer }
@@ -42,9 +43,9 @@ export function requestToken(request: IncomingMessage, transport: GatewayTranspo
   return cookies.length === 1 && /^[A-Za-z0-9_-]{43}$/.test(cookies[0]!.slice(prefix.length)) ? cookies[0]!.slice(prefix.length) : null;
 }
 export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, setupScript: Buffer,
-  { transport = "https", privateNetworkToken, build, updatesEnabled = false, browserSecurityAssets, serverCertificateSha256 }: {
+  { transport = "https", privateNetworkToken, build, updatesEnabled = false, browserSecurityAssets, serverCertificateSha256, treasurySocketPath, walletHtml }: {
     transport?: GatewayTransport; privateNetworkToken?: string; build?: UpdateBuild; updatesEnabled?: boolean;
-    browserSecurityAssets?: BrowserSecurityAssets; serverCertificateSha256?: string } = {}): FleetIntegration {
+    browserSecurityAssets?: BrowserSecurityAssets; serverCertificateSha256?: string; treasurySocketPath?: string; walletHtml?: Buffer } = {}): FleetIntegration {
   if (updatesEnabled && !build) throw new Error("Updater-enabled gateway requires immutable build identity.");
   if (build) build = parseUpdateBuild(build);
   if (transport !== "https" && transport !== "vpn-http") throw new Error("Unsupported gateway transport.");
@@ -55,6 +56,9 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     throw new Error("Private-network access requires its configured HTTP gateway grant.");
   const privateNetwork = privateNetworkToken !== undefined;
   const tokenFor = (request: IncomingMessage): string | null => privateNetworkToken ?? requestToken(request, transport);
+  const walletHandler = treasuryGateway({ transport, readSocket: socketPath, token: tokenFor,
+    ...(treasurySocketPath ? { treasurySocket: treasurySocketPath } : {}), ...(walletHtml ? { html: walletHtml } : {}),
+    ...(serverCertificateSha256 ? { certificateSha256: serverCertificateSha256 } : {}) });
   setupHtml = Buffer.from(setupHtml.toString("utf8")
     .replace("</head>", '<meta name="gridlens-setup-mode" content="browser"></head>'));
   if (privateNetwork) setupHtml = Buffer.from(setupHtml.toString("utf8")
@@ -103,6 +107,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
       } catch (error) { if (error instanceof SharedHttpError && [401, 403, 409].includes(error.status)) return null; throw error; }
     },
     async handleRequest(request, response) {
+      if (await walletHandler(request, response)) return true;
       const url = new URL(request.url ?? "/", "https://gateway.invalid");
       const rawPath = (request.url ?? "/").split("?", 1)[0]!;
       if ((rawPath.startsWith("/secure-setup/apple-ca/") || url.pathname.startsWith("/secure-setup/apple-ca/")) && rawPath !== url.pathname) {
@@ -289,7 +294,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
 }
 export async function startSharedGateway(options: { socketPath: string; certPath?: string; keyPath?: string; publicOrigin: string;
   directory: string; host?: string; port?: number; transport?: GatewayTransport; privateNetworkAuthFile?: string; privateNetworkToken?: string;
-  build?: UpdateBuild; updatesEnabled?: boolean }) {
+  build?: UpdateBuild; updatesEnabled?: boolean; treasurySocketPath?: string }) {
   const transport = options.transport ?? "https";
   validateGatewayOrigin(options.publicOrigin, transport);
   if ((options.privateNetworkAuthFile !== undefined || options.privateNetworkToken !== undefined) && transport !== "vpn-http")
@@ -308,16 +313,18 @@ export async function startSharedGateway(options: { socketPath: string; certPath
     } finally { await file.close(); }
   }
   if (transport === "https" && (!options.certPath || !options.keyPath)) throw new Error("HTTPS requires its saved certificate and key.");
-  const [html, script, tls, browserSecurityAssets] = await Promise.all([
+  const [html, script, tls, browserSecurityAssets, walletHtml] = await Promise.all([
     readFile(join(options.directory, "shared-setup.html")), readFile(join(options.directory, "preview/shared-setup.js")),
     transport === "https" ? Promise.all([readFile(options.certPath!), readFile(options.keyPath!)]).then(([cert, key]) => ({ cert, key })) : undefined,
     Promise.all([readFile(join(options.directory, "secure-setup.html")), readFile(join(options.directory, "preview/secure-setup.js"))])
       .then(([html, script]) => ({ html, script })).catch(error => { if (error?.code === "ENOENT") return undefined; throw error; }),
+    options.treasurySocketPath ? readFile(join(options.directory, "wallet.html")) : undefined,
   ]);
   const integration = createGatewayIntegration(options.socketPath, html, script, { transport,
     ...(privateNetworkToken === undefined ? {} : { privateNetworkToken }), ...(options.build ? { build: options.build } : {}),
     ...(options.updatesEnabled === undefined ? {} : { updatesEnabled: options.updatesEnabled }),
     ...(browserSecurityAssets ? { browserSecurityAssets } : {}),
+    ...(options.treasurySocketPath ? { treasurySocketPath: options.treasurySocketPath } : {}), ...(walletHtml ? { walletHtml } : {}),
     ...(tls ? { serverCertificateSha256: createHash("sha256").update(parsePublicBrowserCertificates(tls.cert.toString("utf8"))[0]!.raw).digest("hex") } : {}) });
   const server: FleetServerOptions = { integration, directory: options.directory, host: options.host ?? "0.0.0.0",
     port: options.port ?? 8443, publicOrigin: options.publicOrigin, ...(tls ? { tls } : {}), accessCheckIntervalMs: 1000 };

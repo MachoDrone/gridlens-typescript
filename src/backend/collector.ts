@@ -31,7 +31,7 @@ type Read = <R extends FleetResource>(resource: R, addresses: readonly string[],
  * reuses the preview's actual readers and persists their private scheduling state.
  * No browser/phone cache read calls this scheduler. History is explicit bounded work. */
 export function createSharedCollector({ state, contexts, now = Date.now, fetch: fetcher = globalThis.fetch,
-  onError = () => {}, read }: {
+  onError = () => {}, read, rpc: sharedRpc }: {
   state: SharedState;
   contexts: () => readonly FleetContext[];
   now?: () => number;
@@ -39,6 +39,8 @@ export function createSharedCollector({ state, contexts, now = Date.now, fetch: 
   onError?: (message: string) => void;
   /** Isolated synthetic adapter; never selected by a runtime environment variable. */
   read?: Read;
+  /** Wallet operations and telemetry share the same provider allowance. */
+  rpc?: ReturnType<typeof createSolanaRpc>;
 }): SharedCollector {
   const checkpointNames = ["metadata", "node-info", "activity", "node-reconciled", "markets", "queue", "jobs", "rpc", "sol", "nos", "staking"];
   const checkpoint = (name: string) => createProviderCheckpoint(state, name);
@@ -51,7 +53,7 @@ export function createSharedCollector({ state, contexts, now = Date.now, fetch: 
       activityPriority: scheduling.marketPriority, checkpoint: checkpoint("activity") }), checkpoint: checkpoint("node-reconciled") });
   const queue = createQueueProvider({ now, metadataProvider: metadata, marketQueueProvider: markets, checkpoint: checkpoint("queue") });
   const jobs = createJobProvider({ now, fetch: fetcher, activityPriority: scheduling.activityPriority, checkpoint: checkpoint("jobs") });
-  const rpc = createSolanaRpc({ now, fetch: fetcher, checkpoint: checkpoint("rpc") });
+  const rpc = sharedRpc ?? createSolanaRpc({ now, fetch: fetcher, checkpoint: checkpoint("rpc") });
   const sol = createSolProvider({ rpc, assetCheckpoint: checkpoint("sol") });
   const nos = createNosProvider({ rpc, assetCheckpoint: checkpoint("nos") });
   const staking = createStakingProvider({ rpc, metadataProvider: metadata, assetCheckpoint: checkpoint("staking") });

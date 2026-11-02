@@ -14,7 +14,7 @@ import { readVpnWebEndpoint } from "./vpn-web.ts";
 import { reconcileInstalledServices } from "./installed-services.ts";
 import { runTerminalSetup, verifiedSetupNetwork } from "./setup-session.ts";
 import type { SetupControl } from "./setup-session.ts";
-import { InstallerError, releaseURL, verifyRelease } from "./release.ts";
+import { COORDINATOR_VERSION, InstallerError, releaseURL, verifyRelease } from "./release.ts";
 import { downloadArtifactToFile } from "./artifact-download.ts";
 import { assertLocalDockerForSelection, chooseDashboardPort, choosePrivateEndpoint, choosePrivateWebPorts, discoverPrivateEndpoints, dockerNetworkExclusions, probeBindPort } from "./network-selection.ts";
 import type { PortProbe, SelectionPrompts } from "./network-selection.ts";
@@ -271,13 +271,38 @@ function publishSetupNetwork(runner: DockerRunner, config: InstallationConfig): 
   if(context)setupControl(runner,config.instance)({operation:"setup-network-context",scopeId:"default",...context});
 }
 export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts, suppliedRunner?:DockerRunner):Promise<void>{
-  if(args.includes("--help")){console.log("GridLens modern coordinator v1\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n--secure-browser refreshes the secure-device guide, prints its public certificate fingerprint and creates a one-use HTTPS operator sign-in link.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
-  if(args.includes("--version")){console.log("gridlens-modern-coordinator 1 / Node "+process.versions.node);return;}
+  if(args.includes("--help")){console.log("GridLens modern coordinator v2\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n--secure-browser refreshes the secure-device guide, prints its public certificate fingerprint and creates a one-use HTTPS operator sign-in link.\n--treasury-setup creates a one-use HTTPS owner Wallet setup link after secure browser connection.\n--treasury-reset recovers owner access locally without resetting history or the 1 NOS pilot allowance.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
+  if(args.includes("--version")){console.log(`gridlens-modern-coordinator ${COORDINATOR_VERSION} / Node `+process.versions.node);return;}
   process.umask(0o077);
   const terminal=suppliedTerminal??controllingTerminal(),runner=suppliedRunner??localDockerRunner();
   let releaseMaintenanceLock: (() => Promise<void>) | undefined;
   try{
     const instance=option(args,"--instance")??"default";resourceName(instance,"owner");
+    if (args.includes("--treasury-setup") || args.includes("--treasury-reset")) {
+      const reset = args.includes("--treasury-reset");
+      if (reset && args.includes("--treasury-setup") || ["--upgrade", "--rollback", "--connect", "--vpn-web", "--ssh-sign-in", "--scan", "--web-port", "--secure-browser"].some(flag => args.includes(flag)))
+        throw new InstallerError("Use one Wallet setup or recovery operation with an optional --instance.");
+      const coordinator = new Coordinator(runner), config = savedConfiguration(coordinator, runner, instance);
+      if (!coordinator.supportsTreasury(config.active)) throw new InstallerError("Update GridLens to the Wallet-capable release before setting up Wallet.");
+      releaseMaintenanceLock = await acquireMaintenanceLock(runner, instance, config.active.imageId);
+      guardTerminalUpdate(runner, config); coordinator.validateManagedRuntime(config);
+      const publication = coordinator.publishBrowserSecurity(config);
+      if (!publication) throw new InstallerError("Complete secure browser setup before setting up Wallet.");
+      if (reset && (await terminal.ask("Reset Wallet owner access? Transaction history and the 1 NOS test limit will be preserved. Type RESET: ")).trim() !== "RESET") {
+        terminal.print("Wallet recovery cancelled."); return;
+      }
+      const result = setupControl(runner, instance)({ operation: reset ? "treasury-reset" : "treasury-setup", scopeId: "default" }) as {
+        version?: unknown; ticket?: unknown; expiresAtMs?: unknown; httpsOrigin?: unknown; setupUrl?: unknown;
+      };
+      if (result.version !== 1 || typeof result.ticket !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(result.ticket)
+        || result.httpsOrigin !== config.origin || result.setupUrl !== `${config.origin}/wallet#ticket=${result.ticket}`
+        || typeof result.expiresAtMs !== "number" || result.expiresAtMs <= Date.now() || result.expiresAtMs > Date.now() + 300_000)
+        throw new InstallerError("The Wallet setup link could not be verified.");
+      terminal.print("Open this private, single-use link in your already connected HTTPS browser within five minutes:");
+      terminal.print(cliText(terminal, "action", result.setupUrl));
+      terminal.print("Set the owner password and receiving public wallet address there. This command moves no funds.");
+      return;
+    }
     const webPortInput=option(args,"--web-port");
     if(webPortInput!==undefined&&(!args.includes("--vpn-web")||!/^\d+$/.test(webPortInput)||Number(webPortInput)<1024||Number(webPortInput)>65535))
       throw new InstallerError("Use --web-port with --vpn-web and a port from 1024 through 65535.");

@@ -11,6 +11,8 @@ export const SOLANA_PROVIDERS = [
 export const MAINNET_GENESIS_HASH = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 const responseByteLimit = 512 * 1024;
 const maximumTimestamp = 8_640_000_000_000_000;
+const financialMethods = new Set(["simulateTransaction", "getFeeForMessage", "getLatestBlockhash",
+  "getMinimumBalanceForRentExemption", "sendTransaction", "getTransaction"]);
 const requestLimits = [
   { count: 1, windowMs: 1_000 }, { count: 12, windowMs: 60_000 },
   { count: 600, windowMs: 3_600_000 }, { count: 12_000, windowMs: 86_400_000 },
@@ -152,7 +154,7 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
   }
 
   async function rpc(provider: SolanaProviderState, method: string, params: unknown[],
-    signal: AbortSignal, deadline: number): Promise<unknown> {
+    signal: AbortSignal, deadline: number, beforeDispatch?: () => void): Promise<unknown> {
     return limited(async () => {
       // Pacing is shared with queued work and validation/failover, never per viewer.
       for (;;) {
@@ -166,6 +168,10 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
         if (now() >= deadline) throw transportError("Solana refresh deadline elapsed before dispatch.", "deferred", budget.nextAt(now()));
         if (provider.disabled) throw transportError("Solana provider is disabled for this process.", "disabled");
         if (provider.retryAtMs > now()) throw transportError("Solana provider requested a Retry-After pause.", "deferred", provider.retryAtMs);
+        // Financial authorization may expire while this operation waits for the
+        // shared allowance. The trusted caller rechecks immediately before the
+        // reservation and network dispatch; browser fields cannot supply a hook.
+        beforeDispatch?.();
         if (budget.reserve(now())) break;
       }
       const controller = new AbortController();
@@ -183,7 +189,8 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
         if (!response.ok) {
           void response.body?.cancel().catch(() => {});
           const kind = [401, 403, 405, 501].includes(response.status) ? "disabled" : response.status === 400 ? "parameters" : "provider";
-          const scope = method === "getAccountInfo" && [405, 501].includes(response.status) ? "asset" : "transport";
+          const scope = method === "getAccountInfo" && [405, 501].includes(response.status)
+            || financialMethods.has(method) && [401, 403, 405, 501].includes(response.status) ? "asset" : "transport";
           throw new SolanaRpcError(`Solana ${provider.name} request failed (HTTP ${response.status}).`, kind, retryAt, scope);
         }
         if (Number(response.headers.get("content-length")) > responseByteLimit) {
@@ -216,7 +223,7 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
         if (rpcObject(payload.error)) {
           const code = payload.error.code;
           const kind = code === -32601 ? "disabled" : code === -32602 || code === -32600 ? "parameters" : "provider";
-          const scope = method === "getAccountInfo" && code === -32601 ? "asset" : "transport";
+          const scope = (method === "getAccountInfo" || financialMethods.has(method)) && code === -32601 ? "asset" : "transport";
           throw new SolanaRpcError(`Solana ${provider.name} RPC failed (${typeof code === "number" ? code : "unknown code"}).`, kind, retryAt, scope);
         }
         if (!("result" in payload)) throw transportError("Solana response omitted its result.");
@@ -294,5 +301,17 @@ export function createSolanaRpc({ fetch: fetcher = globalThis.fetch, now = Date.
     };
     return { eligible, nextEligibleAt, failure, success };
   }
-  return { now, rpc, verifyMainnet, createSession, refreshDeadlineMs: Math.min(refreshDeadlineMs, 28_000) };
+  /** Advisory only: simulate the existing allowance without reserving or
+   * replenishing it. Concurrent work may still consume capacity afterwards. */
+  function canDispatchBefore(count: number, deadline: number): boolean {
+    if (!Number.isInteger(count) || count < 1 || count > 32 || !Number.isFinite(deadline)) return false;
+    const forecast = new SolanaRequestBudget(dispatches);
+    let at = now();
+    for (let index = 0; index < count; index++) {
+      at = forecast.nextAt(at);
+      if (at >= deadline || !forecast.reserve(at)) return false;
+    }
+    return true;
+  }
+  return { now, rpc, verifyMainnet, createSession, canDispatchBefore, refreshDeadlineMs: Math.min(refreshDeadlineMs, 28_000) };
 }

@@ -15,17 +15,28 @@ import type { CredentialVault } from "./credential-vault.ts";
 import type { PcPermission } from "./pc-monitor.ts";
 import { createBrowserSecurity } from "./browser-security.ts";
 import { createHash } from "node:crypto";
+import { createTreasury } from "./treasury.ts";
+import type { TreasuryDriver } from "./treasury.ts";
+import type { TreasuryVault } from "./treasury-vault.ts";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
-  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates,
+  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates, treasury: treasuryOptions, treasuryUnavailable = false,
 }: { now?: () => number; requestHistory?: (context: FleetContext, addresses: string[], refresh: boolean) => Promise<void>;
   providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer;
-  build?: UpdateBuild; updates?: (body: Record<string, unknown>) => Promise<unknown> } = {}) {
+  build?: UpdateBuild; updates?: (body: Record<string, unknown>) => Promise<unknown>;
+  treasuryUnavailable?: boolean;
+  treasury?: { vault: TreasuryVault; driver: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => TreasuryDriver } } = {}) {
   const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
   const browserSecurity = createBrowserSecurity(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
   const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}), ...(inspect ? { inspect } : {}) });
-  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : [])];
+  const wallet = treasuryOptions ? createTreasury(state, { access, vault: treasuryOptions.vault, driver: treasuryOptions.driver(access, observations), now,
+    security() {
+      const { status } = browserSecurity.read();
+      if (!status.available || status.status !== "ready") throw new SharedHttpError(503);
+      return { httpsOrigin: status.httpsOrigin, serverCertificateSha256: status.serverCertificateSha256 };
+    }, hosts: context => observations.read(context).associations.map(row => ({ address: row.address, label: row.name })) }) : undefined;
+  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : []), ...(wallet ? ["treasury-v1"] : [])];
   function browserSecurityBinding() {
     const { status } = browserSecurity.read();
     if (!status.available || status.status !== "ready" || status.httpOrigin === null) throw new SharedHttpError(409);
@@ -167,6 +178,10 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
     }
   }
   async function control(body: Record<string, unknown>): Promise<unknown> {
+    if (body.operation === "treasury-setup" || body.operation === "treasury-reset") {
+      if (!wallet) throw new SharedHttpError(503);
+      return wallet.control(body);
+    }
     if (body.operation === "browser-security-publish") {
       const { operation: _operation, ...publication } = body;
       try { browserSecurity.publish(publication); return { published: true }; }
@@ -197,5 +212,18 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
     }
     return setup.control(body);
   }
-  return { read, control, access, observations, setup };
+  async function treasury(body: Record<string, unknown>): Promise<unknown> {
+    if (!wallet && treasuryUnavailable && body.operation === "status") {
+      if (Object.keys(body).some(key => !["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"].includes(key))) throw new SharedHttpError(400);
+      const { status } = browserSecurity.read();
+      if (!status.available || status.status !== "ready" || body.httpsOrigin !== status.httpsOrigin
+        || body.serverCertificateSha256 !== status.serverCertificateSha256) throw new SharedHttpError(403);
+      const principal = access.requireAccess(body.token, "operator");
+      return { version: 1, supported: false, state: "recovery-required", pilotConsumed: true,
+        serverId: access.serverId, scopeId: principal.context.scopeId, revision: 0 };
+    }
+    if (!wallet) throw new SharedHttpError(503);
+    return wallet.dispatch(body);
+  }
+  return { read, control, treasury, wallet, access, observations, setup };
 }

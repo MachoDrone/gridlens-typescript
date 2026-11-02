@@ -123,6 +123,7 @@ async function fixture(page: Page, nativeProfileOrigin?: string): Promise<Mode> 
     if (url.pathname === "/connect") {
       await route.fulfill({ contentType: "text/html", body: await readFile(resolve("dist/shared-setup.html"), "utf8") }); return;
     }
+    if (url.pathname === "/wallet") { await route.fulfill({ contentType: "text/html", body: "<h1>Synthetic Wallet</h1>" }); return; }
     if (url.pathname === "/") {
       const body = mode.fleetEntry && url.origin === HTTP
         ? (await readFile(resolve("dist/index.html"), "utf8")).replace("</head>", '<meta name="gridlens-shared-backend" content="1"></head>')
@@ -176,6 +177,33 @@ async function expectFleet(page: Page): Promise<void> {
   await expect(page).toHaveURL(`${HTTPS}/`);
   await expect(page.getByRole("heading", { name: "Synthetic Fleet" })).toBeVisible();
 }
+
+test("Secure completes the existing browser handoff and returns to Wallet without storing owner authority", async ({ page }) => {
+  const mode = await fixture(page);
+  await page.goto(`${HTTP}/secure-setup#return=wallet`);
+  await expect(page).toHaveURL(`${HTTP}/secure-setup`);
+  await page.getByRole("checkbox", { name: "I am using my trusted private network or VPN." }).check();
+  await page.getByRole("button", { name: "Continue", exact: true }).click();
+  await openHTTPS(page);
+  await expect(page).toHaveURL(`${HTTPS}/wallet`); await expect(page.getByRole("heading", { name: "Synthetic Wallet" })).toBeVisible();
+  expect(mode.issued).toBe(1); expect(mode.redeems).toEqual([{ version: 1, code: CONNECT_CODE }]);
+  expect(await page.evaluate(() => sessionStorage.getItem("gridlens.secure-setup.return.v1"))).toBeNull();
+  expect(mode.requests.some(request => request.url.includes("ticket="))).toBe(false);
+});
+
+test("an already connected HTTPS browser returns directly to Wallet without repeating the guide", async ({ page }) => {
+  const mode = await fixture(page); mode.signedIn = true;
+  await page.goto(`${HTTPS}/secure-setup#return=wallet`);
+  await expect(page).toHaveURL(`${HTTPS}/wallet`); expect(mode.issued).toBe(0); expect(mode.redeems).toHaveLength(0);
+});
+
+for (const target of ["https://attacker.invalid/", "//attacker.invalid/", "wallet&return=wallet"]) test(`Secure rejects an unrecognized or repeated return target ${target}`, async ({ page }) => {
+  const mode = await fixture(page); mode.signedIn = true;
+  await page.goto(`${HTTPS}/secure-setup#return=${target}`);
+  await expect(page).toHaveURL(`${HTTPS}/secure-setup`);
+  await expect(page.locator("#repair-message")).toContainText("invalid");
+  expect(mode.issued).toBe(0); expect(mode.redeems).toHaveLength(0);
+});
 
 test("the installed Fleet Secure action leads through browser connection to the same HTTPS Fleet", async ({ page }) => {
   const mode = await fixture(page); mode.fleetEntry = true;

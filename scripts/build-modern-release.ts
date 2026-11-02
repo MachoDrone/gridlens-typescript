@@ -9,7 +9,7 @@ import { checked, localDockerRunner } from "../src/installer/docker.ts";
 import { archiveImageIdentity } from "./release-image-identity.ts";
 
 /** Build/publish preparation only: this command never pushes an image or uploads a release. */
-export async function buildModernRelease(options:{output:string;version:string;sequence:number;tag:string;signingKey:string;publicKey:string}):Promise<string>{
+export async function buildModernRelease(options:{output:string;version:string;sequence:number;tag:string;signingKey:string;publicKey:string;enableWallet?:boolean}):Promise<string>{
   if(!/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(options.version)||!Number.isSafeInteger(options.sequence)||options.sequence<1)throw new Error("Use a valid version and monotonically increasing release sequence.");
   if(options.tag!==`modern-v${options.version}`)throw new Error("The signed update channel requires the exact modern-vVERSION release tag.");
   process.umask(0o077);
@@ -21,6 +21,7 @@ export async function buildModernRelease(options:{output:string;version:string;s
   const publicKeyText = readFileSync(options.publicKey, "utf8");
   if (createPublicKey(publicKeyText).asymmetricKeyType !== "ed25519") throw new Error("The update trust anchor must be Ed25519.");
   docker(["build","--no-cache","--file","Dockerfile.shared","--build-arg",`GRIDLENS_VERSION=${options.version}`,
+    "--build-arg",`GRIDLENS_TREASURY_PROTOCOL=${options.enableWallet ? "1" : "0"}`,
     "--build-arg",`GRIDLENS_SEQUENCE=${options.sequence}`,"--build-arg",`GRIDLENS_UPDATE_PUBLIC_KEY_BASE64=${Buffer.from(publicKeyText).toString("base64")}`,"--tag",imageName,"."]);
   const imageId=docker(["image","inspect","--format","{{.Id}}",imageName]);
   const artifactName=`gridlens-runtime-${process.platform}-${process.arch}-${options.version}.tar`,artifact=join(output,artifactName);
@@ -29,7 +30,7 @@ export async function buildModernRelease(options:{output:string;version:string;s
   const platform=`${process.platform}-${process.arch}`;
   if(platform!=="linux-x64"&&platform!=="linux-arm64")throw new Error("Build the release on a supported Linux architecture.");
   const identity=archiveImageIdentity(bytes,{imageId,version:options.version,platform,imageTag:imageName});
-  const manifest=parseRelease({format:"gridlens-modern-release-v1",version:options.version,sequence:options.sequence,platform,minimumCoordinator:1,...identity,
+  const manifest=parseRelease({format:"gridlens-modern-release-v1",version:options.version,sequence:options.sequence,platform,minimumCoordinator:options.enableWallet ? 2 : 1,...identity,
     runtime:{name:artifactName,bytes:statSync(artifact).size,sha256:createHash("sha256").update(bytes).digest("hex")}});
   const manifestBytes=Buffer.from(JSON.stringify(manifest,null,2)+"\n"),key=createPrivateKey(readFileSync(options.signingKey)),publicKey=createPublicKey(readFileSync(options.publicKey));
   if(key.asymmetricKeyType!=="ed25519")throw new Error("Modern releases require an Ed25519 signing identity.");
@@ -47,6 +48,6 @@ export async function buildModernRelease(options:{output:string;version:string;s
 }
 if(process.argv[1]&&resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   const args=process.argv.slice(2),get=(name:string):string=>{const at=args.indexOf(name);if(at<0||!args[at+1])throw new Error(`Missing ${name}.`);return args[at+1]!;};
-  try{console.log(await buildModernRelease({output:get("--output"),version:get("--version"),sequence:Number(get("--sequence")),tag:get("--tag"),signingKey:get("--signing-key"),publicKey:get("--public-key")}));}
+  try{console.log(await buildModernRelease({output:get("--output"),version:get("--version"),sequence:Number(get("--sequence")),tag:get("--tag"),signingKey:get("--signing-key"),publicKey:get("--public-key"),enableWallet:args.includes("--enable-wallet")}));}
   catch(error){console.error(error instanceof Error?error.message:"Modern release build failed.");process.exitCode=1;}
 }

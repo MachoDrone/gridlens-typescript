@@ -10,6 +10,7 @@ import { readVpnWebEndpoint } from "./vpn-web.ts";
 
 export const UPDATER_PROTOCOL_LABEL = "io.gridlens.updater-protocol";
 export const BROWSER_SECURITY_PROTOCOL_LABEL = "io.gridlens.browser-security-protocol";
+export const TREASURY_PROTOCOL_LABEL = "io.gridlens.treasury-protocol";
 export interface BrowserSecurityPublication {
   version: 1; instance: string; httpsOrigin: string; httpOrigin: string | null;
   certificatePem: string; serverCertificatePem: string; serverCertificateSha256: string;
@@ -56,6 +57,18 @@ export class Coordinator {
       || image.Config.Labels["io.gridlens.version"] !== selected.version) throw new InstallerError("The browser security image does not match its saved release.");
     const protocol = image.Config.Labels[BROWSER_SECURITY_PROTOCOL_LABEL];
     if (protocol !== undefined && protocol !== "1") throw new InstallerError("The selected image requires an unsupported browser security protocol.");
+    return protocol === "1";
+  }
+  supportsTreasury(selected: Pick<InstalledImage, "imageId" | "version">): boolean {
+    let images: { Id?: string; Config?: { Labels?: Record<string, string> } }[];
+    try { images = JSON.parse(checked(this.runner, ["image", "inspect", selected.imageId])); }
+    catch { throw new InstallerError("The selected Wallet capability could not be verified."); }
+    const image = Array.isArray(images) ? images[0] : undefined;
+    if (!Array.isArray(images) || images.length !== 1 || image?.Id !== selected.imageId
+      || image.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT || image.Config.Labels["io.gridlens.version"] !== selected.version)
+      throw new InstallerError("The Wallet image does not match its saved release.");
+    const protocol = image.Config.Labels[TREASURY_PROTOCOL_LABEL];
+    if (protocol !== undefined && protocol !== "0" && protocol !== "1") throw new InstallerError("The selected image requires an unsupported Wallet protocol.");
     return protocol === "1";
   }
   /** Publish public trust metadata only after the saved services are running.
@@ -116,12 +129,14 @@ export class Coordinator {
   }
   private runtimeArguments(config: InstallationConfig): { owner: string[]; gateway: string[] } {
     const { instance, active, origin } = config;
+    const treasury = this.supportsTreasury(active);
     const common = ["--detach", "--restart", "unless-stopped", ...restrictions, "--user", "1000:1000",
       ...labels(instance), "--network", resourceName(instance, "network")];
     const ownerArgs = ["run", ...common, "--name", resourceName(instance, "owner"),
       ...mount(active.stateVolume, "/state"), ...mount(resourceName(instance, "ledger"), "/ledger"),
       ...mount(resourceName(instance, "read-ipc"), "/ipc"), ...mount(resourceName(instance, "control-ipc"), "/control"),
       ...mount(resourceName(instance, "credentials"), "/credentials"),
+      ...(treasury ? [...mount(resourceName(instance, "treasury-ipc"), "/treasury"), "--env", "GRIDLENS_TREASURY_SOCKET=/treasury/treasury.sock"] : []),
       ...(config.updater ? [...mount(resourceName(instance, "updates-ipc"), "/updates", true), "--env", "GRIDLENS_UPDATE_SOCKET=/updates/updater.sock"] : []),
       "--env", "GRIDLENS_STATE_DIR=/state", "--env", "GRIDLENS_LEDGER_DIR=/ledger", "--env", "GRIDLENS_SOCKET_DIR=/ipc",
       "--env", "GRIDLENS_CONTROL_DIR=/control", "--env", "GRIDLENS_CREDENTIAL_DIR=/credentials",
@@ -129,6 +144,7 @@ export class Coordinator {
     const bind = config.bindAddress.includes(":") ? `[${config.bindAddress}]` : config.bindAddress;
     const gatewayArgs = ["run", ...common, "--name", resourceName(instance, "gateway"),
       ...mount(resourceName(instance, "read-ipc"), "/ipc", true), ...mount(resourceName(instance, "tls"), "/tls", true),
+      ...(treasury ? [...mount(resourceName(instance, "treasury-ipc"), "/treasury", true), "--env", "GRIDLENS_TREASURY_SOCKET=/treasury/treasury.sock"] : []),
       "--publish", `${bind}:${config.port}:8443/tcp`, "--env", "GRIDLENS_SOCKET=/ipc/read.sock",
       "--env", "GRIDLENS_TLS_CERT=/tls/server.crt", "--env", "GRIDLENS_TLS_KEY=/tls/server.key",
       ...(config.updater ? ["--env", "GRIDLENS_UPDATES=1"] : []),
@@ -346,6 +362,12 @@ export class Coordinator {
       this.save(config);
     }
     const target = this.targetConfiguration(config);
+    if (this.supportsTreasury(target.active)) {
+      ensureVolume(this.runner, resourceName(instance, "treasury-ipc"), instance);
+      this.helper(instance, target.active.imageId, "treasury-initialize", {}, [
+        ...mount(resourceName(instance, "treasury-ipc"), "/treasury"),
+      ]);
+    }
     this.startRuntime(target);
     config={...target,phase:"ready"}; this.save(config);
     const certificate=this.helper(instance,config.active.imageId,"certificate");

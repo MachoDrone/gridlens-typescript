@@ -81,7 +81,7 @@ export function buildHandoff({ outputDirectory = join(projectDirectory, ".tools/
   try {
     compile("tsconfig.runtime.json", staging);
     compile("tsconfig.browser.json", join(staging, "dist"));
-    for (const name of ["index.html", "styles.css"]) {
+    for (const name of ["index.html", "styles.css", "wallet.css"]) {
       copyFileSync(join(projectDirectory, "src/preview", name), join(staging, "dist", name));
     }
     writeWebappAssets(join(staging, "dist"));

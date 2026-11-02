@@ -37,7 +37,7 @@ for (const width of [1280, 390, 320]) test(`Secure fits beside Hosts, Update and
   await expect(secure).toHaveAttribute("title", "Secure this device"); await expect(secure.locator(".sidebar-label")).toHaveText("Secure");
   await expect.poll(async () => Math.abs((await page.locator("#sidebar").boundingBox())!.width - originalWidth)).toBeLessThanOrEqual(1);
   expect(await page.locator(".sidebar-navigation > *").evaluateAll(nodes => nodes.filter(node => !(node as HTMLElement).hidden).map(node => node.id || "alerts")))
-    .toEqual(["sidebar-hosts", "sidebar-update", "sidebar-secure", "sidebar-install-app", "alerts"]);
+    .toEqual(["sidebar-hosts", "sidebar-update", "sidebar-secure", "sidebar-install-app", "sidebar-wallet", "alerts"]);
   for (const collapsed of [false, true]) {
     if (collapsed) await page.getByRole("button", { name: "Collapse menu", exact: true }).click();
     const icon = secure.locator("svg"); await expect(icon).toBeVisible(); await expect(icon).toHaveAttribute("width", "20");

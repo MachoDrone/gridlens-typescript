@@ -155,8 +155,9 @@ Rewards require the separately approved exact node binding and fixed in-containe
 GET. The TypeScript helper verifies the running node image/public identity before
 using its identity inside that container. Only the normalized numeric result,
 public address, timestamp and bounded status leave it. No key or authorization
-header reaches GridLens, no wallet material is persisted, and there is no claim or
-transfer path. The Nosana authorization itself has broader authority than a read;
+header reaches GridLens, no wallet material is persisted, and this reader has no claim or
+transfer path. The separate [Wallet pilot](WALLET_PILOT.md) requires independent
+financial ownership and a reviewed HTTPS-only transfer. The Nosana authorization itself has broader authority than a read;
 this code limits its use, not the credential's inherent permissions. Development
 tests use generated fixtures and do not exercise existing node keys.
 

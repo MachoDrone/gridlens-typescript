@@ -8,10 +8,17 @@ import { readInstalledBuild } from "../src/backend/build.ts";
 import { openCredentialVault } from "../src/backend/credential-vault.ts";
 import { createPcMonitor } from "../src/backend/pc-monitor.ts";
 import type { Server } from "node:http";
+import { createSolanaRpc } from "./solana-rpc.ts";
+import { createProviderCheckpoint } from "./provider-checkpoint.ts";
+import { openTreasuryVault } from "../src/backend/treasury-vault.ts";
+import { TREASURY_LEDGER_KEY } from "../src/backend/treasury.ts";
+import { createTreasuryTransferDriver } from "../src/backend/treasury-transfer.ts";
 
 export async function startSharedOwner(environment: Readonly<Record<string, string | undefined>> = process.env) {
   const state = openSharedState(environment.GRIDLENS_STATE_DIR ?? "/state", { ledgerDirectory: environment.GRIDLENS_LEDGER_DIR ?? "/ledger" });
   let vault: ReturnType<typeof openCredentialVault> | undefined;
+  let treasuryVault: ReturnType<typeof openTreasuryVault> | undefined;
+  let reconciliation: ReturnType<typeof setInterval> | undefined;
   let collector: ReturnType<typeof createSharedCollector> | undefined;
   let monitor: ReturnType<typeof createPcMonitor> | undefined;
   let service: ReturnType<typeof createSharedService> | undefined;
@@ -19,23 +26,37 @@ export async function startSharedOwner(environment: Readonly<Record<string, stri
   let stopping: Promise<void> | undefined;
   const close = (): Promise<void> => stopping ??= (async () => {
     // Stop admission before closing the ledger; cleanup preserves the original startup error.
-    await Promise.allSettled([collector?.stop(), monitor?.stop(), service?.setup.close()]);
+    clearInterval(reconciliation);
+    await Promise.allSettled([collector?.stop(), monitor?.stop(), service?.setup.close(), service?.wallet?.close()]);
     await Promise.all(sockets.map(server => new Promise<void>(resolve => { server.closeAllConnections(); server.close(() => resolve()); })));
-    try { await state.close(); } finally { vault?.close(); }
+    try { await state.close(); } finally { vault?.close(); treasuryVault?.close(); }
   })();
   try {
     const updateSocket = environment.GRIDLENS_UPDATE_SOCKET;
+    const treasurySocket = environment.GRIDLENS_TREASURY_SOCKET;
+    if (treasurySocket !== undefined && treasurySocket !== "/treasury/treasury.sock") throw new Error("Use the owned Wallet socket.");
     if (updateSocket !== undefined && updateSocket !== "/updates/updater.sock") throw new Error("Use the owned updater socket.");
     const build = readInstalledBuild("/app/build.json", updateSocket !== undefined);
     vault = openCredentialVault(environment.GRIDLENS_CREDENTIAL_DIR ?? "/credentials");
+    if (treasurySocket) {
+      try { treasuryVault = openTreasuryVault(environment.GRIDLENS_CREDENTIAL_DIR ?? "/credentials", { create: state.get(TREASURY_LEDGER_KEY) === undefined }); }
+      catch { console.error("Wallet is locked because its retained encryption state needs recovery. Fleet monitoring remains available."); }
+    }
+    const rpc = createSolanaRpc({ checkpoint: createProviderCheckpoint(state, "rpc") });
     service = createSharedService(state, { vault, requestHistory: (...args) => collector!.requestHistory(...args),
       providerWaits: () => [...collector!.providerWaits(), ...monitor!.providerWaits()], ...(build ? { build } : {}),
+      treasuryUnavailable: treasurySocket !== undefined && treasuryVault === undefined,
+      ...(treasuryVault ? { treasury: { vault: treasuryVault, driver: (access, observations) => createTreasuryTransferDriver({
+        state, rpc, vault: vault!, observations, contexts: access.contexts }) } } : {}),
       ...(updateSocket ? { updates: (body: Record<string, unknown>) => ownerCall(updateSocket, body, undefined, 10_000) } : {}) });
-    collector = createSharedCollector({ state, contexts: service.access.contexts,
+    collector = createSharedCollector({ state, contexts: service.access.contexts, rpc,
       onError: () => console.error("A shared collection cycle could not complete; dated cache retained.") });
     monitor = createPcMonitor({ state, vault, observations: service.observations, contexts: service.access.contexts });
     sockets.push(await startOwnerSocket(join(environment.GRIDLENS_SOCKET_DIR ?? "/ipc", "read.sock"), service.read));
     sockets.push(await startOwnerSocket(join(environment.GRIDLENS_CONTROL_DIR ?? "/control", "control.sock"), service.control));
+    if (treasurySocket) sockets.push(await startOwnerSocket(treasurySocket, service.treasury));
+    const reconcile = () => { void service?.wallet?.reconcilePending().catch(() => { console.error("Wallet receipt is not yet verified; no transfer was repeated."); }); };
+    if (service.wallet) { reconcile(); reconciliation = setInterval(reconcile, 15_000); reconciliation.unref(); }
     collector.start(); monitor.start();
     return { close, service };
   } catch (error) { await close().catch(() => {}); throw error; }

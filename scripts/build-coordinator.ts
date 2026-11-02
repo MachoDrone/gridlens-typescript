@@ -5,6 +5,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { COORDINATOR_VERSION } from "../src/installer/release.ts";
 
 const project=resolve(fileURLToPath(new URL("../",import.meta.url)));
 const require=createRequire(import.meta.url);
@@ -35,11 +36,11 @@ export async function buildCoordinator(options:CoordinatorBuildOptions):Promise<
   if(!verify(null,bytes,createPublicKey(publicKey),signature))throw new Error("Coordinator signature self-check failed.");
   writeFileSync(`${binary}.sig`,signature,{mode:0o600});
   const sha256=createHash("sha256").update(bytes).digest("hex");
-  writeFileSync(join(output,"coordinator-manifest.json"),JSON.stringify({format:"gridlens-modern-coordinator-v1",coordinatorVersion:1,node:"24.14.1",platform:`${process.platform}-${process.arch}`,releaseTag:options.releaseTag,name,bytes:bytes.length,sha256,signature:`${name}.sig`,signingPublicKey:publicKey},null,2)+"\n",{mode:0o600});
+  writeFileSync(join(output,"coordinator-manifest.json"),JSON.stringify({format:"gridlens-modern-coordinator-v1",coordinatorVersion:COORDINATOR_VERSION,node:"24.14.1",platform:`${process.platform}-${process.arch}`,releaseTag:options.releaseTag,name,bytes:bytes.length,sha256,signature:`${name}.sig`,signingPublicKey:publicKey},null,2)+"\n",{mode:0o600});
   const launcher=readFileSync(join(project,"scripts/modern-start.sh"),"utf8").replaceAll("@RELEASE_TAG@",options.releaseTag).replaceAll("@COORDINATOR_NAME@",name).replaceAll("@COORDINATOR_SHA256@",sha256);
   writeFileSync(join(output,"modern-start.sh"),launcher,{mode:0o700});
   const smoke=spawnSync(binary,["--version"],{encoding:"utf8",env:{PATH:"/nonexistent",NODE_OPTIONS:"--invalid-injected-option"},cwd:output});
-  if(smoke.status!==0||!smoke.stdout.includes("gridlens-modern-coordinator 1 / Node 24.14.1"))throw new Error("The standalone coordinator failed its no-host-Node smoke test.");
+  if(smoke.status!==0||!smoke.stdout.includes(`gridlens-modern-coordinator ${COORDINATOR_VERSION} / Node 24.14.1`))throw new Error("The standalone coordinator failed its no-host-Node smoke test.");
   rmSync(staging,{recursive:true});
   return output;
 }

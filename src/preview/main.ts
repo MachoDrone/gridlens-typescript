@@ -1,4 +1,6 @@
 import "./sidebar.ts";
+const walletLink = document.querySelector<HTMLAnchorElement>("#sidebar-wallet");
+if (walletLink && document.querySelector('meta[name="gridlens-shared-backend"]')?.getAttribute("content") === "1") walletLink.hidden = false;
 import { createSharedTelemetry } from "./shared-telemetry.ts";
 import { bindFleetViewport } from "./viewport.ts";
 import { bindFleetTableScroll } from "./table-scroll.ts";

@@ -1,5 +1,20 @@
 # GridLens TypeScript repository instructions
 
+Wallet pilot requirement — November 2, 2026:
+
+- Follow `docs/WALLET_PILOT.md`. Wallet setup/passwords/configuration and transaction
+  authorization require the saved HTTPS endpoint; operator access and Secure
+  alone grant no financial ownership. Keep the financial socket away from HTTP.
+- Reserve exactly 1 NOS total for one reviewed source and receiving wallet, then
+  stop. Reset, settings changes, restart and rollback cannot replenish the pilot.
+  Rewards claiming stays disabled. Tests use generated keys and isolated stores.
+- Sign only inside the exact approved source container with independently
+  validated instructions. Never export existing node keys. Journal the signed
+  transaction before submission; never automatically re-sign or resend it.
+- Start from published dev.16 commit `191bc6d`, preserving the original workspace.
+  Publish compatible coordinator/updater support before enabling protocol 1
+  Wallet images. Existing review/publication approval requirements still apply.
+
 Read `README.md` and `docs/DEVELOPMENT.md` first. They describe the current
 application, architecture, implemented fields and remaining work. User
 instructions take precedence. Use this repository as the working directory.

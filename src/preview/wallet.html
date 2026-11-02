@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+  <meta name="referrer" content="no-referrer">
+  <title>GridLens · Wallet</title>
+  <link rel="icon" href="/icons/gridlens-192.png">
+  <link rel="stylesheet" href="/wallet.css">
+  <script type="module" src="/preview/wallet.js"></script>
+</head>
+<body>
+<main>
+  <header><div><p class="eyebrow">GridLens</p><h1>Wallet</h1></div><nav aria-label="Wallet navigation"><a href="/">Back to Fleet</a><button id="wallet-lock" type="button" hidden>Lock Wallet</button></nav></header>
+  <p class="intro">Collect earnings into your receiving wallet.</p>
+  <p id="wallet-message" role="status" aria-live="polite" aria-atomic="true">Checking Wallet access…</p>
+  <section id="wallet-secure" hidden aria-labelledby="secure-heading"><h2 id="secure-heading">Secure this device first</h2><p>Open GridLens over trusted HTTPS before entering a Wallet password or moving NOS. Complete the Secure guide without bypassing certificate warnings.</p><a class="button primary" href="/secure-setup#return=wallet">Complete Secure setup</a></section>
+  <section id="wallet-unavailable" hidden aria-labelledby="unavailable-heading"><h2 id="unavailable-heading">Wallet is unavailable</h2><p id="unavailable-copy">Open Wallet from your installed GridLens dashboard.</p><button id="wallet-recheck" type="button">Check again</button></section>
+  <section id="wallet-owner-required" hidden aria-labelledby="owner-required-heading"><h2 id="owner-required-heading">Set up the owner</h2><p>Start Wallet setup from the installer on the GridLens installation PC. Its one-use link lets the owner choose a password and receiving wallet.</p><p class="muted">Ordinary dashboard access cannot create a Wallet owner.</p></section>
+  <section id="wallet-recovery" hidden aria-labelledby="recovery-heading"><h2 id="recovery-heading">Wallet needs recovery</h2><p>Use Wallet recovery from the installer on the GridLens installation PC. Existing transaction history is retained.</p></section>
+  <section id="wallet-setup" hidden aria-labelledby="setup-heading"><h2 id="setup-heading">Set up your Wallet</h2><p>Choose the one receiving wallet for your earnings and a password that only the owner knows.</p>
+    <form id="wallet-setup-form">
+      <label for="setup-destination">Receiving wallet address</label><input id="setup-destination" name="destination" required maxlength="44" autocomplete="off" autocapitalize="none" spellcheck="false" aria-describedby="destination-help">
+      <p id="destination-help" class="muted small">Enter the public Solana wallet address where you want to receive NOS.</p>
+      <label for="setup-password">Owner password</label><div class="password-field"><input id="setup-password" name="new-password" type="password" minlength="12" maxlength="1024" required autocomplete="new-password"><button type="button" data-password="setup-password" aria-controls="setup-password" aria-pressed="false">Show</button></div>
+      <label for="setup-password-confirm">Confirm password</label><input id="setup-password-confirm" type="password" minlength="12" maxlength="1024" required autocomplete="new-password">
+      <p class="muted small">Use at least 12 characters. Recovery is available only from the installation PC.</p><button class="primary" type="submit">Save Wallet</button>
+    </form>
+  </section>
+  <section id="wallet-locked" hidden aria-labelledby="locked-heading"><h2 id="locked-heading">Unlock Wallet</h2><p>Enter the owner's password to view the receiving wallet and prepare a transfer.</p>
+    <form id="wallet-unlock-form"><label for="unlock-password">Owner password</label><div class="password-field"><input id="unlock-password" name="password" type="password" maxlength="1024" required autocomplete="current-password"><button type="button" data-password="unlock-password" aria-controls="unlock-password" aria-pressed="false">Show</button></div><button class="primary" type="submit">Unlock Wallet</button></form>
+    <details><summary>Forgot your password?</summary><p>Use Wallet recovery from the installer on the GridLens installation PC. Recovery locks existing sessions and keeps transaction history.</p></details>
+  </section>
+  <div id="wallet-unlocked" hidden>
+    <section aria-labelledby="receiving-heading"><h2 id="receiving-heading">Receiving wallet</h2><p id="receiving-address" class="address"></p><p class="muted small">Wallet locks when you leave, reload, or stop using it for five minutes.</p>
+      <details id="wallet-settings"><summary>Change wallet or password</summary><form id="wallet-configuration-form">
+        <label for="change-destination">Receiving wallet address</label><input id="change-destination" maxlength="44" required autocomplete="off" autocapitalize="none" spellcheck="false">
+        <label for="change-current-password">Current owner password</label><div class="password-field"><input id="change-current-password" type="password" maxlength="1024" required autocomplete="current-password"><button type="button" data-password="change-current-password" aria-controls="change-current-password" aria-pressed="false">Show</button></div>
+        <label for="change-new-password">New password (optional)</label><div class="password-field"><input id="change-new-password" type="password" minlength="12" maxlength="1024" autocomplete="new-password"><button type="button" data-password="change-new-password" aria-controls="change-new-password" aria-pressed="false">Show</button></div>
+        <label for="change-confirm-password">Confirm new password</label><input id="change-confirm-password" type="password" maxlength="1024" autocomplete="new-password">
+        <p class="muted small">Saving locks Wallet on every device and cancels unsubmitted reviews.</p><button type="submit">Save changes and lock</button>
+      </form></details>
+    </section>
+    <section aria-labelledby="send-heading"><h2 id="send-heading">Send 1 NOS</h2><p>This first test sends <strong>exactly 1 NOS from one host</strong>, then stops. Staked NOS stays untouched.</p>
+      <p id="pilot-finished" class="pending" hidden>This installation's test has already been authorized. Check its activity below before taking any further action.</p>
+      <form id="wallet-prepare-form"><label for="wallet-source">Source host</label><select id="wallet-source" required></select><p id="source-address" class="address small"></p><button id="prepare-transfer" class="primary" type="submit">Review 1 NOS transfer</button></form>
+      <p class="muted small">Rewards claiming will be added after its payout behavior is verified. This test uses the host's existing NOS balance.</p>
+    </section>
+    <section id="wallet-review" hidden aria-labelledby="review-heading"><h2 id="review-heading" tabindex="-1">Review this transfer</h2><dl id="transfer-review"></dl><p id="review-expiry" class="muted small"></p><p>Confirm only after checking the complete receiving address and costs.</p><div class="actions"><button id="confirm-transfer" class="primary" type="button">Send exactly 1 NOS</button><button id="cancel-transfer" type="button">Cancel</button></div></section>
+    <section aria-labelledby="activity-heading"><div class="section-heading"><h2 id="activity-heading">Recent activity</h2><button id="refresh-activity" type="button">Refresh activity</button></div><p id="activity-empty" class="muted">No transfers recorded.</p><div id="wallet-operations"></div></section>
+  </div>
+</main>
+</body>
+</html>

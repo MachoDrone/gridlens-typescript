@@ -10,12 +10,16 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     const transport = process.env.GRIDLENS_TRANSPORT ?? "https";
     const privateNetworkAuthFile = process.env.GRIDLENS_VPN_AUTH_FILE;
     const updatesEnabled = process.env.GRIDLENS_UPDATES === "1";
+    const treasurySocketPath = process.env.GRIDLENS_TREASURY_SOCKET;
+    if (treasurySocketPath !== undefined && (transport !== "https" || treasurySocketPath !== "/treasury/treasury.sock"))
+      throw new Error("Wallet requires its isolated HTTPS financial socket.");
     const build = readInstalledBuild("/app/build.json", updatesEnabled);
     if (!publicOrigin || transport !== "https" && transport !== "vpn-http") throw new Error("Set the canonical origin and supported transport.");
     if (privateNetworkAuthFile !== undefined && (transport !== "vpn-http" || privateNetworkAuthFile !== "/vpn-auth/browser.json"))
       throw new Error("Set the owned private-network grant path.");
     const { server, integration } = await startSharedGateway({ publicOrigin, transport,
       updatesEnabled, ...(build ? { build } : {}),
+      ...(treasurySocketPath ? { treasurySocketPath } : {}),
       ...(privateNetworkAuthFile === undefined ? {} : { privateNetworkAuthFile }),
       socketPath: process.env.GRIDLENS_SOCKET ?? "/ipc/read.sock", certPath: process.env.GRIDLENS_TLS_CERT ?? "/tls/server.crt",
       keyPath: process.env.GRIDLENS_TLS_KEY ?? "/tls/server.key", directory: resolve("dist"),

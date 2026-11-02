@@ -389,8 +389,10 @@ and preserving its Docker image-identity/lock corrections:
 - No source publication or live backend update is established by these checks.
   Physical OS trust approval remains distinct from browser/transport tests.
 
-This milestone does not add a Wallet screen or authorize financial operations.
-The subsequent Wallet feature retains one owner, password-protected entry, CLI
-recovery, a single receiving wallet and separate/combined Rewards and NOS
-collection. Staked NOS remains untouched. Live financial enablement requires
-its own transaction, payout-recipient and authorization acceptance.
+Secure setup does not establish Wallet ownership or authorize financial operations.
+The separate [Wallet pilot candidate](WALLET_PILOT.md) adds one owner,
+password-protected entry, CLI recovery and a single receiving wallet. Its first
+milestone is one reviewed 1 NOS transfer; reward claims and combined collection
+remain later work. Staked NOS stays untouched. Wallet requires the current saved
+HTTPS connection and independent owner authorization. Live enablement and receipt
+verification remain separate from certificate setup.

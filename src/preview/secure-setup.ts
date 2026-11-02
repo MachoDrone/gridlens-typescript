@@ -8,6 +8,10 @@ type Stage = "trust" | "device" | "download" | "guide" | "resume" | "pair" | "re
 interface ExpectedIdentity { serverId: string; instance: string; certificateSha256: string; serverCertificateSha256: string }
 interface Progress { version: 1; expected: ExpectedIdentity; device: SecureDevice; browser: SecureBrowser; stage: "device" | "download" | "guide"; guideIndex: number }
 const STORAGE_KEY = "gridlens.secure-setup.progress.v1";
+const RETURN_KEY = "gridlens.secure-setup.return.v1";
+let returnWallet = false;
+try { returnWallet = sessionStorage.getItem(RETURN_KEY) === "wallet"; } catch { /* Optional public navigation preference. */ }
+const resumeFragment = () => returnWallet ? "#resume=1&return=wallet" : "#resume=1";
 const STATUS_PATH = "/secure-setup/status.json";
 const stages: Stage[] = ["trust", "device", "download", "guide", "resume", "pair", "ready", "repair"];
 const element = <T extends HTMLElement = HTMLElement>(id: string): T => document.getElementById(id) as T;
@@ -59,11 +63,17 @@ function forgetProgress(): void {
 const restored = readProgress();
 if (restored) { expected = restored.expected; device = restored.device; browser = restored.browser; guideIndex = restored.guideIndex; }
 if (location.hash) {
-  const fragment = location.hash;
+  let fragment = location.hash;
   // Clear the one-use connection secret before parsing it, fetching data or rendering.
   try { history.replaceState(null, "", location.pathname + location.search); }
   catch { invalidContinuation = true; }
-  if (!invalidContinuation && !HTTPS && fragment === "#resume=1") resumeRequested = true;
+  const navigation = new URLSearchParams(fragment.slice(1));
+  if (navigation.getAll("return").length === 1 && navigation.get("return") === "wallet") {
+    returnWallet = true; navigation.delete("return"); fragment = navigation.size ? `#${navigation.toString()}` : "";
+    try { sessionStorage.setItem(RETURN_KEY, "wallet"); } catch { /* Navigation still works in this page. */ }
+  }
+  if (!invalidContinuation && fragment === "" && returnWallet) { /* Explicit Wallet return; no credential or trust assertion. */ }
+  else if (!invalidContinuation && !HTTPS && fragment === "#resume=1") resumeRequested = true;
   else try {
     const input = new URLSearchParams(fragment.slice(1));
     const names = ["server", "instance", "certificate", "leaf", "device", "browser"];
@@ -107,7 +117,7 @@ function repair(value: string, restart = true): void {
   connectionCode = undefined;
   message("Secure setup is not complete.", true); text("repair-message", value);
   element("repair-http").hidden = !HTTPS || !restartHttpOrigin;
-  if (HTTPS && restartHttpOrigin) element<HTMLAnchorElement>("repair-http").href = `${restartHttpOrigin}/secure-setup#resume=1`;
+  if (HTTPS && restartHttpOrigin) element<HTMLAnchorElement>("repair-http").href = `${restartHttpOrigin}/secure-setup${resumeFragment()}`;
   element("restart-setup").hidden = !restart; show("repair");
 }
 function options(select: HTMLSelectElement, values: readonly string[], names: Record<string, string>, selected: string): void {
@@ -117,7 +127,7 @@ function options(select: HTMLSelectElement, values: readonly string[], names: Re
 function usesSafariInstructions(): boolean {
   return browser === "safari" && (suggested.device !== "ios" || suggested.browser === "safari");
 }
-function safariSetupURL(): string { return status ? `${status.httpOrigin ?? status.httpsOrigin}/secure-setup` : ""; }
+function safariSetupURL(): string { return status ? `${status.httpOrigin ?? status.httpsOrigin}/secure-setup${returnWallet ? "#return=wallet" : ""}` : ""; }
 function downloadAdvice(): string {
   if (device === "android") return browser === "firefox"
     ? "If Firefox asks, confirm or save only the GridLens certificate you requested. Find the completed file in Downloads."
@@ -213,6 +223,7 @@ function httpsURL(code?: string): string {
   const url = new URL("/secure-setup", status.httpsOrigin);
   url.hash = new URLSearchParams({ server: expected.serverId, instance: expected.instance,
     certificate: expected.certificateSha256, leaf: expected.serverCertificateSha256, device, browser,
+    ...(returnWallet ? { return: "wallet" } : {}),
     ...(code === undefined ? {} : { connect: code }) }).toString();
   return url.href;
 }
@@ -281,7 +292,7 @@ async function load(): Promise<void> {
   await run(async signal => {
     if (!await checkedStatus(signal)) return;
     if (invalidContinuation) { repair("This setup link is invalid. It has not granted trust or access. Return to the original HTTP guide for a fresh connection link, or start again from this installation’s own GridLens page."); return; }
-    if (HTTPS) { saveProgress(); await completeAccess(signal, connectionCode !== undefined); return; }
+    if (HTTPS) { saveProgress(); await completeAccess(signal, connectionCode !== undefined || returnWallet); return; }
     if (resumeRequested) { message(""); show("resume"); return; }
     message("");
     // Only public instructions are restored; HTTPS verification never restores as complete.
@@ -340,7 +351,10 @@ async function existingAccess(signal: AbortSignal): Promise<boolean> {
 }
 function connected(openFleet: boolean): void {
   connectionCode = undefined;
-  if (openFleet) { message("Opening Fleet…"); location.replace("/"); }
+  if (openFleet) {
+    try { sessionStorage.removeItem(RETURN_KEY); } catch { /* No credential is stored here. */ }
+    message(returnWallet ? "Opening Wallet…" : "Opening Fleet…"); location.replace(returnWallet ? "/wallet" : "/");
+  }
   else { message(""); show("ready"); }
 }
 function pairing(messageText: string): void {
@@ -349,7 +363,7 @@ function pairing(messageText: string): void {
   text("pair-reason", messageText); element("pair-http").hidden = !fromHttp; element("pair-terminal").hidden = fromHttp;
   element("restart-http").hidden = !fromHttp; element("connect-browser").hidden = fromHttp;
   element("recheck-session").hidden = fromHttp;
-  if (status?.httpOrigin) element<HTMLAnchorElement>("restart-http").href = `${status.httpOrigin}/secure-setup#resume=1`;
+  if (status?.httpOrigin) element<HTMLAnchorElement>("restart-http").href = `${status.httpOrigin}/secure-setup${resumeFragment()}`;
   message(""); show("pair");
 }
 async function completeAccess(signal: AbortSignal, openFleet: boolean): Promise<void> {
@@ -404,7 +418,7 @@ async function openGridLens(): Promise<void> {
   await run(async signal => {
     if (!await checkedStatus(signal) || !status) return;
     saveProgress();
-    if (HTTPS) { await completeAccess(signal, connectionCode !== undefined); return; }
+    if (HTTPS) { await completeAccess(signal, connectionCode !== undefined || returnWallet); return; }
     if (status.canConnectBrowser !== true) { repair("This HTTP installation cannot connect a browser to HTTPS yet. Ask its operator to enable guided browser access, then retry. Existing Fleet access is unchanged.", false); return; }
     try {
       const handoff = parseBrowserSecurityConnectCode(await json("/secure-setup/connect-code", signal, {}));
