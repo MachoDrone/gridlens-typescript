@@ -15,6 +15,7 @@ import { parseTreasuryConfiguration, parseTreasuryRecoveryQuestions, parseTreasu
 import { parseClaimsStatus } from "../src/contracts/treasury-claims.ts";
 import { verifyGateway } from "../src/installer/health.ts";
 import { privateAddress } from "../src/installer/config.ts";
+import { browserConnectionText } from "../src/installer/browser-connection.ts";
 import { ensureVpnWeb } from "../src/installer/vpn-web.ts";
 import { localDockerRunner, checked, inspectOwned, resourceName, labels, mount, restrictions, PRODUCT, PRODUCT_LABEL, INSTANCE_LABEL } from "../src/installer/docker.ts";
 import type { DockerRunner } from "../src/installer/docker.ts";
@@ -269,6 +270,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const initialBrowserSecurity = { serverId: initialStatus.serverId, certificateSha256: publicCertificateSha256,
       serverCertificateSha256: installed.config.certificateSha256, httpsOrigin: installed.config.origin, httpOrigin: web.origin };
     const migratesBrowserSecurity = previous !== undefined && !previous.browserSecurity;
+    let initialBrowserLeaf: X509Certificate | undefined;
     if (migratesBrowserSecurity) {
       // Do not seed the new ledger record here: the old worker and replacement
       // worker must perform the real migration, without a new coordinator repair.
@@ -281,7 +283,10 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       assert.ok(html.length < 256 * 1024); assert.doesNotMatch(html, /id=["']sidebar-secure["']/);
       evidence.browserSecurityInitial = { ...initialBrowserSecurity, available: false, guideStatus: 404, metadataStatus: 404, newMetadataBootstrap: false };
     } else {
-      assert.ok(coordinator.publishBrowserSecurity(installed.config), "The candidate must advertise guided browser setup");
+      const publication = coordinator.publishBrowserSecurity(installed.config);
+      assert.ok(publication, "The candidate must advertise guided browser setup");
+      initialBrowserLeaf = new X509Certificate(publication.serverCertificatePem);
+      assert.equal(hash(initialBrowserLeaf.raw), installed.config.certificateSha256, "The fixture browser leaf differs from the saved HTTPS identity");
     }
     const checkBrowserSecurity = async () => {
       const status = parseBrowserSecurityStatus(await call(web.origin, "/secure-setup/status.json"));
@@ -385,15 +390,59 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const initial = snapshot(); evidence.initial = initial;
     checkTreasuryIsolation((previous ?? base).treasury);
     evidence.initialTreasuryBindings = (previous ?? base).treasury ? "Financial socket mounted only by owner and HTTPS gateway" : "Financial socket absent from all runtime roles";
-    browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
+    // Protected private HTTP remains a viewer. Its owner browser receives the
+    // same one-use terminal grant as normal installation, without Wallet setup.
+    // Trust only this generated fixture leaf in the isolated Chromium process;
+    // Node HTTPS independently verifies its CA, hostname and saved origin above.
+    const browserArgs: string[] = [];
+    if (protectedNow) {
+      assert.ok(initialBrowserLeaf, "A protected source requires its verified HTTPS leaf");
+      const spki = createHash("sha256").update(initialBrowserLeaf.publicKey.export({ type: "spki", format: "der" })).digest("base64");
+      browserArgs.push(`--ignore-certificate-errors-spki-list=${spki}`);
+      evidence.initialProtectedBrowserTrust = { origin: installed.config.origin, leafCertificateSha256: installed.config.certificateSha256,
+        mechanism: "Generated fixture leaf SPKI pin scoped to isolated Chromium; independent Node CA and hostname validation", hostTrustModified: false };
+    }
+    browser = await chromium.launch({ headless: true, args: browserArgs,
+      ...(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE ? { executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } : {}) });
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const pageErrors: string[] = []; page.on("pageerror", error => pageErrors.push(error.message));
-    await page.goto(web.origin, { waitUntil: "domcontentloaded" });
+    let initialOwnerCookie: string | undefined;
+    if (protectedNow) {
+      assert.equal(available.canUpdate, false, "The initial private HTTP viewer unexpectedly has update authority");
+      const denied = await fetch(new URL("/api/shared/updates/start", web.origin), { method: "POST", headers: { Origin: web.origin, "Content-Type": "application/json" },
+        body: JSON.stringify({ candidateId: available.candidate!.id, idempotencyKey: `fixture_viewer_${randomBytes(8).toString("hex")}` }), signal: AbortSignal.timeout(8000) });
+      await denied.body?.cancel(); assertViewerUpdateDenied(denied.status, initialStatus.role, available, await readStatus());
+      const ownerLink = browserConnectionText(installed.config.origin, coordinator.operatorCode(instance), true).split("\n")[0]!.replace(/^OPEN GRIDLENS: /, "");
+      const loginResponse = page.waitForResponse(response => new URL(response.url()).origin === installed.config.origin
+        && new URL(response.url()).pathname === "/api/shared/login" && response.request().method() === "POST");
+      const [login] = await Promise.all([loginResponse, page.goto(ownerLink, { waitUntil: "domcontentloaded" }).catch(() => {
+        // Do not include the one-use sign-in fragment in failure reports.
+        throw new Error("Fixture protected owner sign-in navigation failed.");
+      })]);
+      assert.equal(login.status(), 200, "The trusted terminal owner grant was not accepted by the HTTPS browser");
+      await page.waitForFunction(() => location.hash === "");
+      const cookies = (await page.context().cookies(installed.config.origin)).filter(cookie => cookie.name === "__Host-gridlens");
+      assert.equal(cookies.length, 1); assert.ok(cookies[0]!.secure && cookies[0]!.httpOnly && cookies[0]!.sameSite === "Strict");
+      initialOwnerCookie = `${cookies[0]!.name}=${cookies[0]!.value}`;
+      const ownerStatus = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: initialOwnerCookie });
+      assert.equal(ownerStatus.status, 200); assert.equal(ownerStatus.value.role, "operator"); assert.equal(ownerStatus.value.serverId, initialStatus.serverId);
+      const ownerUpdate = await secureCall(installed.config.origin, "/api/shared/updates", installed.certificate, { cookie: initialOwnerCookie });
+      assert.equal(ownerUpdate.status, 200); assert.equal(parseUpdateStatus(ownerUpdate.value).canUpdate, true);
+      await page.goto(installed.config.origin, { waitUntil: "domcontentloaded" });
+      evidence.initialProtectedAuthorization = { privateHttpRole: "viewer", privateHttpStartDenied: true, ownerGrant: "Coordinator.operatorCode terminal link redeemed through HTTPS browser login",
+        httpsBrowserRole: "operator", updateAuthorityVerified: true, walletSetupRequired: false };
+    } else await page.goto(web.origin, { waitUntil: "domcontentloaded" });
     await page.getByRole("button", { name: "Update available", exact: true }).click();
     progress("starting a real update from the browser");
     await page.getByRole("button", { name: "Update now", exact: true }).click();
     const active = await until(readStatus, value => updateActive(value.operation));
-    const duplicate = parseUpdateStatus(await call(web.origin, "/api/shared/updates/start", { candidateId: available.candidate!.id, idempotencyKey: `fixture_duplicate_${randomBytes(8).toString("hex")}` }));
+    const duplicateBody = { candidateId: available.candidate!.id, idempotencyKey: `fixture_duplicate_${randomBytes(8).toString("hex")}` };
+    let duplicate: UpdateStatus;
+    if (protectedNow) {
+      assert.ok(initialOwnerCookie);
+      const response = await secureCall(installed.config.origin, "/api/shared/updates/start", installed.certificate, { cookie: initialOwnerCookie, body: duplicateBody });
+      assert.equal(response.status, 200); duplicate = parseUpdateStatus(response.value);
+    } else duplicate = parseUpdateStatus(await call(web.origin, "/api/shared/updates/start", duplicateBody));
     assert.equal(duplicate.operation?.id, active.operation!.id);
     const phases = new Set<string>(); let disconnected = 0;
     const completed = await until(async () => { try { const value = await readStatus(); if (value.operation) phases.add(value.operation.phase); return value; } catch (error) { disconnected++; throw error; } },
@@ -634,6 +683,15 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     assert.equal(await page.locator("html").getAttribute("data-gridlens-fleet-ready"), completed.current!.buildId);
     evidence.rollback = { operation: restored.operation, usableBrowser: true, ...rolledBack };
+    // The protected source used its independent terminal-owner browser. Check
+    // the ordinary HTTP viewer explicitly too, without treating it as an owner.
+    if ((previous ?? base).treasuryProtocol === 2) {
+      await page.goto(web.origin, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected, completed.current!.buildId, { timeout: 60_000 });
+      const publicStatus = await call(web.origin, "/api/shared/status");
+      assert.equal(publicStatus.role, "viewer"); assert.equal((await readStatus()).canUpdate, false);
+      evidence.protectedBrowserReturn = { ownerHttpsUpdateAndRollbackUsable: true, finalPrivateHttpViewerUsable: true };
+    }
     evidence.browserPageErrors = pageErrors;
     assert.deepEqual(pageErrors, []);
     await page.close();
