@@ -135,79 +135,90 @@ domain/public deployment is not implemented, and the no-login private operator
 gateway must not be publicly port-forwarded. Cloudflare Workers and the earlier
 Workers app remain unsupported.
 
-## Publishing reviewed updates
+## Verification and approved development publication
+
+An approved plan includes the development publication stated in that plan after
+its required checks pass. Do not ask for a second approval for unchanged scope.
+Material changes in scope, destination or risk require fresh direction. This
+policy does not authorize live installation, stable promotion or financial
+operations. The shared working defaults also apply to other projects, subject to
+their documented safety requirements.
+
+### Select checks before running them
+
+Use focused checks while implementing. Then finish the intended change, freeze
+and review the candidate, and run `npm run verify -- --base <published-commit>`.
+The maintained verification rules explain the selected Node/browser groups and
+required Docker acceptance. Unmapped changes, broad shared composition, compiler
+or dependency changes, and verification machinery itself select full verification.
+`npm run check` remains the full typecheck, build, Node and browser gate; its
+browser step consumes the already completed build instead of deleting it again.
+
+| Change | Required coverage |
+| --- | --- |
+| Wallet, rewards authentication, payment/receipt parsing | Financial helpers, treasury, RPC authorization, owner/access, fast SQLite/atomic-state tests; Wallet/rewards browser journeys; affected Docker recovery |
+| Access, TLS, credentials, PC setup | Access/security/setup tests and matching secure/shared-setup journeys, including financial authorization |
+| Providers, collection, budgets, scheduling, freshness, storage | Affected domain and restart tests, sustained simulations and progressive browser cases |
+| Fleet fields/rendering | Affected domain and browser journeys; shared main/styles/helpers require full browser coverage |
+| Installer, updater, packaging, lifecycle | Installer/updater/bundle tests and matching browser/isolated Docker/public-entrypoint acceptance |
+| Documentation only | Wording, relative links and diff checks; executable examples follow the subsystem they exercise |
+
+Sustained simulations remain in the full suite with their original durations and
+assertions. Their separate stress files prevent unrelated financial parsing work
+from paying for a 48-hour fleet simulation. Never shorten them to manufacture a
+faster result. Keep browser retries at zero. A controlled 72-journey corpus passed
+three runs at each worker count: medians were 208.47 seconds with two and 137.64
+with four (33.98% improvement), with no failures, flakes or retries. The default
+therefore permits four workers while reserving half the available CPU capacity;
+smaller machines use fewer. Re-benchmark meaningful environment changes.
+
+Build before tests that serve compiled assets. Do not rebuild, install dependencies
+or mutate inputs while another check consumes them. Independent fast checks may
+run concurrently against frozen outputs; keep CPU-heavy stress/build work away
+from browser timing tests and serialize conflicting browser ports/output paths.
+
+### Reuse valid evidence
+
+A passing result is reusable only when its complete source/test/helper/configuration,
+toolchain, relevant environment and generated-asset fingerprints still match.
+Record the baseline, exact selected tests and commands, reasons, timings, counts
+and results. Verify fingerprints before and after a run. Failed, interrupted or
+content-changing runs are not passing evidence. Test-policy/toolchain/shared-helper
+changes invalidate all affected receipts. Creating a commit or pushing unchanged
+tested content does not require another test run.
+
+Docker acceptance additionally binds immutable image/archive identities, fixture
+code and conditions. Distinguish injected transport from actual public downloads,
+preloaded images from cold loading, and automated checks from physical-device
+acceptance. Use generated financial fixtures, never real source keys or claims.
+
+### Publish the exact candidate
 
 `main` remains the default branch. Keep it and `review/fleet-duration-freshness`
-at the same approved commit after every publication so the repository homepage,
-ordinary clones and existing review links all show the same version. This is a
-completion workflow followed during development, not unattended synchronization.
+at the same approved revision using one fast-forward-only atomic push. Confirm
+origin, inspect current remote tips and preserve concurrent work. Never force push
+or retry rejected atomic publication as separate pushes. Read back both branch
+hashes before reporting publication complete.
 
-1. During implementation, use focused checks appropriate to the changes, with
-   isolated fixtures. A full application test run is not required after every
-   intermediate edit. Before presenting a completed code, dependency, build-tooling
-   or test update as ready for user review or publication, finish the intended
-   changes and documentation and run the complete `npm run check` suite on the
-   final candidate with the pinned toolchain. Also run any explicitly required
-   acceptance checks for the affected subsystem. Final verification must cover the
-   affected user workflow from its entry point through the intended result;
-   existing automated coverage can satisfy this when it exercises that workflow.
-   Report required physical-device verification separately and keep automated
-   results distinct from the user's own review/testing.
+Use the maintained `npm run release` workflow for planning, preparation,
+publication, status, resume, abort and scoped cleanup. Its private run journal
+binds the approved plan, source, verification recipe, platform, signing identity
+and artifact hashes. It records intent before remote mutations and checks actual
+state after an ambiguous result. Matching completed work is adopted; conflicts
+or a newer channel stop mutation. Never replace immutable release assets or
+rewind a channel.
 
-   If verification fails, make corrections and use focused checks while iterating;
-   obtain a clean full-suite result after the corrections are complete. Further
-   changes to code, dependencies, build tooling, tests or executable inputs require
-   another full run once those changes are complete. Reuse passing results through
-   review and publication when the tested content and relevant conditions remain
-   unchanged. Documentation-only changes require wording/link review and
-   `git diff --check`; they do not require application tests unless executable
-   behavior or test inputs also change.
-2. Review the proposed paths and contents before staging only the intended files.
-   Review `git diff --cached` and run `git diff --cached --check`. Exclude private
-   rosters, identities, credentials, runtime data, evidence and generated output.
-   Tests must describe the exact content to be published. If unrelated local work
-   would make that uncertain, validate the candidate in an isolated checkout;
-   preserve the unrelated work rather than including or discarding it.
-3. Confirm `origin` points to `MachoDrone/gridlens-typescript`, fetch its current
-   branch tips and check that both publication targets can advance without
-   rewriting history. Resolve any divergence before presenting the candidate.
-   Once the user indicates their review/testing is complete, give a brief change
-   summary and check results, then ask:
-   **"Publish this tested update to both GitHub branches?"** Wait for approval.
-   An explicit request to publish this exact reviewed candidate already supplies
-   approval; do not ask twice. Otherwise, tests passing or a request to implement
-   a feature is not permission to publish. If review is pending, report readiness;
-   if publication is declined or deferred, leave the candidate local.
-4. On approval, confirm the content still matches the reviewed and tested
-   candidate, then commit only that content. If anything changed, repeat affected
-   checks and obtain approval for the revised update. Push the resulting commit
-   with explicit destinations in one atomic operation:
+A development publication runs build/image/signature checks, approved atomic
+source publication, draft uploads, anonymous artifact verification, actual public
+installer acceptance and monotonic channel promotion. Keep all keys, credentials,
+rosters, private logs/evidence and build intermediates outside Git and the explicit
+release asset inventory. Fixture cleanup must succeed; preserve the original
+failure if cleanup also fails. Abort never unpublishes or rewinds completed work.
 
-   ```sh
-   publication_commit=$(git rev-parse HEAD)
-   git push --atomic origin \
-     "$publication_commit:refs/heads/main" \
-     "$publication_commit:refs/heads/review/fleet-duration-freshness"
-   ```
-
-   Do not use force options or retry as separate branch pushes. If either target
-   rejects the update, or atomic push is unsupported, neither target should be
-   advanced by this operation. Investigate the failure; preserve any concurrent
-   remote work and repeat checks/approval if reconciliation changes the candidate.
-5. Read GitHub's actual branch tips after the push:
-
-   ```sh
-   git ls-remote origin refs/heads/main refs/heads/review/fleet-duration-freshness
-   ```
-
-   Both hashes must equal `publication_commit`. Report the published commit link,
-   both branch names and the check results only after verification. If the push
-   or verification is inconclusive, inspect the remote state before retrying and
-   report publication as unconfirmed rather than complete.
-
-Apply the same approval gate to the first synchronization of the older `main`.
-Failed checks or missing approval leave GitHub unchanged. This workflow adds no
-automatic push hook, scheduled uploader, deployment or runtime/API changes.
+Finish with the verified commit/branches/release, required check results, stage
+wall time, waiting time, bytes transferred and evidence reuse. State separately
+whether the running app was upgraded. No live installation is implicit in a
+publish operation.
 
 ## External roster input
 

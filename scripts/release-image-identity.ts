@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { InstallerError } from "../src/installer/release.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
 
@@ -8,10 +9,14 @@ const object = (value: unknown): value is Record<string, unknown> => value !== n
 function fail(): never { throw new InstallerError("The release archive must contain one verified single-platform OCI image and matching Docker image metadata."); }
 const manifestTypes = new Set(["application/vnd.oci.image.manifest.v1+json", "application/vnd.docker.distribution.manifest.v2+json"]);
 const configTypes = new Set(["application/vnd.oci.image.config.v1+json", "application/vnd.docker.container.image.v1+json"]);
+const rawLayerTypes = new Set(["application/vnd.oci.image.layer.v1.tar", "application/vnd.oci.image.layer.nondistributable.v1.tar"]);
+const gzipLayerTypes = new Set(["application/vnd.oci.image.layer.v1.tar+gzip", "application/vnd.oci.image.layer.nondistributable.v1.tar+gzip",
+  "application/vnd.docker.image.rootfs.diff.tar.gzip", "application/vnd.docker.image.rootfs.foreign.diff.tar.gzip"]);
 
 /** Read metadata in place; never extract paths or execute anything from an archive. */
-export function archiveImageIdentity(input: Uint8Array, expected: { imageId: string; version: string; platform: ModernRelease["platform"]; imageTag: string }): { imageId: string; configImageId: string } {
-  if (!hashId(expected.imageId) || input.byteLength < 1024 || input.byteLength > 1024 ** 3) fail();
+export function archiveImageIdentity(input: Uint8Array, expected: { imageId: string; version: string; platform: ModernRelease["platform"]; imageTag: string }, maximumExpandedLayerBytes = 1024 ** 3): { imageId: string; configImageId: string } {
+  if (!hashId(expected.imageId) || input.byteLength < 1024 || input.byteLength > 1024 ** 3
+    || !Number.isSafeInteger(maximumExpandedLayerBytes) || maximumExpandedLayerBytes < 1 || maximumExpandedLayerBytes > 1024 ** 3) fail();
   const bytes = Buffer.from(input.buffer, input.byteOffset, input.byteLength), entries = new Map<string, Buffer>();
   const text = (header: Buffer, start: number, count: number): string => header.subarray(start, start + count).toString("ascii").replace(/\0.*$/s, "").trim();
   const octal = (header: Buffer, start: number, count: number): number => {
@@ -56,19 +61,43 @@ export function archiveImageIdentity(input: Uint8Array, expected: { imageId: str
   const layout = json("oci-layout"), index = json("index.json");
   if (layout.imageLayoutVersion !== "1.0.0" || index.schemaVersion !== 2 || !Array.isArray(index.manifests) || index.manifests.length !== 1) fail();
   const root = descriptor(index.manifests[0]);
-  if (root.digest !== expected.imageId || !manifestTypes.has(root.mediaType)) fail();
+  if (!manifestTypes.has(root.mediaType)) fail();
   blob(root, 64 * 1024);
   const manifest = json(`blobs/sha256/${root.digest.slice(7)}`);
   if (manifest.schemaVersion !== 2 || !Array.isArray(manifest.layers) || manifest.layers.length > 256) fail();
   const config = descriptor(manifest.config);
   if (!configTypes.has(config.mediaType)) fail();
   blob(config, 1024 * 1024);
+  // A classic Docker daemon reports the config digest; containerd reports the
+  // manifest digest. Neither is trusted until both archive blobs verify.
+  if (expected.imageId !== root.digest && expected.imageId !== config.digest) fail();
   const settings = json(`blobs/sha256/${config.digest.slice(7)}`, 1024 * 1024);
   if (settings.os !== "linux" || settings.architecture !== (expected.platform === "linux-x64" ? "amd64" : "arm64")
     || !object(settings.config) || !object(settings.config.Labels) || settings.config.Labels["io.gridlens.product"] !== "shared-backend"
     || settings.config.Labels["io.gridlens.version"] !== expected.version) fail();
   const layers = manifest.layers.map(descriptor);
-  for (const layer of layers) blob(layer, 1024 ** 3);
+  if (!object(settings.rootfs) || settings.rootfs.type !== "layers" || !Array.isArray(settings.rootfs.diff_ids)
+    || settings.rootfs.diff_ids.length !== layers.length || !settings.rootfs.diff_ids.every(hashId)) fail();
+  let expandedLayerBytes = 0;
+  for (const [index, layer] of layers.entries()) {
+    const stored = blob(layer, 1024 ** 3);
+    let expanded: Buffer;
+    if (rawLayerTypes.has(layer.mediaType)) expanded = stored;
+    else if (gzipLayerTypes.has(layer.mediaType)) {
+      if (stored[0] !== 0x1f || stored[1] !== 0x8b || expandedLayerBytes >= maximumExpandedLayerBytes) fail();
+      try { expanded = gunzipSync(stored, { maxOutputLength: maximumExpandedLayerBytes - expandedLayerBytes }); }
+      catch { return fail(); }
+    } else fail();
+    expandedLayerBytes += expanded.length;
+    if (expandedLayerBytes > maximumExpandedLayerBytes || digest(expanded) !== settings.rootfs.diff_ids[index]) fail();
+  }
+  const referenced = new Set([root.digest, config.digest, ...layers.map(layer => layer.digest)]);
+  for (const [name, body] of entries) {
+    if (name.startsWith("blobs/")) {
+      const id = `sha256:${name.slice("blobs/sha256/".length)}`;
+      if (!/^blobs\/sha256\/[a-f0-9]{64}$/.test(name) || !referenced.has(id) || digest(body) !== id) fail();
+    }
+  }
   const dockerBytes = entries.get("manifest.json"); if (!dockerBytes || dockerBytes.length > 64 * 1024) fail();
   let docker: unknown; try { docker = JSON.parse(dockerBytes.toString("utf8")); } catch { fail(); }
   if (!Array.isArray(docker) || docker.length !== 1 || !object(docker[0])) fail();

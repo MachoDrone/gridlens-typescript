@@ -257,13 +257,24 @@ and backend arrangements remain open.
 
 ```sh
 npx --no-install playwright install chromium
+npm run verify -- --base "$(git rev-parse origin/main)"
 npm run check
 npm run build:handoff
 ```
 
-`check` runs strict typechecking, Node tests, the browser build and Playwright
-checks. Automated checks use injected providers, synthetic fixtures and loopback
+`verify` selects and explains the checks needed for changes since the supplied
+immutable baseline; unknown or broad impact selects full coverage. Financial,
+authorization and persistence safety checks remain mandatory for their changes.
+`check` runs the full strict typechecking, single browser build, Node and Playwright
+gate. Automated checks use injected providers, synthetic fixtures and loopback
 servers; they do not query real hosts or public providers.
+
+Approved development publication uses the maintained, resumable `npm run release`
+workflow; see [release operation and recovery](docs/RELEASE_WORKFLOW.md). Runtime
+downloads are gzip-compressed with legacy-compatible `.tar` names, and unchanged
+signed coordinator binaries can be reused from their immutable release. These
+reduce transfer size; they do not change Wallet behavior or install an update
+without a separate operator action.
 
 `npm run build` emits browser assets in ignored `dist/`. `build:handoff` emits a
 compiled Node gateway, the same browser assets, typed adapter declarations, a

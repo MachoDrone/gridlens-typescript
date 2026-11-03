@@ -19,7 +19,7 @@
     "dev:handoff": "npm run build && node scripts/hosting-lab.ts",
     "preview": "node scripts/preview-server.ts",
     "test:browser": "npm run build && playwright test",
-    "check": "npm run typecheck && npm run build && npm test && npm run test:browser",
+    "check": "npm run typecheck && npm run build && npm test && npm run test:browser:built",
     "shared:owner": "node scripts/shared-owner.ts",
     "shared:gateway": "node scripts/shared-gateway.ts",
     "shared:control": "node scripts/shared-control.ts",
@@ -27,7 +27,10 @@
     "build:coordinator": "node scripts/build-coordinator.ts",
     "build:modern": "node scripts/build-modern-release.ts",
     "test:shared-docker": "node scripts/test-shared-docker.ts",
-    "test:updater-docker": "node scripts/test-updater-docker.ts"
+    "test:updater-docker": "node scripts/test-updater-docker.ts",
+    "test:browser:built": "playwright test",
+    "verify": "node scripts/verify.ts",
+    "release": "node scripts/release.ts"
   },
   "devDependencies": {
     "@playwright/test": "1.63.0",

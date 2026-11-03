@@ -3,6 +3,7 @@
 set -euo pipefail
 umask 077
 release_tag='@RELEASE_TAG@'
+coordinator_release_tag='@COORDINATOR_RELEASE_TAG@'
 coordinator_name='@COORDINATOR_NAME@'
 coordinator_sha256='@COORDINATOR_SHA256@'
 case "$release_tag" in @*) printf '%s\n' 'This modern installer source is an unpublished candidate. Use a reviewed, signed release launcher.' >&2; exit 1;; esac
@@ -21,7 +22,7 @@ esac
 workdir=$(mktemp -d)
 trap 'rm -rf -- "$workdir"' EXIT
 curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --location --max-time 300 \
-  "https://github.com/MachoDrone/gridlens-typescript/releases/download/$release_tag/$coordinator_name" -o "$workdir/coordinator"
+  "https://github.com/MachoDrone/gridlens-typescript/releases/download/$coordinator_release_tag/$coordinator_name" -o "$workdir/coordinator"
 printf '%s  %s\n' "$coordinator_sha256" "$workdir/coordinator" | sha256sum --check --status || { printf '%s\n' 'Coordinator checksum verification failed.' >&2; exit 1; }
 chmod 700 "$workdir/coordinator"
 "$workdir/coordinator" --release "https://github.com/MachoDrone/gridlens-typescript/releases/download/$release_tag/" "$@" </dev/tty

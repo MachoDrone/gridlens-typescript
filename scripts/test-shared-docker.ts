@@ -11,17 +11,20 @@ import { localDockerRunner, checked, inspectOwned, resourceName, PRODUCT_LABEL, 
 import type { DockerRunner } from "../src/installer/docker.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
 import type { InstallationConfig } from "../src/installer/config.ts";
+import { privateAddress } from "../src/installer/config.ts";
+import { isIP } from "node:net";
 import { verifyGateway } from "../src/installer/health.ts";
 import { dockerFixtureProgram } from "./shared-docker-fixture.ts";
 import type { DockerFixtureEvidence } from "./shared-docker-fixture.ts";
 
-export interface AcceptanceOptions { instance: string; port: number; prebuiltImage?: string; prebuiltVersion?: string; report?: string }
+export interface AcceptanceOptions { instance: string; port: number; address?: string; prebuiltImage?: string; prebuiltVersion?: string; report?: string }
 export function acceptanceOptions(args: readonly string[]): AcceptanceOptions {
   const options: AcceptanceOptions = { instance: `fixture-${randomBytes(6).toString("hex")}`, port: 18443 }, seen = new Set<string>();
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index]!, value = args[index + 1];
     if (!value || seen.has(key)) throw new Error("Supply each acceptance option once with a value."); seen.add(key);
     if (key === "--instance") options.instance = value;
+    else if (key === "--address") options.address = value;
     else if (key === "--port" && /^\d+$/.test(value)) options.port = Number(value);
     else if (key === "--prebuilt-image") options.prebuiltImage = value;
     else if (key === "--prebuilt-version") options.prebuiltVersion = value;
@@ -29,6 +32,7 @@ export function acceptanceOptions(args: readonly string[]): AcceptanceOptions {
     else throw new Error("Unknown acceptance option.");
   }
   if (!/^fixture-[a-f0-9]{12}$/.test(options.instance) || !Number.isInteger(options.port) || options.port < 1024 || options.port > 65535
+    || options.address !== undefined && (isIP(options.address) !== 4 || !privateAddress(options.address))
     || options.prebuiltImage !== undefined && !/^sha256:[a-f0-9]{64}$/.test(options.prebuiltImage)
     || options.prebuiltVersion !== undefined && !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(options.prebuiltVersion)
     || options.prebuiltVersion && !options.prebuiltImage) throw new Error("Invalid isolated acceptance options.");
@@ -91,8 +95,10 @@ export function withFixtureIngress(runner: DockerRunner, instance: string): Dock
 }
 
 export async function runDockerAcceptance(options: AcceptanceOptions, runner: DockerRunner = localDockerRunner()) {
+  const address = options.address ?? "127.0.0.1";
+  if (isIP(address) !== 4 || !privateAddress(address)) throw new Error("Use a private or loopback fixture address.");
   const { instance } = options, networkRunner = withFixtureIngress(runner, instance), coordinator = new Coordinator(networkRunner), imageTags = new Map<string, string>(), helperNames = new Set<string>();
-  const evidence: Record<string, unknown> = { version: 1, instance, startedAt: new Date().toISOString(), canonicalOrigin: `https://127.0.0.1:${options.port}`,
+  const evidence: Record<string, unknown> = { version: 1, instance, startedAt: new Date().toISOString(), canonicalOrigin: `https://${address}:${options.port}`,
     firstBuild: options.prebuiltImage ? "Prebuilt verified image; caller records uncached build separately" : "Full uncached Dockerfile.shared build",
     secondBuild: "Label-only derived image, not a second cold runtime build", physicalReboot: "Not performed", publishedInstaller: "Not tested; local Coordinator only",
     providerRequests: "Disabled by all scheduler fences and the owner-only internal fixture network",
@@ -135,7 +141,7 @@ export async function runDockerAcceptance(options: AcceptanceOptions, runner: Do
       first = release(imageInfo(tag).Id, version, 1); imageTags.set(tag, first.imageId); baseReference = tag;
     }
     evidence.firstImageId = first.imageId; progress("interrupted initial setup");
-    assert.throws(() => new Coordinator(interruptGatewayOnce(networkRunner, instance)).install({ instance, release: first, action: "setup", bindAddress: "127.0.0.1", port: options.port }), /Injected fixture interruption/);
+    assert.throws(() => new Coordinator(interruptGatewayOnce(networkRunner, instance)).install({ instance, release: first, action: "setup", bindAddress: address, port: options.port }), /Injected fixture interruption/);
     const prepared = coordinator.configuration(instance, first.imageId)!; assert.equal(prepared.phase, "prepared");
     evidence.initialImageBindings = { imageInspectId: imageInfo(first.imageId).Id, ownerContainerImage: inspectOwned(runner, "container", resourceName(instance, "owner"), instance)!.Image };
     const installed = coordinator.install({ instance, release: first, action: "setup" }); assert.equal(installed.config.certificateSha256, prepared.certificateSha256);

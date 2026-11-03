@@ -172,18 +172,20 @@ async function fixtureRuntime(input: FixtureInput): Promise<void> {
   } finally { await engine?.close(); await state.close(); vault.close(); }
 }
 
-export interface ClaimUnitsDockerOptions { oldImage: string; image: string; report?: string }
+export interface ClaimUnitsDockerOptions { oldImage: string; image: string; report?: string; instance?: string }
 export function claimUnitsDockerOptions(args: readonly string[]): ClaimUnitsDockerOptions {
   const values = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
     const key = args[i]!, value = args[i + 1];
-    if (!["--old-image", "--image", "--report"].includes(key) || !value || values.has(key)) throw new Error("Use unique claim-unit fixture options.");
+    if (!["--old-image", "--image", "--report", "--instance"].includes(key) || !value || values.has(key)) throw new Error("Use unique claim-unit fixture options.");
     values.set(key, value);
   }
   const oldImage = values.get("--old-image"), image = values.get("--image");
   if (!oldImage || !image || ![oldImage, image].every(value => value.length <= 256 && /^[A-Za-z0-9][A-Za-z0-9_./:@-]*$/.test(value)))
     throw new Error("Supply the old dev.20 image and the new candidate image explicitly.");
-  return { oldImage, image, ...(values.has("--report") ? { report: values.get("--report")! } : {}) };
+  const instance = values.get("--instance");
+  if (instance !== undefined && !/^fixture-[a-f0-9]{12}$/.test(instance)) throw new Error("Use an isolated fixture instance with twelve hexadecimal digits.");
+  return { oldImage, image, ...(values.has("--report") ? { report: values.get("--report")! } : {}), ...(instance ? { instance } : {}) };
 }
 export async function runClaimUnitsDocker(options: ClaimUnitsDockerOptions, runner: DockerRunner = localDockerRunner()): Promise<void> {
   const reportPath = options.report === undefined ? undefined : resolve(options.report);
@@ -204,7 +206,9 @@ export async function runClaimUnitsDocker(options: ClaimUnitsDockerOptions, runn
   };
   const oldImage = identify(options.oldImage, true), image = identify(options.image, false);
   if (oldImage === image) throw new Error("The old and corrected fixture images must differ.");
-  const instance = `fixture-${randomBytes(6).toString("hex")}`, name = resourceName(instance, "claim-units"), volume = resourceName(instance, "claim-units");
+  const instance = options.instance ?? `fixture-${randomBytes(6).toString("hex")}`;
+  if (!/^fixture-[a-f0-9]{12}$/.test(instance)) throw new Error("Use an isolated fixture instance with twelve hexadecimal digits.");
+  const name = resourceName(instance, "claim-units"), volume = resourceName(instance, "claim-units");
   if (inspectOwned(runner, "container", name, instance) || inspectOwned(runner, "volume", volume, instance)) throw new Error("Fixture resources already exist.");
   const evidence: Record<string, unknown> = { fixture: "claims-legacy-unit-correction-v1", instance, oldImageId: oldImage, candidateImageId: image,
     network: "none", readOnlyRoot: true, liveApiRequests: 0, sourceWalletKeyReads: 0, signingOperations: 0, stages: [] };

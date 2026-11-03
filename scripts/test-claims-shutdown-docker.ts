@@ -86,7 +86,7 @@ async function fixtureRuntime(input: FixtureInput): Promise<void> {
   }
 }
 
-export async function runClaimsShutdownDocker(image: string, report?: string): Promise<void> {
+export async function runClaimsShutdownDocker(image: string, report?: string, selectedInstance?: string): Promise<void> {
   if (!image || image.length > 256 || !/^[A-Za-z0-9][A-Za-z0-9_./:@-]*$/.test(image)) throw new Error("Supply an explicit candidate Docker image.");
   const reportPath = report === undefined ? undefined : resolve(report);
   if (reportPath) {
@@ -98,7 +98,9 @@ export async function runClaimsShutdownDocker(image: string, report?: string): P
     const actual = resolve(realpathSync(ancestor), relative(ancestor, reportPath));
     if (actual === project || actual.startsWith(project + sep)) throw new Error("Keep private acceptance evidence outside the checkout.");
   }
-  const runner = localDockerRunner(), instance = `fixture-${randomBytes(6).toString("hex")}`;
+  const instance = selectedInstance ?? `fixture-${randomBytes(6).toString("hex")}`;
+  if (!/^fixture-[a-f0-9]{12}$/.test(instance)) throw new Error("Use an isolated fixture instance with twelve hexadecimal digits.");
+  const runner = localDockerRunner();
   const name = resourceName(instance, "owner"), volume = resourceName(instance, "claims-shutdown");
   const inspected = JSON.parse(checked(runner, ["image", "inspect", image]));
   if (inspected.length !== 1 || !/^sha256:[a-f0-9]{64}$/.test(inspected[0]?.Id) || inspected[0]?.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT)
@@ -161,9 +163,18 @@ export async function runClaimsShutdownDocker(image: string, report?: string): P
   if (cleanup.length) throw new Error(cleanup.join(" "));
   console.log(JSON.stringify(evidence));
 }
+export function claimsShutdownOptions(args: readonly string[]): { image: string; report?: string; instance?: string } {
+  const values = new Map<string, string>();
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index]!, value = args[index + 1];
+    if (!["--image", "--report", "--instance"].includes(key) || !value || values.has(key)) throw new Error("Use unique claim shutdown fixture options.");
+    values.set(key, value);
+  }
+  const image = values.get("--image"), instance = values.get("--instance");
+  if (!image || !/^[A-Za-z0-9][A-Za-z0-9_./:@-]{0,255}$/.test(image) || instance !== undefined && !/^fixture-[a-f0-9]{12}$/.test(instance)) throw new Error("Use an explicit candidate image and an isolated fixture instance.");
+  return { image, ...(values.has("--report") ? { report: values.get("--report")! } : {}), ...(instance ? { instance } : {}) };
+}
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-  const args = process.argv.slice(2), imageAt = args.indexOf("--image"), reportAt = args.indexOf("--report");
-  if (imageAt < 0 || args.length !== (reportAt < 0 ? 2 : 4) || !args[imageAt + 1] || reportAt >= 0 && !args[reportAt + 1])
-    throw new Error("Usage: node scripts/test-claims-shutdown-docker.ts --image CANDIDATE [--report PRIVATE_JSON]");
-  await runClaimsShutdownDocker(args[imageAt + 1]!, reportAt < 0 ? undefined : args[reportAt + 1]);
+  const options = claimsShutdownOptions(process.argv.slice(2));
+  await runClaimsShutdownDocker(options.image, options.report, options.instance);
 }

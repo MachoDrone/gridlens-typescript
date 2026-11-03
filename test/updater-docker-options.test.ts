@@ -23,6 +23,14 @@ test("updater acceptance keeps same-source default and accepts a separate tagged
   assert.throws(() => updaterAcceptanceOptions([...args, "--previous-image", "old:1", "--previous-image", "old:2"]));
 });
 
+test("cold updater acceptance explicitly selects gzip without changing the legacy tar artifact contract", () => {
+  assert.equal(updaterAcceptanceOptions(args).archiveCompression, undefined);
+  for (const value of ["none", "gzip"] as const)
+    assert.equal(updaterAcceptanceOptions([...args, "--archive-compression", value]).archiveCompression, value);
+  for (const value of ["zip", "auto", "--gzip", "gzip;command"])
+    assert.throws(() => updaterAcceptanceOptions([...args, "--archive-compression", value]));
+});
+
 test("source inspection pins immutable identity and distinguishes old guide migration from already supported HTTPS", () => {
   const current = image(), previous = image(false);
   assert.deepEqual(updaterAcceptanceSource(runner([current]), "gridlens-source:fixture"), { imageId: current.Id, version: "0.1.0-dev.13", browserSecurity: true, treasury: false, minimumCoordinator: 1 });

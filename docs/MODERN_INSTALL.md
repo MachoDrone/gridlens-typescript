@@ -437,18 +437,33 @@ npm run build:modern -- \
   --signing-key /protected/modern-release-signing.pem
 ```
 
-`build:modern` builds an uncached Docker image, exports it, writes its signed
-manifest and includes the signed standalone coordinator plus generated launcher.
+`build:modern` builds a Docker image with input-based caching by default; `--cold`
+requests an uncached build. It exports and verifies the image, gzip-compresses the
+runtime archive, signs its actual compressed size/hash and generates the launcher.
+The `.tar` filename is retained for older clients; Docker loads gzip content
+without a new host dependency. Compressed and expanded archives remain bounded.
 The release producer currently requires a single-platform OCI Docker export;
 the builder verifies its manifest, configuration and every layer blob before
-signing both image identities. This producer requirement does not restrict the
+signing both image identities. A classic daemon's configuration ID is accepted
+only when it matches the validated config and every layer is bound to its ordered
+rootfs diff ID. This producer requirement does not restrict the
 classic or containerd store used by an installation receiving that release.
 It publishes nothing. The launcher pins the binary SHA-256; the binary embeds the
-release verification public key. Detached binary signatures and a coordinator
-manifest accompany it. New release sequences must increase monotonically; the
+release verification public key. The launcher has separate runtime/coordinator
+release references. An unchanged coordinator can be reused only after its signed
+component descriptor, full build-input fingerprint, platform, Node/tooling and
+public trust anchor match. Its immutable public binary/signature must verify
+before publishing a launcher that references it. A new component publishes 13
+explicit assets; a reused one publishes 11 and omits the repeated binary/signature.
+New release sequences must increase monotonically; the
 same sequence must never name different content. The runtime image digest covers
 its exact installed dependencies and source. Docker build context is explicitly
 allowlisted and excludes rosters, history, credentials, backups and evidence.
+
+Maintainers use the [resumable release workflow](RELEASE_WORKFLOW.md) for complete
+development publication and recovery. It incorporates the image identity checks,
+artifact inventory, public installer acceptance and channel guards previously
+performed by private per-release helpers.
 
 The SEA build uses Node's documented preparation blob and postject injection
 process, with pinned esbuild/postject development dependencies. See

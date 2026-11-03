@@ -25,6 +25,7 @@ import { ensureUpdater, DOCKER_SOCKET } from "../src/updater/deployment.ts";
 
 export interface UpdaterAcceptanceOptions {
   instance: string; address: string; httpsPort: number; webPort: number; baseImage: string; previousImage?: string; report?: string;
+  archiveCompression?: "none" | "gzip";
 }
 export function updaterAcceptanceOptions(args: readonly string[]): UpdaterAcceptanceOptions {
   const options: UpdaterAcceptanceOptions = { instance: `fixture-${randomBytes(6).toString("hex")}`, address: "", httpsPort: 0, webPort: 0, baseImage: "" };
@@ -38,6 +39,7 @@ export function updaterAcceptanceOptions(args: readonly string[]): UpdaterAccept
     else if (name === "--web-port" && /^\d+$/.test(value)) options.webPort = Number(value);
     else if (name === "--base-image") options.baseImage = value;
     else if (name === "--previous-image") options.previousImage = value;
+    else if (name === "--archive-compression" && (value === "none" || value === "gzip")) options.archiveCompression = value;
     else if (name === "--report") options.report = resolve(value);
     else throw new Error("Unknown updater acceptance option.");
   }
@@ -152,7 +154,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     transportFixture: "Fixture-only image import maps fixed release URLs to signed artifacts in the owned update-state volume; real signature/hash/streaming code runs unchanged.",
     imageDifference: "Version/build identity and fixture import only; failure target additionally replaces owner entrypoint with a generated startup failure.",
     upstream: "Empty fixture fleet; fixture import rejects all nonrelease fetches. No computer credentials or real hosts are supplied.",
-    baseBuild: "Caller-supplied tagged source image; report its separate cold build evidence.", publishedEntryPoint: "Not exercised by this worker fixture." };
+    baseBuild: "Caller-supplied tagged source image; report its separate cold build evidence.", publishedEntryPoint: "Not exercised by this worker fixture.",
+    archiveCompression: options.archiveCompression ?? "none", fixtureArchives: [] };
   let claimed = false, failure: unknown, browser: Browser | undefined;
   const progress = (message: string) => console.log(`Updater fixture ${instance}: ${message}`);
   const imageInfo = (id: string) => JSON.parse(checked(runner, ["image", "inspect", id]))[0] as { Id: string; Config: { Labels: Record<string, string> } };
@@ -272,12 +275,25 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     const createRelease = (target: typeof first, sequence: number): FixtureRelease => {
       const artifact = `gridlens-runtime-fixture-${sequence}.tar`;
-      const recorded = JSON.parse(helper(first.imageId, `import{mkdirSync,statSync,createReadStream}from"node:fs";import{createHash}from"node:crypto";import{spawnSync}from"node:child_process";
+      const recorded = JSON.parse(helper(first.imageId, `import{mkdirSync,statSync,createReadStream,createWriteStream,renameSync}from"node:fs";import{createHash}from"node:crypto";import{spawnSync}from"node:child_process";import{createGzip,createGunzip}from"node:zlib";import{pipeline}from"node:stream/promises";
         const input=JSON.parse(await new Promise(resolve=>{let text="";process.stdin.on("data",chunk=>text+=chunk);process.stdin.on("end",()=>resolve(text));}));mkdirSync("/update-state/fixture",{recursive:true,mode:448});
         const path="/update-state/fixture/"+input.artifact,result=spawnSync("docker",["image","save","--output",path,input.tag],{encoding:"utf8",timeout:300000});if(result.status!==0)throw Error("Fixture archive export failed");
-        const hash=createHash("sha256");for await(const chunk of createReadStream(path))hash.update(chunk);process.stdout.write(JSON.stringify({bytes:statSync(path).size,sha256:hash.digest("hex")}));`, { artifact, tag: target.tag }, true)) as { bytes: number; sha256: string };
+        const expandedBytes=statSync(path).size;if(expandedBytes>1024**3)throw Error("Expanded fixture archive exceeds limit");
+        if(input.compression==="gzip"){
+          const rawHash=createHash("sha256");for await(const chunk of createReadStream(path))rawHash.update(chunk);const expected=rawHash.digest("hex");
+          const packed=path+".gzip";await pipeline(createReadStream(path),createGzip({level:1}),createWriteStream(packed,{flags:"wx",mode:384}));
+          const expanded=createReadStream(packed).pipe(createGunzip()),verifyHash=createHash("sha256");let count=0;
+          for await(const chunk of expanded){count+=chunk.length;if(count>expandedBytes||count>1024**3)throw Error("Expanded fixture changed");verifyHash.update(chunk);}
+          if(count!==expandedBytes||verifyHash.digest("hex")!==expected)throw Error("Fixture gzip roundtrip changed bytes");renameSync(packed,path);
+        }else if(input.compression!=="none")throw Error("Unsupported fixture compression");
+        const hash=createHash("sha256");for await(const chunk of createReadStream(path))hash.update(chunk);process.stdout.write(JSON.stringify({bytes:statSync(path).size,sha256:hash.digest("hex"),expandedBytes,compression:input.compression}));`,
+        { artifact, tag: target.tag, compression: options.archiveCompression ?? "none" }, true)) as { bytes: number; sha256: string; expandedBytes: number; compression: string };
+      assert.equal(recorded.compression, options.archiveCompression ?? "none");
+      assert.ok(recorded.expandedBytes > 0 && recorded.expandedBytes < 1024 ** 3);
+      if (recorded.compression === "gzip") assert.ok(recorded.bytes < recorded.expandedBytes);
+      (evidence.fixtureArchives as unknown[]).push({ sequence, ...recorded });
       const release: ModernRelease = { format: "gridlens-modern-release-v1", imageId: target.imageId, version: target.version, sequence, platform: "linux-x64",
-        minimumCoordinator: target.minimumCoordinator, runtime: { name: artifact, ...recorded } };
+        minimumCoordinator: target.minimumCoordinator, runtime: { name: artifact, bytes: recorded.bytes, sha256: recorded.sha256 } };
       assert.ok(recorded.bytes < 1024 ** 3, "Fixture release must fit the real signed archive bound");
       const manifest = Buffer.from(JSON.stringify(release)), signature = sign(null, manifest, keys.privateKey);
       const channel = Buffer.from(JSON.stringify({ format: CHANNEL_FORMAT, channel: "development", platform: "linux-x64", version: target.version, sequence,
