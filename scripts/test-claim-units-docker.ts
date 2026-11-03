@@ -5,7 +5,8 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { checked, ensureVolume, inspectOwned, labels, localDockerRunner, mount, resourceName, restrictions, PRODUCT_LABEL, PRODUCT } from "../src/installer/docker.ts";
+import { fixtureImageCapabilities } from "./shared-docker-fixture.ts";
+import { checked, ensureVolume, inspectOwned, labels, localDockerRunner, mount, resourceName, restrictions } from "../src/installer/docker.ts";
 import type { DockerRunner } from "../src/installer/docker.ts";
 
 type Mode = "seed-old" | "correct-new" | "reject-old" | "reopen-new";
@@ -173,6 +174,12 @@ async function fixtureRuntime(input: FixtureInput): Promise<void> {
 }
 
 export interface ClaimUnitsDockerOptions { oldImage: string; image: string; report?: string; instance?: string }
+export function claimUnitsImageIdentity(value: unknown, old: boolean): string {
+  const image = fixtureImageCapabilities(value);
+  if (image.treasuryProtocol === 0 || old && (image.version !== "0.1.0-dev.20" || image.treasuryProtocol !== 1))
+    throw new Error("Claim-unit acceptance requires old dev.20 protocol1 and a supported Wallet candidate.");
+  return image.imageId;
+}
 export function claimUnitsDockerOptions(args: readonly string[]): ClaimUnitsDockerOptions {
   const values = new Map<string, string>();
   for (let i = 0; i < args.length; i += 2) {
@@ -198,11 +205,7 @@ export async function runClaimUnitsDocker(options: ClaimUnitsDockerOptions, runn
     if (actual === project || actual.startsWith(project + sep)) throw new Error("Keep private acceptance evidence outside the checkout.");
   }
   const identify = (reference: string, old: boolean): string => {
-    const values = JSON.parse(checked(runner, ["image", "inspect", reference]));
-    if (!Array.isArray(values) || values.length !== 1 || !/^sha256:[a-f0-9]{64}$/.test(values[0]?.Id)
-      || values[0]?.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT || values[0].Config.Labels["io.gridlens.treasury-protocol"] !== "1"
-      || old && values[0].Config.Labels["io.gridlens.version"] !== "0.1.0-dev.20") throw new Error("The selected GridLens fixture image identity is invalid.");
-    return values[0].Id as string;
+    return claimUnitsImageIdentity(JSON.parse(checked(runner, ["image", "inspect", reference])), old);
   };
   const oldImage = identify(options.oldImage, true), image = identify(options.image, false);
   if (oldImage === image) throw new Error("The old and corrected fixture images must differ.");

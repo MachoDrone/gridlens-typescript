@@ -14,7 +14,7 @@ import type { InstallationConfig } from "../src/installer/config.ts";
 import { privateAddress } from "../src/installer/config.ts";
 import { isIP } from "node:net";
 import { verifyGateway } from "../src/installer/health.ts";
-import { dockerFixtureProgram } from "./shared-docker-fixture.ts";
+import { dockerFixtureProgram, fixtureImageCapabilities } from "./shared-docker-fixture.ts";
 import type { DockerFixtureEvidence } from "./shared-docker-fixture.ts";
 
 export interface AcceptanceOptions { instance: string; port: number; address?: string; prebuiltImage?: string; prebuiltVersion?: string; report?: string }
@@ -107,7 +107,7 @@ export async function runDockerAcceptance(options: AcceptanceOptions, runner: Do
   const progress = (message: string) => console.log(`Fixture ${instance}: ${message}`);
   const imageInfo = (id: string) => JSON.parse(checked(runner, ["image", "inspect", id]))[0] as { Id: string; RepoTags?: string[]; Config?: { Labels?: Record<string, string> } };
   const release = (imageId: string, version: string, sequence: number): ModernRelease => ({ format: "gridlens-modern-release-v1", imageId, version, sequence,
-    minimumCoordinator: 1, platform: `linux-${process.arch}` as ModernRelease["platform"], runtime: { name: `gridlens-runtime-fixture-${sequence}.tar`, bytes: 1, sha256: createHash("sha256").update("isolated fixture").digest("hex") } });
+    minimumCoordinator: fixtureImageCapabilities([imageInfo(imageId)]).minimumCoordinator, platform: `linux-${process.arch}` as ModernRelease["platform"], runtime: { name: `gridlens-runtime-fixture-${sequence}.tar`, bytes: 1, sha256: createHash("sha256").update("isolated fixture").digest("hex") } });
   const stopRuntime = () => { for (const role of ["gateway", "owner"]) { const name = resourceName(instance, role);
     if (inspectOwned(runner, "container", name, instance)) checked(runner, ["stop", "--time", "30", name]); } };
   const helper = (config: InstallationConfig, operation: "seed" | "advance" | "inspect"): DockerFixtureEvidence => {

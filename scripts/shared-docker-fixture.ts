@@ -1,3 +1,20 @@
+import { walletMinimumCoordinator } from "../src/installer/financial-security.ts";
+import type { TreasuryProtocol } from "../src/installer/financial-security.ts";
+
+/** Capability checks for isolated acceptance images, not a runtime policy override. */
+export function fixtureImageCapabilities(value: unknown): { imageId: string; version: string; treasuryProtocol: TreasuryProtocol; minimumCoordinator: 1 | 2 | 3 } {
+  const rows = value as { Id?: unknown; Config?: { Labels?: Record<string, unknown> } }[];
+  const row = Array.isArray(rows) && rows.length === 1 ? rows[0] : undefined, labels = row?.Config?.Labels;
+  const protocol = labels?.["io.gridlens.treasury-protocol"];
+  if (typeof row?.Id !== "string" || !/^sha256:[a-f0-9]{64}$/.test(row.Id) || labels?.["io.gridlens.product"] !== "shared-backend"
+    || typeof labels["io.gridlens.version"] !== "string" || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(labels["io.gridlens.version"])
+    || ![undefined, "0", "1", "2"].includes(protocol as string | undefined)
+    || protocol === "2" && (labels["io.gridlens.financial-security-protocol"] !== "1" || labels["io.gridlens.guardian-protocol"] !== "1"
+      || labels["io.gridlens.browser-security-protocol"] !== "1")) throw new Error("The selected GridLens fixture image identity or capability is invalid.");
+  const treasuryProtocol: TreasuryProtocol = protocol === "2" ? 2 : protocol === "1" ? 1 : 0;
+  return { imageId: row.Id, version: labels["io.gridlens.version"], treasuryProtocol, minimumCoordinator: walletMinimumCoordinator(treasuryProtocol) };
+}
+
 /** Only injected through stdin into a stopped, uniquely labeled fixture helper. */
 export interface DockerFixtureInput { operation: "seed" | "advance" | "inspect"; instance: string }
 export interface DockerFixtureEvidence {

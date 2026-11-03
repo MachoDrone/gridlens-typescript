@@ -5,9 +5,10 @@ import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { dirname, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { fixtureImageCapabilities } from "./shared-docker-fixture.ts";
 import { performance } from "node:perf_hooks";
 import { OWNER_STOP_GRACE_SECONDS } from "../src/installer/coordinator.ts";
-import { checked, ensureVolume, inspectOwned, labels, localDockerRunner, mount, resourceName, restrictions, PRODUCT_LABEL, PRODUCT } from "../src/installer/docker.ts";
+import { checked, ensureVolume, inspectOwned, labels, localDockerRunner, mount, resourceName, restrictions } from "../src/installer/docker.ts";
 
 interface FixtureInput { instance: string; mode: "pending" | "idle" }
 /** Serialized into node --input-type=module -e inside a new labeled fixture. */
@@ -102,10 +103,10 @@ export async function runClaimsShutdownDocker(image: string, report?: string, se
   if (!/^fixture-[a-f0-9]{12}$/.test(instance)) throw new Error("Use an isolated fixture instance with twelve hexadecimal digits.");
   const runner = localDockerRunner();
   const name = resourceName(instance, "owner"), volume = resourceName(instance, "claims-shutdown");
-  const inspected = JSON.parse(checked(runner, ["image", "inspect", image]));
-  if (inspected.length !== 1 || !/^sha256:[a-f0-9]{64}$/.test(inspected[0]?.Id) || inspected[0]?.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT)
+  const inspected = fixtureImageCapabilities(JSON.parse(checked(runner, ["image", "inspect", image])));
+  if (inspected.treasuryProtocol === 0)
     throw new Error("Use an immutable identified GridLens candidate image.");
-  const imageId = inspected[0].Id as string;
+  const imageId = inspected.imageId;
   if (inspectOwned(runner, "container", name, instance) || inspectOwned(runner, "volume", volume, instance)) throw new Error("Fixture resources already exist.");
   let volumeCreated = false, failure: unknown;
   const evidence: Record<string, unknown> = { fixture: "claims-delayed-ack-shutdown-v1", instance, imageId, stopGraceSeconds: OWNER_STOP_GRACE_SECONDS,
