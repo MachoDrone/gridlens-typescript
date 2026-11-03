@@ -21,21 +21,32 @@ import type { TreasuryVault } from "./treasury-vault.ts";
 import { createTreasuryClaims } from "./treasury-claims.ts";
 import type { ClaimsDriver } from "./treasury-claims.ts";
 import { REWARD_AMOUNT, sameBinding } from "../fleet/pc-observations.ts";
+import { parseViewerRequest } from "../contracts/viewer.ts";
+import type { GuardianAdministration } from "./guardian-administration.ts";
+import { parseTreasuryConfiguration } from "../contracts/treasury.ts";
+import { parseClaimsStatus } from "../contracts/treasury-claims.ts";
 
 export function createSharedService(state: PrivateState & { snapshots: FleetSnapshotStore }, {
-  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates, treasury: treasuryOptions, treasuryUnavailable = false,
+  now = Date.now, requestHistory, providerWaits = () => [], vault, scan, inspect, build, updates, treasury: treasuryOptions, treasuryUnavailable = false, protectedMode = false,
 }: { now?: () => number; requestHistory?: (context: FleetContext, addresses: string[], refresh: boolean) => Promise<void>;
   providerWaits?: () => { provider: string; retryAtMs: number }[]; vault?: CredentialVault; scan?: typeof scanComputers; inspect?: typeof inspectComputer;
   build?: UpdateBuild; updates?: (body: Record<string, unknown>) => Promise<unknown>;
   treasuryUnavailable?: boolean;
+  protectedMode?: boolean;
   treasury?: { vault: TreasuryVault; driver: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => TreasuryDriver;
+    guardians?: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => GuardianAdministration;
     claims?: { driver: (access: ReturnType<typeof createAccess>, observations: ReturnType<typeof createObservationStore>) => ClaimsDriver;
       initialize: (serverId: string) => boolean } } } = {}) {
-  const access = createAccess(state, now), observations = createObservationStore(state, access.serverId, now);
+  const access = createAccess(state, now, { protectedMode }), observations = createObservationStore(state, access.serverId, now);
   const browserSecurity = createBrowserSecurity(state, access.serverId, now);
   const source = createSnapshotSource(state.snapshots, { now });
+  const guardians = treasuryOptions?.guardians?.(access, observations);
   const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}), ...(inspect ? { inspect } : {}) });
-  const wallet = treasuryOptions ? createTreasury(state, { access, vault: treasuryOptions.vault, driver: treasuryOptions.driver(access, observations), now,
+  const wallet = treasuryOptions ? createTreasury(state, { access, vault: treasuryOptions.vault, driver: treasuryOptions.driver(access, observations), now, protectedMode: access.protectedMode,
+    ...(guardians ? { guardianStatus(context: FleetContext, destinationAddress: string) {
+      const { required, authorityId, state } = guardians.summary(context, destinationAddress);
+      return { required, authorityId, state };
+    }, onConfigure: guardians.syncDestination } : {}),
     security() {
       const { status } = browserSecurity.read();
       if (!status.available || status.status !== "ready") throw new SharedHttpError(503);
@@ -49,6 +60,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       const initialize = treasuryOptions.claims.initialize(access.serverId);
       claims = createTreasuryClaims(state, { serverId: access.serverId, vault: treasuryOptions.vault,
         driver: treasuryOptions.claims.driver(access, observations), authorizeOperation: wallet.authorizeOperation, initialize, now,
+        requireFinancialReady: wallet.requireFinancialReady,
         hosts(context) {
           const data = observations.read(context), at = now();
           return data.associations.filter(row => {
@@ -106,6 +118,23 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
   }
   async function read(body: Record<string, unknown>): Promise<unknown> {
     try {
+      if (body.operation === "viewer-read") {
+        if (Object.keys(body).some(key => !["operation", "token", "request"].includes(key))) throw new SharedHttpError(400);
+        const before = access.requireAccess(body.token);
+        if (before.role !== "viewer") throw new SharedHttpError(403);
+        let request: Record<string, unknown>;
+        try { request = parseViewerRequest(body.request); } catch { throw new SharedHttpError(400); }
+        const result = await read({ ...request, token: body.token });
+        const after = access.requireAccess(body.token);
+        if (after.role !== "viewer" || after.deviceId !== before.deviceId || after.context.scopeId !== before.context.scopeId
+          || after.context.rosterRevision !== before.context.rosterRevision) throw new SharedHttpError(409);
+        return { version: 1, role: "viewer", serverId: access.serverId, scopeId: after.context.scopeId, result };
+      }
+      if (body.operation === "owner-browser-resolve") {
+        if (Object.keys(body).some(key => !["operation", "token", "ownerToken"].includes(key))) throw new SharedHttpError(400);
+        access.requireAccess(body.token);
+        return { authorized: access.ownerBrowserMatches(body.token, body.ownerToken) };
+      }
       if (body.operation === "browser-security") {
         if (Object.keys(body).some(field => field !== "operation")) throw new SharedHttpError(400);
         return browserSecurity.read();
@@ -137,6 +166,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       if (body.operation === "resolve") return context;
       if (body.operation === "status") return { version: 1, serverId: access.serverId, context,
         capabilities, providerWaits: providerWaits(), serverTimeMs: now(), mode: "shared-cache", role: device.role, ...(build ? { build } : {}),
+        ...(access.protectedMode ? { protectedMode: true } : {}),
         ...(access.isDerivedSecureBrowser(body.token) ? { canManageDevices: false } : {}) };
       if (body.operation === "snapshot") {
         const resource = body.resource as FleetResource;
@@ -250,11 +280,43 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       const { status } = browserSecurity.read();
       if (!status.available || status.status !== "ready" || body.httpsOrigin !== status.httpsOrigin
         || body.serverCertificateSha256 !== status.serverCertificateSha256) throw new SharedHttpError(403);
-      const principal = access.requireAccess(body.token, "operator");
+      const principal = access.requireAccess(body.token, access.protectedMode ? "viewer" : "operator");
       return { version: 1, supported: false, state: "recovery-required", pilotConsumed: true,
         serverId: access.serverId, scopeId: principal.context.scopeId, revision: 0 };
     }
     if (!wallet) throw new SharedHttpError(503);
+    const financialBody = { token: body.token, unlockToken: body.unlockToken, httpsOrigin: body.httpsOrigin, serverCertificateSha256: body.serverCertificateSha256 };
+    if (body.operation === "guardians-status" || body.operation === "guardians-enroll") {
+      if (!guardians || Object.keys(body).some(key => !["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"].includes(key))) throw new SharedHttpError(400);
+      const authorization = wallet.authorizeOperation(financialBody);
+      const configuration = parseTreasuryConfiguration(await wallet.dispatch({ ...financialBody, operation: "configuration" }));
+      if (body.operation === "guardians-status") return { version: 1, ...guardians.summary(authorization.context, configuration.destinationAddress) };
+      if (!claims) throw new SharedHttpError(409);
+      const claimStatus = parseClaimsStatus(await claims.dispatch({ ...financialBody, operation: "claims-status" }));
+      const activity = await wallet.dispatch({ ...financialBody, operation: "operations" }) as { operations?: { phase: string }[] };
+      if (claimStatus.state !== "ready" || claimStatus.unresolvedOperationId !== null || !Array.isArray(activity.operations)
+        || activity.operations.some(item => ["authorized", "signed", "submission-started", "uncertain"].includes(item.phase))) throw new SharedHttpError(409);
+      const stableGuard = () => {
+        const principal = access.requireAccess(financialBody.token);
+        if (principal.deviceId !== authorization.deviceId || !wallet.matchesConfiguration(authorization.context, configuration.revision, configuration.destinationAddress)) throw new SharedHttpError(409);
+      };
+      return { version: 1, ...guardians.startEnrollment({ context: authorization.context, configuration, claimedSources: claimStatus.attemptedHosts }, authorization.guard, stableGuard) };
+    }
+    if (body.operation === "viewer-invite") {
+      if (!access.protectedMode || Object.keys(body).some(key => !["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"].includes(key))) throw new SharedHttpError(400);
+      const authorization = wallet.authorizeOperation(body); authorization.guard();
+      const { status } = browserSecurity.read();
+      if (!status.available || status.status !== "ready") throw new SharedHttpError(503);
+      const invitation = access.createCode(authorization.context.scopeId, "viewer", { followRoster: true });
+      return { version: 1, kind: "gridlens-viewer-invite", ownerOrigin: status.httpsOrigin, serverId: access.serverId,
+        caCertificatePem: browserSecurity.viewerTrust(), serverCertificateSha256: status.serverCertificateSha256,
+        code: invitation.code, expiresAtMs: invitation.expiresAtMs };
+    }
+    if (body.operation === "owner-browser") {
+      if (Object.keys(body).some(key => !["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"].includes(key))) throw new SharedHttpError(400);
+      const authorization = wallet.authorizeOperation(body); authorization.guard();
+      return access.issueOwnerBrowser(body.token);
+    }
     if (typeof body.operation === "string" && body.operation.startsWith("claims-")) {
       if (claims) return claims.dispatch(body);
       wallet.authorizeOperation(body).guard();
@@ -262,7 +324,9 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       if (Object.keys(body).some(key => !["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"].includes(key))) throw new SharedHttpError(400);
       return { version: 1, supported: false, state: "recovery-required", unresolvedOperationId: null, attemptedHosts: [], eligibleHosts: [] };
     }
-    return wallet.dispatch(body);
+    const result = await wallet.dispatch(body);
+    if (body.operation === "configure") access.clearOwnerBrowsers();
+    return result;
   }
-  return { read, control, treasury, wallet, claims, access, observations, setup };
+  return { read, control, treasury, wallet, claims, access, observations, setup, guardians };
 }

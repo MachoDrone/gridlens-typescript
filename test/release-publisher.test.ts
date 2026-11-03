@@ -1,9 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { generateKeyPairSync, sign } from "node:crypto";
 import { createServer } from "node:http";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
@@ -14,8 +13,9 @@ import { atomicJson, createJournal, loadJournal, lockRun } from "../scripts/rele
 import { digest, identity, parseConfig, parsePlan, PUBLIC_KEY_SHA256, REPOSITORY, STAGES } from "../scripts/release/model.ts";
 import type { Asset, ReleaseConfig, ReleasePlan } from "../scripts/release/model.ts";
 import { channelTransition, promoteChannel } from "../scripts/release/channel.ts";
+import { channelPublicationFixture } from "./fixtures/channel-publication.ts";
 import { assetMatches, createGitHub, parseRemoteAsset, verifyRemoteInventory, withVerifiedUploadFile } from "../scripts/release/github.ts";
-import type { GitHub, RemoteAsset, RemoteRelease } from "../scripts/release/github.ts";
+import type { RemoteAsset, RemoteRelease } from "../scripts/release/github.ts";
 import { checked } from "../scripts/release/commands.ts";
 import { addressAnswer } from "../scripts/release/public-installer.ts";
 import { assertOwned } from "../scripts/release/fixture-docker.ts";
@@ -118,46 +118,7 @@ test("CLI supports one-command publish and rejects ambiguous command options", (
 });
 
 function channelFixture(t: { after(callback: () => void): void }, beforeSequence = 21) {
-  const f = fixture(t), keys = generateKeyPairSync("ed25519");
-  writeFileSync(f.config.publicKeyPath, keys.publicKey.export({ type: "spki", format: "pem" }));
-  const names = ["modern-channel-linux-x64.json", "modern-channel-linux-x64.sig"];
-  function pair(sequence: number, manifest = "7".repeat(64)) {
-    const bytes = Buffer.from(JSON.stringify({ format: "gridlens-modern-channel-v1", channel: "development", platform: "linux-x64", version: `0.1.0-dev.${sequence}`, sequence,
-      buildId: `${sequence}:0.1.0-dev.${sequence}`, releaseTag: `modern-v0.1.0-dev.${sequence}`, manifestSha256: manifest, workerProtocol: 1 }));
-    return [bytes, sign(null, bytes, keys.privateKey)];
-  }
-  let nextId = 1;
-  const bytes = new Map<number, Buffer>();
-  const remote: RemoteRelease = { id: 777, tag_name: "modern-development", target_commitish: f.config.sourceCommit, draft: false, prerelease: true, assets: [] };
-  const deletes: number[] = [], uploads: string[] = [];
-  function install(sequence: number, manifest?: string) {
-    remote.assets = pair(sequence, manifest).map((body, index) => {
-      const id = nextId++; bytes.set(id, body!); return { id, name: names[index]!, size: body!.length, digest: `sha256:${digest(body!)}`, state: "uploaded" };
-    });
-  }
-  install(beforeSequence);
-  const target = pair(22), assets: Asset[] = target.map((body, index) => {
-    const path = join(f.state, names[index]!); writeFileSync(path, body!); return { name: names[index]!, path, bytes: body!.length, sha256: digest(body!) };
-  });
-  f.journal.candidate = { assets, candidateHash: "1".repeat(64), manifestSha256: "7".repeat(64), bundleDirectory: f.state, buildResultPath: join(f.state, "unused.json") }; f.context.save();
-  const hooks: { afterDelete?: () => void; afterUpload?: () => void } = {};
-  const github: GitHub = {
-    release: async () => structuredClone(remote), tagCommit: async () => f.config.sourceCommit,
-    create: async () => { throw new Error("unexpected create"); }, publish: async () => { throw new Error("unexpected publish"); },
-    async removeAsset(id) { assert.ok(remote.assets.some(asset => asset.id === id)); deletes.push(id); remote.assets = remote.assets.filter(asset => asset.id !== id); hooks.afterDelete?.(); },
-    async upload(_releaseId, asset) {
-      assert.equal(remote.assets.some(item => item.name === asset.name), false, "must never clobber a name");
-      uploads.push(asset.name); const id = nextId++, body = readFileSync(asset.path); bytes.set(id, body);
-      const row: RemoteAsset = { id, name: asset.name, size: body.length, digest: `sha256:${digest(body)}`, state: "uploaded" }; remote.assets.push(row); hooks.afterUpload?.(); return row;
-    },
-    async download(_tag, name, destination, expected) {
-      const asset = remote.assets.find(row => row.name === name); assert.ok(asset);
-      const body = bytes.get(asset.id)!;
-      if (expected) assert.deepEqual({ bytes: body.length, sha256: digest(body) }, expected);
-      writeFileSync(destination, body, { flag: "wx" }); return { name, path: destination, bytes: body.length, sha256: digest(body) };
-    }
-  };
-  return { ...f, github, remote, hooks, deletes, uploads, install };
+  return channelPublicationFixture(t, { initialSequence: beforeSequence });
 }
 test("channel promotion recovers a partial pair after an accepted upload loses its response", async t => {
   const f = channelFixture(t); let fail = true;
@@ -183,7 +144,7 @@ test("equal sequence requires exact bytes and a higher initial sequence is super
   const equal = channelFixture(t, 22); equal.install(22, "9".repeat(64));
   await assert.rejects(promoteChannel(equal.context, equal.github), /Different signed/); assert.equal(equal.deletes.length, 0);
   const newer = channelFixture(t, 23); await assert.rejects(promoteChannel(newer.context, newer.github), ReleaseSuperseded); assert.equal(newer.deletes.length, 0);
-  assert.equal(channelTransition(21, 22, false), "advance"); assert.throws(() => channelTransition(20, 22, false), /preceding/);
+  assert.equal(channelTransition(21, 22, false), "advance"); assert.equal(channelTransition(20, 22, false), "advance");
 });
 test("same signed channel is idempotent without delete/upload requests", async t => {
   const f = channelFixture(t, 22); await promoteChannel(f.context, f.github); assert.equal(f.deletes.length, 0); assert.equal(f.uploads.length, 0);

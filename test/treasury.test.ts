@@ -8,7 +8,7 @@ import type { PrivateState } from "../src/backend/access.ts";
 import { createTreasury, TREASURY_LEDGER_KEY } from "../src/backend/treasury.ts";
 import type { TreasuryDriver, TreasuryQuote, TreasurySigned } from "../src/backend/treasury.ts";
 import { openTreasuryVault } from "../src/backend/treasury-vault.ts";
-import type { TreasuryOperation, TreasuryPlan, TreasuryUnlock } from "../src/contracts/treasury.ts";
+import type { TreasuryGuardianStatus, TreasuryOperation, TreasuryPlan, TreasuryUnlock } from "../src/contracts/treasury.ts";
 import { TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_RESERVE, TREASURY_PREFLIGHT_CODES, parseTreasuryConfiguration, parseTreasuryPlan,
   parseTreasuryOperation, parseTreasuryPreflightFailure, treasuryPreflightStatus } from "../src/contracts/treasury.ts";
 import { TreasuryPreflightError, treasuryPreflightFailure } from "../src/backend/treasury-errors.ts";
@@ -23,7 +23,7 @@ function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>(done => { resolve = done; }); return { promise, resolve };
 }
-function fixture() {
+function fixture(options: { protectedMode?: boolean; onConfigure?: () => Promise<void> } = {}) {
   const root = mkdtempSync(join(tmpdir(), "gridlens-treasury-")); chmodSync(root, 0o700);
   const values = new Map<string, unknown>(); let at = 1_800_000_000_000;
   const securityState = { ...security };
@@ -43,6 +43,7 @@ function fixture() {
   let submitWait: ReturnType<typeof deferred<void>> | undefined;
   let submitFailure = false, receipt: "confirmed" | "failed" | "uncertain" = "confirmed";
   let admissionReady = true, providerRetryAtMs: number | undefined;
+  let guardianState: TreasuryGuardianStatus["state"] = "not-enrolled";
   const signature = "2".repeat(88), transactionBase64 = Buffer.from("generated-signed-transaction-never-sent-to-a-network").toString("base64");
   const driver: TreasuryDriver = {
     assertReady() {
@@ -74,7 +75,9 @@ function fixture() {
     async reconcile() { calls.reconcile++; return { status: receipt, observedAtMs: at, ...(receipt === "confirmed" ? { slot: 42 } : {}),
       ...(providerRetryAtMs === undefined ? {} : { retryAtMs: providerRetryAtMs }) }; },
   };
-  const make = () => createTreasury(state, { access, vault, driver, security: () => securityState, now: () => at });
+  const make = () => createTreasury(state, { access, vault, driver, security: () => securityState, now: () => at,
+    ...(options.onConfigure ? { onConfigure: options.onConfigure } : {}),
+    ...(options.protectedMode ? { protectedMode: true, guardianStatus: () => ({ required: true as const, state: guardianState, authorityId: guardianState === "not-enrolled" ? null : "e".repeat(64) }) } : {}) });
   let treasury = make();
   const request = (operation: string, data: Record<string, unknown> = {}) => treasury.dispatch({ operation, token: operator.token, ...securityState, ...data });
   const setup = async () => {
@@ -94,11 +97,56 @@ function fixture() {
     blockSubmit() { submitWait = deferred<void>(); return () => submitWait!.resolve(); },
     failSubmit(value = true) { submitFailure = value; }, receipt(value: typeof receipt) { receipt = value; },
     admission(value: boolean) { admissionReady = value; }, providerWait(ms: number) { providerRetryAtMs = at + ms; },
+    guardian(value: TreasuryGuardianStatus["state"]) { guardianState = value; },
     failWriteWhen(predicate: (value: unknown) => boolean) { failWrite = predicate; },
     async restart() { await treasury.close(); vault.close(); vault = openTreasuryVault(root); access = createAccess(state, () => at); treasury = make(); },
     async close() { await treasury.close(); vault.close(); rmSync(root, { recursive: true, force: true }); },
   };
 }
+
+test("protected viewer browsers need separate owner proof and complete guardian enrollment before prepare or confirm", async () => {
+  const f = fixture({ protectedMode: true });
+  try {
+    const ticket = f.treasury.control({ operation: "treasury-setup", scopeId: "main" }) as { ticket: string };
+    const unlock = await f.request("setup", { token: f.viewer.token, ticket: ticket.ticket, password, destinationAddress: destination }) as TreasuryUnlock;
+    assert.equal(unlock.configuration.guardian?.state, "not-enrolled");
+    assert.throws(() => f.access.requireAccess(f.viewer.token, "operator"));
+    const before = f.values.get(TREASURY_LEDGER_KEY);
+    const blocked = parseTreasuryPreflightFailure(await f.request("prepare", { token: f.viewer.token, unlockToken: unlock.unlockToken, sourceAddress: source }));
+    assert.equal(blocked.code, "source-changed"); assert.equal(f.calls.prepare, 0); assert.deepEqual(f.values.get(TREASURY_LEDGER_KEY), before);
+    f.guardian("ready");
+    const plan = parseTreasuryPlan(await f.request("prepare", { token: f.viewer.token, unlockToken: unlock.unlockToken, sourceAddress: source }));
+    f.guardian("enrolling");
+    const confirm = { token: f.viewer.token, unlockToken: unlock.unlockToken, planId: plan.planId, reviewDigest: plan.reviewDigest, idempotencyKey: "protected-fixture-confirm" };
+    assert.equal(parseTreasuryPreflightFailure(await f.request("confirm", confirm)).code, "source-changed");
+    assert.equal((f.values.get(TREASURY_LEDGER_KEY) as { consumed: boolean }).consumed, false); assert.equal(f.calls.sign, 0);
+    f.guardian("ready"); await f.request("confirm", confirm); await f.treasury.waitForIdle(); assert.equal(f.calls.submit, 1);
+    assert.equal(f.treasury.matchesConfiguration(f.context, unlock.configuration.revision, destination), true);
+    await f.request("lock", { token: f.viewer.token, unlockToken: unlock.unlockToken });
+    assert.equal(f.treasury.matchesConfiguration(f.context, unlock.configuration.revision, destination), true);
+    f.treasury.control({ operation: "treasury-reset", scopeId: "main" });
+    assert.equal(f.treasury.matchesConfiguration(f.context, unlock.configuration.revision, destination), false);
+  } finally { await f.close(); }
+});
+
+test("owner password changes and unchanged destinations do not require an available guardian policy sync", async () => {
+  let synchronizations = 0;
+  const f = fixture({ onConfigure: async () => { synchronizations++; throw Error("Generated offline guardian"); } });
+  const changedPassword = "another generated owner passphrase";
+  try {
+    let unlock = await f.setup();
+    await f.request("configure", { unlockToken: unlock.unlockToken, currentPassword: password, newPassword: changedPassword });
+    assert.equal(synchronizations, 0);
+    unlock = await f.request("unlock", { password: changedPassword }) as TreasuryUnlock;
+    await f.request("configure", { unlockToken: unlock.unlockToken, currentPassword: changedPassword, destinationAddress: destination });
+    assert.equal(synchronizations, 0);
+    f.advance(60_001);
+    unlock = await f.request("unlock", { password: changedPassword }) as TreasuryUnlock;
+    await assert.rejects(f.request("configure", { unlockToken: unlock.unlockToken, currentPassword: changedPassword, destinationAddress: address("4") }), /offline guardian/);
+    assert.equal(synchronizations, 1);
+    assert.equal(parseTreasuryConfiguration(await f.request("configuration", { unlockToken: unlock.unlockToken })).destinationAddress, destination);
+  } finally { await f.close(); }
+});
 
 test("dedicated treasury encryption binds purpose, rejects tampering and never recreates a missing key by default", () => {
   const root = mkdtempSync(join(tmpdir(), "gridlens-treasury-vault-")); chmodSync(root, 0o700);

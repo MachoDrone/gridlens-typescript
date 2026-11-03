@@ -14,17 +14,18 @@ import { resourceName } from "../src/installer/docker.ts";
 import type { CommandResult } from "../src/installer/docker.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
 import { UpdateDockerFixture } from "./fixtures/updater-docker.ts";
+import { FINANCIAL_SECURITY_FLOOR, FINANCIAL_SECURITY_PROTOCOL_LABEL, GUARDIAN_PROTOCOL_LABEL } from "../src/installer/financial-security.ts";
 
 const release=(sequence:number):ModernRelease=>({format:"gridlens-modern-release-v1",version:`0.1.0-treasury.${sequence}`,sequence,
-  platform:"linux-x64",minimumCoordinator:sequence===1?1:2,imageId:`sha256:${String(sequence).repeat(64)}`,
+  platform:"linux-x64",minimumCoordinator:sequence===4?3:sequence===1?1:2,imageId:`sha256:${String(sequence).repeat(64)}`,
   runtime:{name:`gridlens-runtime-treasury-${sequence}.tar`,bytes:1,sha256:"a".repeat(64)}});
 class TreasuryDockerFixture extends UpdateDockerFixture {
-  readonly protocols=new Map<string,string>([[release(2).imageId,"1"],[release(3).imageId,"1"]]);
+  readonly protocols=new Map<string,string>([[release(2).imageId,"1"],[release(3).imageId,"1"],[release(4).imageId,"2"]]);
   readonly controls:Record<string,unknown>[]=[];
   initializationFails=false;changedImage=false;badSetupLink=false;
   readonly certificate:string;readonly fingerprint:string;
   constructor(directory:string){
-    super("treasury-fixture",join(directory,"installation.json"),[release(1),release(2),release(3)]);
+    super("treasury-fixture",join(directory,"installation.json"),[release(1),release(2),release(3),release(4)]);
     execFileSync("openssl",["req","-x509","-newkey","ec","-pkeyopt","ec_paramgen_curve:prime256v1","-nodes","-keyout",join(directory,"fixture.key"),
       "-out",join(directory,"fixture.crt"),"-days","1","-subj","/CN=Generated Wallet installer fixture","-addext","subjectAltName=IP:10.71.0.8"],{stdio:"ignore"});
     this.certificate=readFileSync(join(directory,"fixture.crt"),"utf8");this.fingerprint=createHash("sha256").update(new X509Certificate(this.certificate).raw).digest("hex");
@@ -38,6 +39,7 @@ class TreasuryDockerFixture extends UpdateDockerFixture {
       this.calls.push([...args]);return ok({certificatePem:this.certificate,serverCertificatePem:this.certificate});
     }
     if(args[0]==="run"&&args.at(-1)==="--terminal-guard"){this.calls.push([...args]);return ok({ready:true});}
+    if (args[0] === "exec" && args.includes("pair-code")) { this.calls.push([...args]); return ok({ version: 1, code: "O".repeat(12), expiresAtMs: Date.now() + 299_000 }); }
     if(args[0]==="exec"&&args.at(-1)==="json"&&typeof input==="string"){
       const body=JSON.parse(input) as Record<string,unknown>;
       if(body.operation==="browser-security-publish"){this.calls.push([...args]);return ok({published:true});}
@@ -52,6 +54,10 @@ class TreasuryDockerFixture extends UpdateDockerFixture {
       const images=JSON.parse(result.stdout),protocol=this.protocols.get(args.at(-1)!);
       images[0].Config.Labels[BROWSER_SECURITY_PROTOCOL_LABEL]="1";
       if(protocol!==undefined)images[0].Config.Labels[TREASURY_PROTOCOL_LABEL]=protocol;
+      if ([release(3).imageId, release(4).imageId].includes(args.at(-1)!)) {
+        images[0].Config.Labels[FINANCIAL_SECURITY_PROTOCOL_LABEL]="1";
+        images[0].Config.Labels[GUARDIAN_PROTOCOL_LABEL]="1";
+      }
       if(this.changedImage)images[0].Id="sha256:"+"f".repeat(64);
       return ok(images);
     }
@@ -77,10 +83,10 @@ function terminal(answer="RESET"){
 }
 async function terminalRun(runner:TreasuryDockerFixture,args:string[],prompts:TerminalPrompts){const mask=process.umask();try{await runTerminal(args,prompts,runner);}finally{process.umask(mask);}}
 
-test("Wallet capability is bound to exact immutable image identity, label 1 only",t=>{
+test("Wallet capability is bound to exact immutable image identity and supported protocol labels",t=>{
   const f=fixture(t);assert.equal(f.coordinator.supportsTreasury(release(1)),false);assert.equal(f.coordinator.supportsTreasury(release(2)),true);
   f.runner.protocols.set(release(2).imageId,"0");assert.equal(f.coordinator.supportsTreasury(release(2)),false);
-  f.runner.protocols.set(release(2).imageId,"2");assert.throws(()=>f.coordinator.supportsTreasury(release(2)),/unsupported Wallet protocol/);
+  f.runner.protocols.set(release(2).imageId,"3");assert.throws(()=>f.coordinator.supportsTreasury(release(2)),/unsupported Wallet protocol/);
   f.runner.protocols.set(release(2).imageId,"1");f.runner.changedImage=true;assert.throws(()=>f.coordinator.supportsTreasury(release(2)),/does not match/);
   f.runner.changedImage=false;assert.throws(()=>f.coordinator.supportsTreasury({...release(2),version:"0.0.0"}),/does not match/);
   assert(!f.runner.calls.some(args=>args[0]==="run"));
@@ -152,4 +158,60 @@ test("older runtime refuses terminal Wallet setup without starting financial con
   const f=fixture(t);f.install(1);
   await assert.rejects(terminalRun(f.runner,["--treasury-setup","--instance",f.instance],terminal().value),/Wallet-capable release/);
   assert.deepEqual(f.runner.controls,[]);assert.equal(f.runner.held,false);
+});
+test("protected upgrade retains a schema2 floor and floor-aware rollback restores telemetry without financial sockets", t => {
+  const f = fixture(t); f.install(3);
+  const protectedInstall = f.install(4, "upgrade");
+  assert.equal(protectedInstall.config.schema, 2); assert.deepEqual(protectedInstall.config.financialSecurity, FINANCIAL_SECURITY_FLOOR);
+  const owner = f.container("owner"), gateway = f.container("gateway");
+  assert.ok((owner.Config as { Env: string[] }).Env.includes("GRIDLENS_TREASURY_PROTOCOL=2"));
+  assert.ok((owner.Config as { Env: string[] }).Env.includes("GRIDLENS_FINANCIAL_SECURITY_FLOOR=2"));
+  assert.ok((owner.Mounts as { Destination: string }[]).some(mount => mount.Destination === "/guardian-cache"));
+  assert.ok(!(gateway.Mounts as { Destination: string }[]).some(mount => mount.Destination === "/guardian-cache"));
+  const ledger = resourceName(f.instance, "ledger"), credentials = resourceName(f.instance, "credentials");
+  const rolled = f.install(4, "rollback");
+  assert.equal(rolled.config.active.imageId, release(3).imageId); assert.equal(rolled.config.schema, 2);
+  assert.deepEqual(rolled.config.financialSecurity, FINANCIAL_SECURITY_FLOOR); assert.equal(f.coordinator.financialRuntimeProtocol(rolled.config), 0);
+  for (const role of ["owner", "gateway"] as const) {
+    const container = f.container(role);
+    assert.equal((container.State as { Running: boolean }).Running, true);
+    assert.equal((container.Mounts as { Destination: string }[]).some(mount => ["/treasury", "/guardian-cache"].includes(mount.Destination)), false);
+  }
+  const restored = f.container("owner");
+  assert.ok((restored.Config as { Env: string[] }).Env.includes("GRIDLENS_TREASURY_PROTOCOL=0"));
+  assert.ok((restored.Config as { Env: string[] }).Env.includes("GRIDLENS_FINANCIAL_SECURITY_FLOOR=2"));
+  assert.ok((restored.Mounts as { Name: string }[]).some(mount => mount.Name === ledger));
+  assert.ok((restored.Mounts as { Name: string }[]).some(mount => mount.Name === credentials));
+  assert.ok(f.runner.objects.has(`volume:${resourceName(f.instance, "guardian-cache")}`));
+});
+test("financial security floor rejects an unaware older recovery image before stopping telemetry", t => {
+  const f = fixture(t), old = f.install(2).config.active; f.install(3, "upgrade"); f.install(4, "upgrade");
+  f.runner.save({ ...f.runner.config!, previous: old });
+  const before = f.runner.calls.length, saved = structuredClone(f.runner.config);
+  assert.throws(() => f.install(4, "rollback"), /security floor/);
+  assert.deepEqual(f.runner.config, saved);
+  assert.equal(f.runner.calls.slice(before).some(args => args[0] === "stop" || args[0] === "rm"), false);
+  assert.equal((f.container("owner").State as { Running: boolean }).Running, true);
+});
+test("protected images require minimum coordinator3 before creating any installation resources", t => {
+  const f = fixture(t), before = f.runner.calls.length;
+  assert.throws(() => f.coordinator.install({ instance: f.instance, release: { ...release(4), minimumCoordinator: 2 }, action: "setup", bindAddress: "10.71.0.8", port: 19443 }), /minimum coordinator version of 3/);
+  assert.equal(f.runner.calls.slice(before).some(args => args[1] === "create"), false);
+});
+test("viewer-only join rejects owner, updater and financial modes before reading an invite", async t => {
+  const f = fixture(t);
+  for (const flag of ["--upgrade", "--rollback", "--connect", "--vpn-web", "--secure-browser", "--treasury-setup", "--treasury-reset", "--ssh-sign-in", "--scan"]) {
+    const before = f.runner.calls.length;
+    await assert.rejects(terminalRun(f.runner, ["--viewer-join", "/generated-unread-invite", flag, "--instance", f.instance], terminal().value), /viewer-join by itself/);
+    assert.equal(f.runner.calls.length, before);
+  }
+});
+test("protected ordinary reconnect prints a terminal-owned HTTPS admin link without requiring Wallet setup", async t => {
+  const f = fixture(t), installed = f.install(4); reconcileInstalledServices(f.runner, installed, release(4), { action: "setup", vpnWeb: true, webPort: 8791 });
+  const connection = terminal(), before = f.runner.calls.length;
+  await terminalRun(f.runner, ["--connect", "--instance", f.instance], connection.value);
+  assert.ok(connection.output.some(line => line === `Owner setup: ${installed.config.origin}/connect#code=${"O".repeat(12)}`));
+  assert.ok(connection.output.includes("This address is the read-only monitoring view."));
+  assert.ok(f.runner.calls.slice(before).some(args => args.includes("pair-code") && args.at(-1) === "operator"));
+  assert.equal(f.runner.controls.length, 0, "Creating the first administration session must not require a receiving wallet or owner-password reset");
 });

@@ -14,7 +14,7 @@ test("updater imports preserve standalone coordinator startup in the actual Comm
     for (const argument of ["--version", "--help"]) {
       const result = spawnSync(process.execPath, [file, argument], { cwd: directory, encoding: "utf8", timeout: 10_000, env: { PATH: "/nonexistent" } });
       assert.equal(result.status, 0, result.stderr);
-      assert.match(result.stdout, argument === "--version" ? /gridlens-modern-coordinator 2 \/ Node 24\.14\.1/ : /GridLens modern coordinator/);
+      assert.match(result.stdout, argument === "--version" ? /gridlens-modern-coordinator 3 \/ Node 24\.14\.1/ : /GridLens modern coordinator/);
       assert.doesNotMatch(result.stderr, /ERR_INVALID_ARG_TYPE|fileURLToPath|Docker access/);
     }
   } finally { await rm(directory, { recursive: true, force: true }); }

@@ -1,9 +1,12 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { randomBytes, X509Certificate } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 import { identity } from "./model.ts";
 import type { FixtureProfile } from "./model.ts";
 import type { Fixture, FixtureDocker } from "./fixture-docker.ts";
+import { parseViewerInvite } from "../../src/backend/viewer-client.ts";
+import type { ViewerInvite } from "../../src/contracts/viewer.ts";
 
 interface Response { status: number; body: unknown; cookie?: string; text: string }
 export function fixtureRequest(url: string, options: { ca?: string; body?: unknown; cookie?: string; token?: string } = {}): Promise<Response> {
@@ -27,6 +30,33 @@ export function fixtureRequest(url: string, options: { ca?: string; body?: unkno
     });
     request.on("timeout", () => request.destroy(new Error("Fixture HTTP request timed out."))); request.on("error", reject); request.end(data);
   });
+}
+export function ownerEntryFromTranscript(transcript: string, origin: string): string {
+  const text = stripVTControlCharacters(transcript).replaceAll("\r", "");
+  const entries = [...text.matchAll(/^Owner setup: (https:\/\/\S+)$/gm)];
+  if (entries.length !== 1) throw new Error("Public setup did not provide one unambiguous owner entry.");
+  const link = new URL(entries[0]![1]!);
+  if (link.origin !== origin || link.pathname !== "/connect" || link.username || link.password || link.search || !/^#code=[A-Za-z0-9_-]{12}$/.test(link.hash))
+    throw new Error("Public owner entry differs from the actual fixture HTTPS endpoint.");
+  return link.hash.slice(6);
+}
+/** Redeem the actual normal installer's owner entry; no Wallet receiving address
+ * or password is needed to reach host administration. No host is contacted. */
+export async function fixtureOwnerEntry(profile: FixtureProfile, fixture: Fixture, docker: FixtureDocker, transcript: string): Promise<unknown> {
+  const secure = `https://${profile.address}:${fixture.httpsPort}`, plain = `http://${profile.address}:${fixture.webPort}`;
+  const ca = await docker.exec(fixture, "updater", ["node", "-e", "process.stdout.write(require('node:fs').readFileSync('/config/ca.crt','utf8'))"]);
+  const code = ownerEntryFromTranscript(transcript, secure);
+  const login = await fixtureRequest(secure + "/api/shared/login", { ca, body: { version: 1, code, deviceName: "Generated public setup owner" } });
+  if (login.status !== 200 || !login.cookie?.startsWith("__Host-gridlens=")) throw new Error("Public owner entry could not be redeemed.");
+  const cookie = login.cookie.split(";")[0]!;
+  const state = await fixtureRequest(secure + "/api/shared/status", { ca, cookie });
+  if (state.status !== 200 || (state.body as { role?: unknown }).role !== "operator") throw new Error("Terminal entry did not establish owner administration.");
+  if ((await fixtureRequest(secure + "/api/shared/setup", { ca, cookie })).status !== 200) throw new Error("Fresh owner cannot reach host setup.");
+  const viewer = await fixtureRequest(plain + "/api/shared/status"), denied = await fixtureRequest(plain + "/api/shared/setup");
+  if ((viewer.body as { role?: unknown }).role !== "viewer" || ![401, 403].includes(denied.status)) throw new Error("Anonymous private gateway acquired owner administration.");
+  if ((await fixtureRequest(secure + "/api/shared/login", { ca, body: { version: 1, code, deviceName: "Generated replay" } })).status === 200) throw new Error("Owner entry was reusable.");
+  return { passed: true, ownerEntryRedeemedOnce: true, ownerHostAdministrationAvailable: true, privateGatewayRole: "viewer", privateGatewayAdministrationDenied: true,
+    receivingWalletRequiredForHosts: false, walletSetupRequested: false, hostCollectionRequests: 0 };
 }
 const OWNER_PROOF = String.raw`
 const fs=require('node:fs'),crypto=require('node:crypto'),{DatabaseSync}=require('node:sqlite');
@@ -64,6 +94,11 @@ export async function fixtureOwner(profile: FixtureProfile, fixture: Fixture, do
   token = value.unlockToken; value.unlockToken = "";
   const proof = JSON.parse(await docker.exec(fixture, "owner", ["node", "-e", OWNER_PROOF])) as unknown;
   return {
+    async createViewerInvite(): Promise<ViewerInvite> {
+      const response = await fixtureRequest(secure + "/api/shared/treasury/viewer-invite", { ca, cookie, token, body: { version: 1 } });
+      if (response.status !== 200) throw new Error("Generated fixture owner could not create a viewer invitation.");
+      return parseViewerInvite(response.body);
+    },
     async check(restarted: boolean): Promise<unknown> {
       const current = JSON.parse(await docker.exec(fixture, "owner", ["node", "-e", OWNER_PROOF])) as unknown;
       if (identity(current) !== identity(proof)) throw new Error("Generated owner, configuration or encryption metadata changed.");

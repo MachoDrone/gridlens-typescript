@@ -10,8 +10,16 @@ import { archiveImageIdentity } from "../scripts/release-image-identity.ts";
 import { compressRuntimeArchive, verifyRuntimeArchive } from "../scripts/release-runtime.ts";
 import { releaseSourceInputs, sourceInputFingerprint, writeReleaseContext } from "../scripts/release-context.ts";
 import { modernDockerBuildArgs, validateReleaseBuildAssets } from "../scripts/build-modern-release.ts";
+import { walletMinimumCoordinator, walletReleaseProtocol } from "../src/installer/financial-security.ts";
 
 const digest = (bytes: Uint8Array): string => createHash("sha256").update(bytes).digest("hex");
+test("one verified source builds compatibility protocol1/min2 before protected protocol2/min3", () => {
+  assert.equal(walletReleaseProtocol({}), 0); assert.equal(walletMinimumCoordinator(0), 1);
+  assert.equal(walletReleaseProtocol({ enableWallet: true, treasuryProtocol: 1 }), 1); assert.equal(walletMinimumCoordinator(1), 2);
+  assert.equal(walletReleaseProtocol({ enableWallet: true }), 2); assert.equal(walletMinimumCoordinator(2), 3);
+  assert.throws(() => walletReleaseProtocol({ treasuryProtocol: 1 }));
+  assert.throws(() => walletReleaseProtocol({ enableWallet: true, treasuryProtocol: 3 as 1 }));
+});
 const json = (value: unknown): Buffer => Buffer.from(JSON.stringify(value));
 function tar(entries: [string, Buffer][]): Buffer {
   const chunks: Buffer[] = [];

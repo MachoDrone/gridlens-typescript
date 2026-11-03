@@ -13,10 +13,12 @@ import { COMPONENT_DESCRIPTOR, COMPONENT_SIGNATURE, canonicalPublicKey, coordina
 import type { CoordinatorComponent } from "./release-coordinator.ts";
 import { probeBakedImage } from "./release-probe.ts";
 import type { BakedImageProof } from "./release-probe.ts";
+import { walletMinimumCoordinator, walletReleaseProtocol } from "../src/installer/financial-security.ts";
+import { channelAssets, channelFamilyForCoordinator } from "../src/updater/channel-paths.ts";
 
 export interface ModernReleaseBuildOptions {
   output: string; version: string; sequence: number; tag: string; signingKey: string; publicKey: string;
-  enableWallet?: boolean; cold?: boolean; coordinatorComponent?: string;
+  enableWallet?: boolean; treasuryProtocol?: 1 | 2; cold?: boolean; coordinatorComponent?: string;
 }
 export interface ReleaseBuildAsset { name: string; path: string; bytes: number; sha256: string }
 export interface ReleaseBuildResult {
@@ -26,10 +28,10 @@ export interface ReleaseBuildResult {
   coordinator: { mode: "new" | "reused"; descriptor: CoordinatorComponent; descriptorSignatureName: string; componentDirectory: string };
   assets: ReleaseBuildAsset[];
 }
-export function modernDockerBuildArgs(options: Pick<ModernReleaseBuildOptions, "version" | "sequence" | "enableWallet" | "cold">, publicKey: string, imageName: string): string[] {
+export function modernDockerBuildArgs(options: Pick<ModernReleaseBuildOptions, "version" | "sequence" | "enableWallet" | "treasuryProtocol" | "cold">, publicKey: string, imageName: string): string[] {
   publicKey = canonicalPublicKey(publicKey);
   return ["build", ...(options.cold ? ["--no-cache"] : []), "--file", "Dockerfile.shared", "--build-arg", `GRIDLENS_VERSION=${options.version}`,
-    "--build-arg", `GRIDLENS_TREASURY_PROTOCOL=${options.enableWallet ? "1" : "0"}`, "--build-arg", `GRIDLENS_SEQUENCE=${options.sequence}`,
+    "--build-arg", `GRIDLENS_TREASURY_PROTOCOL=${walletReleaseProtocol(options)}`, "--build-arg", `GRIDLENS_SEQUENCE=${options.sequence}`,
     "--build-arg", `GRIDLENS_UPDATE_PUBLIC_KEY_BASE64=${Buffer.from(publicKey).toString("base64")}`, "--tag", imageName, "."];
 }
 export function validateReleaseBuildAssets(assets: readonly ReleaseBuildAsset[], directory: string): void {
@@ -49,6 +51,7 @@ export async function buildModernReleaseArtifacts(options: ModernReleaseBuildOpt
   if (options.tag !== `modern-v${options.version}`) throw new Error("The signed update channel requires the exact modern-vVERSION release tag.");
   if (process.versions.node !== "24.14.1" || process.platform !== "linux" || !["x64", "arm64"].includes(process.arch)) throw new Error("Build with pinned Node 24.14.1 on the supported Linux target.");
   process.umask(0o077);
+  const treasuryProtocol = walletReleaseProtocol(options);
   const output = resolve(options.output), project = fileURLToPath(new URL("../", import.meta.url));
   const platform = `linux-${process.arch}` as ModernRelease["platform"];
   const publicKeyText = loadPublicKey(options.publicKey), publicKey = createPublicKey(publicKeyText);
@@ -70,10 +73,11 @@ export async function buildModernReleaseArtifacts(options: ModernReleaseBuildOpt
     const image = inspected[0];
     if (inspected.length !== 1 || !image || !/^sha256:[a-f0-9]{64}$/.test(image.Id) || image.Os !== "linux"
       || image.Architecture !== (process.arch === "x64" ? "amd64" : "arm64") || image.Config?.Labels?.["io.gridlens.product"] !== "shared-backend"
-      || image.Config.Labels["io.gridlens.version"] !== options.version || image.Config.Labels["io.gridlens.treasury-protocol"] !== (options.enableWallet ? "1" : "0"))
+      || image.Config.Labels["io.gridlens.version"] !== options.version || image.Config.Labels["io.gridlens.treasury-protocol"] !== String(treasuryProtocol)
+      || image.Config.Labels["io.gridlens.financial-security-protocol"] !== "1" || image.Config.Labels["io.gridlens.guardian-protocol"] !== "1")
       throw new Error("The built image identity, platform or capability differs from the requested release.");
     const bakedProof = probeBakedImage(runner, { imageId: image.Id, version: options.version, sequence: options.sequence, platform,
-      publicKey: publicKeyText, treasuryProtocol: options.enableWallet ? 1 : 0, inputs, labels: image.Config.Labels });
+      publicKey: publicKeyText, treasuryProtocol, inputs, labels: image.Config.Labels });
     const rawPath = join(staging, "runtime.tar"); docker(["save", "--output", rawPath, imageName]);
     const stat = lstatSync(rawPath);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > MAX_RUNTIME_BYTES) throw new Error("The runtime archive is not a bounded ordinary file.");
@@ -82,7 +86,7 @@ export async function buildModernReleaseArtifacts(options: ModernReleaseBuildOpt
     writeFileSync(join(output, artifactName), compressed.bytes, { mode: 0o600, flag: "wx" });
     const runtime = { name: artifactName, bytes: compressed.bytes.length, sha256: sha256(compressed.bytes) };
     const manifest = parseRelease({ format: "gridlens-modern-release-v1", version: options.version, sequence: options.sequence, platform,
-      minimumCoordinator: options.enableWallet ? 2 : 1, imageId: compressed.imageId, configImageId: compressed.configImageId, runtime });
+      minimumCoordinator: walletMinimumCoordinator(treasuryProtocol), imageId: compressed.imageId, configImageId: compressed.configImageId, runtime });
     if (sourceInputFingerprint(releaseSourceInputs(project)) !== sourceFingerprint) throw new Error("Source inputs changed during the runtime build.");
     const key = createPrivateKey(readFileSync(options.signingKey));
     if (key.asymmetricKeyType !== "ed25519" || !createPublicKey(key).export({ type: "spki", format: "der" }).equals(publicKey.export({ type: "spki", format: "der" })))
@@ -94,7 +98,8 @@ export async function buildModernReleaseArtifacts(options: ModernReleaseBuildOpt
       writeFileSync(join(output, `${name}.sig`), signature, { mode: 0o600, flag: "wx" });
     };
     const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2) + "\n"); writeSigned("modern-release", manifestBytes);
-    writeSigned(`modern-channel-${platform}`, Buffer.from(JSON.stringify({ format: "gridlens-modern-channel-v1", channel: "development", platform,
+    const channelNames = channelAssets(platform, channelFamilyForCoordinator(manifest.minimumCoordinator));
+    writeSigned(channelNames.manifest.slice(0, -5), Buffer.from(JSON.stringify({ format: "gridlens-modern-channel-v1", channel: "development", platform,
       version: manifest.version, sequence: manifest.sequence, buildId: `${manifest.sequence}:${manifest.version}`, releaseTag: options.tag,
       manifestSha256: sha256(manifestBytes), workerProtocol: 1 }, null, 2) + "\n"));
     const componentDirectory = reused ? resolve(options.coordinatorComponent!) : await buildCoordinator({ outputDirectory: join(output, "coordinator"),
@@ -112,7 +117,7 @@ export async function buildModernReleaseArtifacts(options: ModernReleaseBuildOpt
     if (!reused) for (const name of [component.name, component.signature]) copyFileSync(join(componentDirectory, name), join(output, name));
     if (sourceInputFingerprint(releaseSourceInputs(project)) !== sourceFingerprint) throw new Error("Source inputs changed during the release build.");
     const names = [artifactName, COMPONENT_DESCRIPTOR, COMPONENT_SIGNATURE, "coordinator-manifest.json", "modern-start.sh", "modern-release.json", "modern-release.sig",
-      `modern-channel-${platform}.json`, `modern-channel-${platform}.sig`, "LICENSE", "NODE-LICENSE", ...(!reused ? [component.name, component.signature] : [])].sort();
+      channelNames.manifest, channelNames.signature, "LICENSE", "NODE-LICENSE", ...(!reused ? [component.name, component.signature] : [])].sort();
     const assets = names.map(name => { const bytes = readFileSync(join(output, name)); return { name, path: join(output, name), bytes: bytes.length, sha256: sha256(bytes) }; });
     validateReleaseBuildAssets(assets, output);
     return { bundleDirectory: output, release: manifest, sourceFingerprint, bakedProof,
@@ -129,6 +134,7 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
   try {
     console.log(await buildModernRelease({ output: get("--output"), version: get("--version"), sequence: Number(get("--sequence")), tag: get("--tag"),
       signingKey: get("--signing-key"), publicKey: get("--public-key"), enableWallet: args.includes("--enable-wallet"), cold: args.includes("--cold") || args.includes("--no-cache"),
+      ...(args.includes("--treasury-protocol") ? { treasuryProtocol: Number(get("--treasury-protocol")) as 1 | 2 } : {}),
       ...(args.includes("--coordinator-component") ? { coordinatorComponent: get("--coordinator-component") } : {}) }));
   } catch (error) { console.error(error instanceof Error ? error.message : "Modern release build failed."); process.exitCode = 1; }
 }

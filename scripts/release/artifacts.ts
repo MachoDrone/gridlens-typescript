@@ -9,6 +9,8 @@ import type { ReleaseBuildResult } from "../build-modern-release.ts";
 import { verifyRuntimeArchive } from "../release-runtime.ts";
 import { releaseSourceInputs } from "../release-context.ts";
 import { expectedBakedImageProof } from "../release-probe.ts";
+import { walletMinimumCoordinator, walletReleaseProtocol } from "../../src/installer/financial-security.ts";
+import { channelAssets, channelFamilyForCoordinator } from "../../src/updater/channel-paths.ts";
 import { ordinaryFile } from "./files.ts";
 import { digest, identity } from "./model.ts";
 import type { Asset, Candidate, ReleasePlan } from "./model.ts";
@@ -28,13 +30,15 @@ export function verifyBuild(result: ReleaseBuildResult, plan: ReleasePlan, resul
   }
   const bytes = ordinaryFile(join(directory, "modern-release.json"), 16384);
   const manifest = verifyRelease(bytes, ordinaryFile(join(directory, "modern-release.sig"), 64), publicKey);
-  const channel = verifyChannel(ordinaryFile(join(directory, `modern-channel-${plan.config.platform}.json`), 16384),
-    ordinaryFile(join(directory, `modern-channel-${plan.config.platform}.sig`), 64), publicKey);
+  const channelNames = channelAssets(manifest.platform, channelFamilyForCoordinator(manifest.minimumCoordinator));
+  const channel = verifyChannel(ordinaryFile(join(directory, channelNames.manifest), 16384),
+    ordinaryFile(join(directory, channelNames.signature), 64), publicKey);
   const componentBytes = ordinaryFile(join(directory, COMPONENT_DESCRIPTOR), 16384);
   const component = verifyCoordinatorComponent(componentBytes, ordinaryFile(join(directory, COMPONENT_SIGNATURE), 64), publicKey);
   const manifestSha256 = digest(bytes);
+  const treasuryProtocol = walletReleaseProtocol(plan.config);
   if (manifest.version !== plan.config.version || manifest.sequence !== plan.config.sequence || manifest.platform !== plan.config.platform
-    || manifest.minimumCoordinator !== (plan.config.enableWallet ? 2 : 1) || identity(manifest) !== identity(result.release)
+    || manifest.minimumCoordinator !== walletMinimumCoordinator(treasuryProtocol) || identity(manifest) !== identity(result.release)
     || channel.manifestSha256 !== manifestSha256 || channel.version !== manifest.version || channel.sequence !== manifest.sequence
     || channel.platform !== manifest.platform || channel.releaseTag !== `modern-v${manifest.version}`
     || component.platform !== plan.config.platform || component.coordinatorVersion < manifest.minimumCoordinator
@@ -42,13 +46,13 @@ export function verifyBuild(result: ReleaseBuildResult, plan: ReleasePlan, resul
   if (!result.bakedProof || typeof result.bakedProof.imageId !== "string"
     || ![manifest.imageId, manifest.configImageId].includes(result.bakedProof.imageId)) throw new Error("Baked image proof is missing or does not identify the signed image.");
   const expectedProof = expectedBakedImageProof({ imageId: result.bakedProof.imageId, version: plan.config.version, sequence: plan.config.sequence,
-    platform: plan.config.platform, publicKey, treasuryProtocol: plan.config.enableWallet ? 1 : 0, inputs: releaseSourceInputs(plan.config.sourceDirectory),
+    platform: plan.config.platform, publicKey, treasuryProtocol, inputs: releaseSourceInputs(plan.config.sourceDirectory),
     labels: { "io.gridlens.product": "shared-backend", "io.gridlens.version": plan.config.version, "io.gridlens.updater-protocol": "1",
-      "io.gridlens.browser-security-protocol": "1", "io.gridlens.treasury-protocol": plan.config.enableWallet ? "1" : "0" } });
+      "io.gridlens.browser-security-protocol": "1", "io.gridlens.treasury-protocol": String(treasuryProtocol), "io.gridlens.financial-security-protocol": "1", "io.gridlens.guardian-protocol": "1" } });
   if (expectedProof.sourceFingerprint !== plan.sourceFingerprint || identity(result.bakedProof) !== identity(expectedProof))
     throw new Error("Baked image proof differs from the current source, build, public identity or capabilities.");
   const names = [manifest.runtime.name, COMPONENT_DESCRIPTOR, COMPONENT_SIGNATURE, "coordinator-manifest.json", "modern-start.sh", "modern-release.json", "modern-release.sig",
-    `modern-channel-${manifest.platform}.json`, `modern-channel-${manifest.platform}.sig`, "LICENSE", "NODE-LICENSE",
+    channelNames.manifest, channelNames.signature, "LICENSE", "NODE-LICENSE",
     ...(result.coordinator.mode === "new" ? [component.name, component.signature] : [])].sort();
   if (result.assets.map(asset => asset.name).sort().join("|") !== names.join("|") || result.coordinator.mode === "new" && component.releaseTag !== channel.releaseTag
     || result.coordinator.mode === "reused" && component.releaseTag === channel.releaseTag) throw new Error("Release inventory is not the exact supported artifact allowlist.");

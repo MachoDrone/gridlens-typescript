@@ -5,7 +5,7 @@ import type { ReleaseBuildResult } from "../build-modern-release.ts";
 import { coordinatorInputs, COMPONENT_DESCRIPTOR, COMPONENT_SIGNATURE, loadCoordinatorComponent } from "../release-coordinator.ts";
 import { planVerification, runVerification, validateVerificationReceipt } from "../verification.ts";
 import type { VerificationReceipt } from "../verification.ts";
-import { runAcceptances } from "./acceptance.ts";
+import { runAcceptances, additionalReleaseAcceptances } from "./acceptance.ts";
 import { verifyCurrentBuild, verifyDownloadedAssets, verifyPublicComponent } from "./artifacts.ts";
 import { promoteChannel } from "./channel.ts";
 import { cleanupAcceptanceResources } from "./cleanup.ts";
@@ -54,7 +54,8 @@ export function productionEffects(directory: string, importedAcceptances: string
         const path = join(directory, "verification-receipt.json");
         if (previous && existsSync(path)) {
           const receipt = readJson(path) as VerificationReceipt;
-          const valid = await validateVerificationReceipt(receipt, { root: context.journal.plan.config.sourceDirectory });
+          const valid = await validateVerificationReceipt(receipt, { root: context.journal.plan.config.sourceDirectory,
+            requiredAcceptances: additionalReleaseAcceptances(context.journal.plan.config) });
           if (!valid.checksPassed) throw new Error("Previous verification evidence no longer covers this candidate.");
           return { receiptPath: path, reused: true, missingAcceptances: valid.missingAcceptances };
         }
@@ -62,7 +63,7 @@ export function productionEffects(directory: string, importedAcceptances: string
         const plan = await planVerification({ root: config.sourceDirectory, base: config.verification.base, full: config.verification.full, stateDir: join(dirname(directory), "verification-cache") });
         const receipt = await runVerification(plan);
         atomicJson(path, receipt);
-        const valid = await validateVerificationReceipt(receipt, { root: config.sourceDirectory });
+        const valid = await validateVerificationReceipt(receipt, { root: config.sourceDirectory, requiredAcceptances: additionalReleaseAcceptances(config) });
         if (!valid.checksPassed) throw new Error("Required verification checks did not pass.");
         return { receiptPath: path, reused: false, missingAcceptances: valid.missingAcceptances };
       },
@@ -81,6 +82,7 @@ export function productionEffects(directory: string, importedAcceptances: string
         const output = join(directory, `bundle-${context.journal.stages.build!.attempt}`);
         const result = await buildModernReleaseArtifacts({ output, version: config.version, sequence: config.sequence, tag: `modern-v${config.version}`,
           signingKey: config.signingKeyPath, publicKey: config.publicKeyPath, enableWallet: config.enableWallet, cold: config.build.cold,
+          ...(config.treasuryProtocol === undefined ? {} : { treasuryProtocol: config.treasuryProtocol }),
           ...(component ? { coordinatorComponent: component } : {}) });
         const candidate = await verifyCurrentBuild(result, context.journal.plan, resultPath);
         atomicJson(resultPath, result); context.journal.candidate = candidate; context.save();

@@ -2,7 +2,7 @@
  * tests. These rules select coverage; they never weaken individual assertions. */
 export type VerificationGroup = "financial" | "access" | "persistence" | "collection" | "fleet-ui" | "installer" | "handoff" | "stress";
 export const VERIFICATION_GROUPS: readonly VerificationGroup[] = ["financial", "access", "persistence", "collection", "fleet-ui", "installer", "handoff", "stress"];
-export type AcceptanceKind = "docker-shared" | "docker-updater" | "docker-claims-shutdown" | "docker-claim-units" | "public-installer";
+export type AcceptanceKind = "docker-shared" | "docker-updater" | "docker-claims-shutdown" | "docker-claim-units" | "docker-owner-bound" | "public-installer";
 export interface ScopeSelection {
   full: boolean; documentationOnly: boolean; groups: VerificationGroup[]; nodeTests: string[]; browserTests: string[];
   reasons: { path: string; groups: string[]; reason: string }[]; requiredAcceptances: AcceptanceKind[];
@@ -20,6 +20,8 @@ const stressFile = /(?:\.stress\.(?:test|spec)\.ts$|test\/(?:jobs-online-isolati
 
 export function testOwner(path: string): VerificationGroup {
   if (stressFile.test(path)) return "stress";
+  if (/^test\/(?:source-guardian|guardian[^/]*|owner-authority|owner-bound[^/]*|sudo-input)\.test\.ts$/.test(path) || path === "test/browser/owner-protection.spec.ts") return "financial";
+  if (/^test\/(?:viewer[^/]*|protected-access)\.test\.ts$/.test(path) || path === "test/browser/viewer-navigation.spec.ts") return "access";
   if (/^test\/(?:release[^/]*|verification)\.test\.ts$/.test(path)) return "installer";
   if (financial.test(path)) return "financial";
   if (access.test(path)) return "access";
@@ -45,6 +47,9 @@ export function selectVerificationTests(changed: readonly { path: string; status
     }
     const matched = new Set<VerificationGroup>();
     if (financial.test(path)) matched.add("financial");
+    if (/^(?:src\/backend\/(?:source-guardian[^/]*|guardian[^/]*|owner-authority|sudo-input)\.ts|scripts\/(?:source-guardian|test-owner-bound-docker)\.ts|test\/(?:source-guardian|guardian[^/]*|owner-authority|owner-bound[^/]*|sudo-input)\.test\.ts|test\/browser\/owner-protection\.spec\.ts)$/.test(path)) matched.add("financial");
+    if (/^(?:src\/(?:backend\/viewer[^/]*|contracts\/viewer)\.ts|scripts\/shared-viewer\.ts|test\/(?:viewer[^/]*|protected-access)\.test\.ts|test\/browser\/viewer-navigation\.spec\.ts)$/.test(path)) matched.add("access");
+    if (path === "src/backend/pc-driver.ts" || path === "test/pc-driver.test.ts") matched.add("collection");
     if (/^(?:scripts\/solana-rpc\.ts|src\/fleet\/nos\.ts)$/.test(path)) matched.add("financial");
     if (access.test(path)) matched.add("access");
     if (persistence.test(path)) { matched.add("persistence"); matched.add("collection"); matched.add("stress"); }
@@ -70,6 +75,7 @@ export function selectVerificationTests(changed: readonly { path: string; status
   if (allChanged.some(path => /^(?:src\/(?:installer|updater)\/|scripts\/(?:build-modern-release|build-coordinator|modern-start|shared-owner|shared-updater)|Dockerfile|docker\/)/.test(path))) { accepts.add("docker-updater"); accepts.add("public-installer"); }
   if (allChanged.some(path => /^(?:src\/backend\/treasury-claims\.ts|src\/installer\/coordinator\.ts|scripts\/shared-owner\.ts|scripts\/test-claims-shutdown-docker\.ts)$/.test(path))) accepts.add("docker-claims-shutdown");
   if (allChanged.some(path => /^(?:src\/backend\/(?:treasury-claims|claim-receipt|rewards-claimer|treasury-claim-driver)\.ts|scripts\/test-claim-units-docker\.ts)$/.test(path))) accepts.add("docker-claim-units");
+  if (allChanged.some(path => /^(?:src\/backend\/(?:source-guardian|guardian|owner-authority)|src\/installer\/(?:source-guardian|guardian|financial-security)|scripts\/(?:source-guardian|test-owner-bound-docker)|test\/fixtures\/owner-bound-docker)/.test(path))) accepts.add("docker-owner-bound");
   const chosenNode = full ? node : node.filter(path => groups.has(testOwner(path)));
   if (groups.has("financial")) for (const path of ["test/solana-rpc.test.ts", "test/solana-rpc-authorization.test.ts", "test/installer-treasury.test.ts"]) {
     if (node.includes(path) && !chosenNode.includes(path)) chosenNode.push(path);

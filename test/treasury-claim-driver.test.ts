@@ -27,6 +27,7 @@ import type { PcAssociation } from "../src/contracts/shared.ts";
 import type { RewardObservation } from "../src/fleet/pc-observations.ts";
 import { TreasuryPreflightError } from "../src/backend/treasury-errors.ts";
 import { NOS_MINT } from "../src/fleet/nos.ts";
+import type { FinancialGuardianTransport } from "../src/backend/guardian-transport.ts";
 
 const base = 1_800_000_000_000;
 const key = () => generateKeyPairSync("ed25519"),
@@ -76,7 +77,7 @@ const association: PcAssociation = {
   privateIp: "10.0.0.2",
   gpuUuids: [],
 };
-function fixture() {
+function fixture(options: { ownerBound?: boolean; guardian?: FinancialGuardianTransport } = {}) {
   let time = base,
     authorized = true,
     identity = host,
@@ -203,6 +204,8 @@ function fixture() {
         : { code: 0, stdout: identity };
     });
   const driver = createTreasuryClaimDriver({
+    securityMode: options.ownerBound ? "owner-bound" : "legacy",
+    ...(options.guardian ? { guardian: options.guardian } : {}),
     rpc,
     state,
     vault,
@@ -732,4 +735,24 @@ test("newly marked amounts, nonintegral legacy reversal and invalid payout proof
     assert.deepEqual(f.rpcCalls, ["getGenesisHash", "getTransaction"], kind);
     assert.equal(f.commands.length, 0);
   }
+});
+
+test("owner-bound claims require a guardian and never use the legacy in-container helper as fallback", async () => {
+  const f = fixture({ ownerBound: true });
+  await assert.rejects(f.driver.prepare(context, host), error => error instanceof TreasuryPreflightError && error.code === "preflight-unavailable");
+  assert.equal(f.helperCalls(), 0); assert.deepEqual(f.commands, []); assert.deepEqual(f.rpcCalls, []);
+});
+
+test("owner-bound claims bind the durable operation ID and capture guardian ACK without a direct helper command", async () => {
+  const operationId = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"; let calls = 0;
+  const guardian: FinancialGuardianTransport = {
+    async status() { throw Error("not used"); },
+    async prepare(target, source, destination) { assert.equal(target.computer.id, association.binding.pcId); assert.equal(source, host); assert.equal(destination, undefined); },
+    assertReady() {}, async transfer() { throw Error("not used"); }, async setPolicy() { throw Error("not used"); },
+    async claim(_target, quote, id, guard) { assert.equal(id, operationId); assert.equal(quote.sourceAddress, host); guard(); calls++; return ack; },
+  };
+  const f = fixture({ ownerBound: true, guardian }), quote = await f.driver.prepare(context, host);
+  assert.deepEqual(await f.driver.dispatch(quote, f.guard, operationId), ack);
+  assert.equal(calls, 1); assert.equal(f.helperCalls(), 0); assert.deepEqual(f.commands, []);
+  await assert.rejects(f.driver.dispatch(quote, f.guard, "bbbbbbbb-bbbb-4ccc-8ddd-eeeeeeeeeeee"), ClaimsNotDispatchedError);
 });

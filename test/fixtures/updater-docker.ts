@@ -33,10 +33,10 @@ export class UpdateDockerFixture implements DockerRunner {
     if (args[0] === "run" && args.includes("src/installer/container-init.ts")) {
       const body = JSON.parse(typeof input === "string" ? input : "{}");
       if (name === "read") return ok(this.config ?? null);
-      if (name === "initialize") { this.save({ schema: 1, instance: this.instance, bindAddress: body.bindAddress, port: body.port, origin: body.origin,
+      if (name === "initialize") { this.save({ schema: body.financialSecurity ? 2 : 1, ...(body.financialSecurity ? { financialSecurity: body.financialSecurity } : {}), instance: this.instance, bindAddress: body.bindAddress, port: body.port, origin: body.origin,
         certificateSha256: "a".repeat(64), phase: "prepared", active: body.active }); return ok(this.config); }
       if (name === "save") { this.save(body); return ok({ saved: true }); }
-      if (name === "copy-state" || name === "updater-initialize") return ok({ done: true });
+      if (name === "copy-state" || name === "updater-initialize" || name === "guardian-cache-initialize") return ok({ done: true });
       if (name === "certificate") return ok("PUBLIC FIXTURE CERTIFICATE");
       if (name === "vpn-web-auth") return ok({ version: 1, token: "T".repeat(43) });
     }

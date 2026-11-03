@@ -23,6 +23,8 @@ import { originFor } from "./config.ts";
 import { cliColorEnabled, cliSection, cliText } from "./cli-format.ts";
 import { acquireMaintenanceLock, guardTerminalUpdate } from "../updater/deployment.ts";
 import { findReleaseImage, requireReleaseImage, runtimeRelease } from "./image-identity.ts";
+import { installViewer, resumeViewerInstallation } from "./viewer-install.ts";
+import { parseViewerInvite, redeemViewerInvite } from "../backend/viewer-client.ts";
 
 declare const GRIDLENS_RELEASE_PUBLIC_KEY: string;
 
@@ -238,23 +240,32 @@ export function printSecureBrowserReady(terminal: Pick<TerminalPrompts, "print" 
   terminal.print(`Saved HTTPS dashboard: ${publication.httpsOrigin}/`);
   terminal.print("Compare the guide's certificate fingerprint with this terminal before installing trust. Existing addresses and TLS identities were preserved.");
 }
-export function printBrowserReady(terminal: TerminalPrompts, origin: string, secureBrowserSetup = false): void {
+export function printBrowserReady(terminal: TerminalPrompts, origin: string, secureBrowserSetup = false, protectedOwner = false): void {
   // Keep the existing private-origin validation before presenting a clickable URL.
   privateBrowserConnectionText(origin);
   terminal.print("");
   terminal.print(cliText(terminal, "success", "Ready."));
   terminal.print(cliText(terminal, "action", `${origin}/`));
   terminal.print("");
-  terminal.print("Open this address, then choose Hosts in the left menu to find, add or update PCs.");
+  terminal.print(protectedOwner ? "This address is the read-only monitoring view." : "Open this address, then choose Hosts in the left menu to find, add or update PCs.");
   terminal.print(cliText(terminal, "muted", "Use your existing VPN when away."));
   if (secureBrowserSetup) printSecureBrowserGuide(terminal, origin);
   terminal.print("");
+}
+function printOwnerEntry(terminal: TerminalPrompts, coordinator: Coordinator, config: InstallationConfig): void {
+  if (!config.financialSecurity) return;
+  const text = browserConnectionText(config.origin, coordinator.operatorCode(config.instance), true);
+  const link = text.split("\n")[0]!.replace(/^OPEN GRIDLENS: /, "");
+  terminal.print(cliText(terminal, "action", `Owner setup: ${link}`));
+  terminal.print("Use this private owner link to add PCs and manage access. It works once for five minutes; rerun setup if it expires.");
+  terminal.print("Wallet actions require separate owner setup and password authorization.");
 }
 function printSavedConnection(terminal: TerminalPrompts, coordinator: Coordinator, runner: DockerRunner, instance: string): void {
   const config = savedConfiguration(coordinator, runner, instance), web = readVpnWebEndpoint(runner, config);
   if (web) {
     if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
-    printBrowserReady(terminal,web.origin);
+    printBrowserReady(terminal,web.origin,coordinator.supportsBrowserSecurity(config.active),!!config.financialSecurity);
+    printOwnerEntry(terminal,coordinator,config);
   } else terminal.print(browserConnectionText(config.origin, coordinator.operatorCode(instance), config.active.sequence >= 3));
 }
 function setupControl(runner: DockerRunner, instance: string): SetupControl {
@@ -271,19 +282,22 @@ function publishSetupNetwork(runner: DockerRunner, config: InstallationConfig): 
   if(context)setupControl(runner,config.instance)({operation:"setup-network-context",scopeId:"default",...context});
 }
 export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:TerminalPrompts, suppliedRunner?:DockerRunner):Promise<void>{
-  if(args.includes("--help")){console.log("GridLens modern coordinator v2\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n--secure-browser refreshes the secure-device guide, prints its public certificate fingerprint and creates a one-use HTTPS operator sign-in link.\n--treasury-setup creates a one-use HTTPS owner Wallet setup link after secure browser connection.\n--treasury-reset recovers owner access locally without resetting history or the 1 NOS pilot allowance.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
+  if(args.includes("--help")){console.log("GridLens modern coordinator v3\nRequires existing Docker and an assigned private address on your existing LAN/VPN.\n\n--release PINNED_HTTPS_RELEASE [--instance NAME] [--upgrade | --rollback | --connect]\n--vpn-web installs the browser dashboard. Optional --web-port PORT.\n--viewer-join FILE installs a separate read-only viewer from the owner's invitation.\n--secure-browser refreshes the secure-device guide, prints its public certificate fingerprint and creates a one-use HTTPS operator sign-in link.\n--treasury-setup creates a one-use HTTPS owner Wallet setup link after secure browser connection.\n--treasury-reset recovers owner access locally without resetting history or the 1 NOS pilot allowance.\n\nInstallation ends with the dashboard URL. Manage computers and sign in in the browser.\nAdvanced terminal operations: --ssh-sign-in | --scan RANGE\nNo host Node or Python installation is required.");return;}
   if(args.includes("--version")){console.log(`gridlens-modern-coordinator ${COORDINATOR_VERSION} / Node `+process.versions.node);return;}
   process.umask(0o077);
   const terminal=suppliedTerminal??controllingTerminal(),runner=suppliedRunner??localDockerRunner();
   let releaseMaintenanceLock: (() => Promise<void>) | undefined;
   try{
     const instance=option(args,"--instance")??"default";resourceName(instance,"owner");
+    const viewerJoin = option(args, "--viewer-join");
+    if (viewerJoin && ["--upgrade", "--rollback", "--connect", "--vpn-web", "--secure-browser", "--treasury-setup", "--treasury-reset", "--ssh-sign-in", "--scan"].some(flag => args.includes(flag)))
+      throw new InstallerError("Use --viewer-join by itself with an optional --instance and --web-port; it never creates or upgrades an owner.");
     if (args.includes("--treasury-setup") || args.includes("--treasury-reset")) {
       const reset = args.includes("--treasury-reset");
       if (reset && args.includes("--treasury-setup") || ["--upgrade", "--rollback", "--connect", "--vpn-web", "--ssh-sign-in", "--scan", "--web-port", "--secure-browser"].some(flag => args.includes(flag)))
         throw new InstallerError("Use one Wallet setup or recovery operation with an optional --instance.");
       const coordinator = new Coordinator(runner), config = savedConfiguration(coordinator, runner, instance);
-      if (!coordinator.supportsTreasury(config.active)) throw new InstallerError("Update GridLens to the Wallet-capable release before setting up Wallet.");
+      if (coordinator.financialRuntimeProtocol(config) === 0) throw new InstallerError("Update GridLens to the supported Wallet-capable release before setting up Wallet; a retained financial security floor cannot be reset.");
       releaseMaintenanceLock = await acquireMaintenanceLock(runner, instance, config.active.imageId);
       guardTerminalUpdate(runner, config); coordinator.validateManagedRuntime(config);
       const publication = coordinator.publishBrowserSecurity(config);
@@ -304,8 +318,8 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       return;
     }
     const webPortInput=option(args,"--web-port");
-    if(webPortInput!==undefined&&(!args.includes("--vpn-web")||!/^\d+$/.test(webPortInput)||Number(webPortInput)<1024||Number(webPortInput)>65535))
-      throw new InstallerError("Use --web-port with --vpn-web and a port from 1024 through 65535.");
+    if(webPortInput!==undefined&&(!args.includes("--vpn-web")&&!viewerJoin||!/^\d+$/.test(webPortInput)||Number(webPortInput)<1024||Number(webPortInput)>65535))
+      throw new InstallerError("Use --web-port with --vpn-web or --viewer-join and a port from 1024 through 65535.");
     let webPort=webPortInput===undefined?undefined:Number(webPortInput);
     if(args.includes("--secure-browser")) {
       if (["--upgrade", "--rollback", "--connect", "--vpn-web", "--ssh-sign-in", "--scan", "--web-port"].some(flag => args.includes(flag)))
@@ -336,7 +350,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     const coordinator=new Coordinator(runner);
     if(args.includes("--connect")){printSavedConnection(terminal,coordinator,runner,instance);return;}
     cliSection(terminal,"GridLens installation");
-    terminal.print("GridLens will run on this PC. After installation, open its URL to add your Nosana PCs.");
+    terminal.print(viewerJoin ? "GridLens Viewer will show the owner's approved monitoring on this PC." : "GridLens will run on this PC. After installation, open its URL to add your Nosana PCs.");
     const base=option(args,"--release");if(!base)throw new InstallerError("Use the signed release launcher or provide its pinned --release URL.");
     const manifest=await download(releaseURL(base,"modern-release.json"),16_384);
     const signature=await download(releaseURL(base,"modern-release.sig"),64);
@@ -352,6 +366,21 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
     // Resolve the signed manifest/config identity on this Docker store before
     // any helper container or installation lock is started.
     release=runtimeRelease(release,requireReleaseImage(runner,release));
+    if (viewerJoin) {
+      const retained = await resumeViewerInstallation(runner, { image: release, instance });
+      if (retained) { terminal.print(cliText(terminal, "success", "Viewer ready.")); terminal.print(cliText(terminal, "action", `${retained.origin}/`)); return; }
+      assertLocalDockerForSelection(runner);
+      const selected = await choosePrivateEndpoint(terminal, discoverPrivateEndpoints(networkInterfaces(), dockerNetworkExclusions(runner)));
+      const viewerPort = webPort ?? await chooseDashboardPort(terminal, selected.address, { label: "Viewer dashboard port" });
+      if (webPort !== undefined && await probeBindPort(selected.address, viewerPort) !== "available") throw new InstallerError("The requested viewer port is unavailable; no invite was redeemed.");
+      const file = lstatSync(viewerJoin);
+      if (!file.isFile() || file.isSymbolicLink() || file.size < 1 || file.size > 64 * 1024) throw new InstallerError("Use a bounded ordinary viewer invitation file.");
+      const invite = parseViewerInvite(JSON.parse(readFileSync(viewerJoin, "utf8")));
+      const client = await redeemViewerInvite(invite, `GridLens viewer ${instance}`);
+      const installed = await installViewer({ runner, image: release, config: client, instance, bindAddress: selected.address, port: viewerPort });
+      terminal.print(cliText(terminal, "success", "Viewer ready.")); terminal.print(cliText(terminal, "action", `${installed.origin}/`));
+      terminal.print("This viewer can read shared monitoring. Owner settings and financial actions stay on the owner's installation."); return;
+    }
     let bindAddress:string|undefined,port:number|undefined,repairPort:number|undefined,certificate:{certificate:string;privateKey:string}|undefined;
     const observed=coordinator.configuration(instance,release.imageId);
     if(observed&&observed.phase==="ready"&&!args.includes("--rollback")&&release.sequence<observed.active.sequence){
@@ -359,6 +388,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       const saved=readVpnWebEndpoint(runner,observed);
       terminal.print(cliText(terminal,"muted",`The newer installed version ${observed.active.version} was retained. No public release was applied.`));
       terminal.print(cliText(terminal,"action",`Dashboard: ${saved?.origin??observed.origin}`));
+      printOwnerEntry(terminal,coordinator,observed);
       return;
     }
     releaseMaintenanceLock=await acquireMaintenanceLock(runner,instance,observed?.updater?observed.active.imageId:release.imageId);
@@ -386,6 +416,7 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       const saved=readVpnWebEndpoint(runner,result.config);
       terminal.print(cliText(terminal,"muted",`The newer installed version ${result.config.active.version} was retained. No public release was applied.`));
       terminal.print(cliText(terminal,"action",`Dashboard: ${saved?.origin??result.config.origin}`));
+      printOwnerEntry(terminal,coordinator,result.config);
       return;
     }
     if(args.includes("--vpn-web")&&webPort===undefined&&!inspectOwned(runner,"container",resourceName(instance,"vpn-web"),instance)){
@@ -397,7 +428,8 @@ export async function runTerminal(args=process.argv.slice(2), suppliedTerminal?:
       if (!web.privateNetwork) throw new InstallerError("Run setup with --vpn-web to enable the permanent private browser address.");
       await verifyPrivateWeb(web.origin,true);
       publishSetupNetwork(runner,result.config);
-      printBrowserReady(terminal,web.origin,coordinator.supportsBrowserSecurity(result.config.active));
+      printBrowserReady(terminal,web.origin,coordinator.supportsBrowserSecurity(result.config.active),!!result.config.financialSecurity);
+      printOwnerEntry(terminal,coordinator,result.config);
       return;
     }
     terminal.print(`Server TLS certificate SHA-256 (Android pin): ${result.config.certificateSha256}`);

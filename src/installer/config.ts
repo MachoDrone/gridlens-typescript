@@ -1,8 +1,10 @@
 import { isIP } from "node:net";
 import { InstallerError } from "./release.ts";
+import { validFinancialFloor } from "./financial-security.ts";
+import type { FinancialSecurityFloor } from "./financial-security.ts";
 export interface InstalledImage { imageId: string; version: string; sequence: number; stateVolume: string }
 export interface InstallationConfig {
-  schema: 1;
+  schema: 1 | 2;
   instance: string;
   bindAddress: string;
   port: number;
@@ -15,6 +17,7 @@ export interface InstallationConfig {
   updater?: { protocol: 1 };
   /** Explicit endpoint-repair intent; old port/origin remain until replacement verifies. */
   pendingPort?: number;
+  financialSecurity?: FinancialSecurityFloor;
 }
 export function privateAddress(text: string): boolean {
   if (isIP(text) === 4) {
@@ -30,9 +33,11 @@ export function originFor(address: string, port: number): string {
 export function validateInstallation(value: unknown): InstallationConfig {
   if (!value || typeof value !== "object") throw new InstallerError("The saved installation configuration is invalid.");
   const c = value as InstallationConfig;
-  if (c.schema !== 1 || !/^[a-z][a-z0-9-]{0,31}$/.test(c.instance)
+  if (![1, 2].includes(c.schema) || !/^[a-z][a-z0-9-]{0,31}$/.test(c.instance)
     || c.origin !== originFor(c.bindAddress, c.port) || !/^[a-f0-9]{64}$/.test(c.certificateSha256)
     || !["prepared", "applying", "ready"].includes(c.phase)) throw new InstallerError("The saved installation configuration is unsupported or invalid.");
+  if (c.schema === 2 ? !validFinancialFloor(c.financialSecurity) : c.financialSecurity !== undefined)
+    throw new InstallerError("The saved financial security floor is unsupported or invalid.");
   if (c.pendingPort !== undefined && (!Number.isInteger(c.pendingPort) || c.pendingPort < 1024 || c.pendingPort > 65535 || c.pendingPort === c.port))
     throw new InstallerError("The saved endpoint recovery is invalid.");
   if (c.updater !== undefined && (!c.updater || c.updater.protocol !== 1 || Object.keys(c.updater).some(key => key !== "protocol")))

@@ -72,7 +72,8 @@ test("signed release rejects substitution, malformed manifests and unsupported c
   assert.throws(()=>verifyRelease(Buffer.from(JSON.stringify(release(2))),signature,publicKey));
   assert.throws(()=>verifyRelease(bytes,Buffer.alloc(64),publicKey));
   assert.equal(parseRelease({...release(),minimumCoordinator:2}).minimumCoordinator,2);
-  assert.throws(()=>parseRelease({...release(),minimumCoordinator:3}));
+  assert.equal(parseRelease({...release(),minimumCoordinator:3}).minimumCoordinator,3);
+  assert.throws(()=>parseRelease({...release(),minimumCoordinator:4}));
   assert.throws(()=>parseRelease({...release(),runtime:{...release().runtime,name:"../../secret"}}));
   verifyArtifact(Buffer.from("abc"),release().runtime);assert.throws(()=>verifyArtifact(Buffer.from("abd"),release().runtime));
   assert.equal(releaseURL("https://github.com/MachoDrone/gridlens-typescript/releases/download/modern-v1/","modern-release.json").protocol,"https:");

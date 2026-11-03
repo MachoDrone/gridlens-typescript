@@ -56,6 +56,12 @@ function text(value: unknown, limit = 256): string | null {
   if (typeof value !== "string" || value.length > limit || /[\u0000-\u001f\u007f]/.test(value)) return null;
   return value.trim() || null;
 }
+/** Nosana uses this literal sentinel for unavailable driver metadata. Also used
+ * at display time for previously saved snapshots that still contain it. */
+export function reportedDriverVersion(value: unknown): string | null {
+  const result = text(value, 64);
+  return result?.toLowerCase() === "missing" ? null : result;
+}
 
 function nonnegative(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
@@ -78,8 +84,8 @@ export function normalizeHostMetadata(address: string, payload: unknown): HostMe
     ram: nonnegative(metrics.ram_gb),
     disk: nonnegative(metrics.disk_gb),
     cpu: text(cpu.cpu_model),
-    cuda: text(gpu.cuda_driver_version, 64),
-    nvidia: text(gpu.nvml_driver_version, 64),
+    cuda: reportedDriverVersion(gpu.cuda_driver_version),
+    nvidia: reportedDriverVersion(gpu.nvml_driver_version),
     currentNode: text(metrics.package_version, 64),
     system: text(metrics.system_environment),
     country: text(network.country) ?? text(metrics.country),

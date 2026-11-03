@@ -54,7 +54,11 @@ storage and logs; the setup ticket is removed from its fragment before requests.
 The retained safety ledger stores a salted scrypt verifier and encrypted
 configuration/operation records. A dedicated key in the protected credential
 volume encrypts them; it is not a source wallet key. Installation administrators
-and people controlling host private keys remain trusted, as agreed. Missing or
+and people controlling host private keys remain trusted. Protected runtimes add
+[owner-bound source guardians](OWNER_BOUND_FINANCE.md), so staff viewers and
+secondary installations cannot acquire authority by choosing another password.
+Staff must not hold unrestricted source Docker/root access or hub credentials.
+Legacy runtimes retain the earlier installation-local boundary. Missing or
 corrupt financial state disables Wallet rather than granting a fresh owner or
 allowance. Preserve the state for recovery; monitoring remains available.
 

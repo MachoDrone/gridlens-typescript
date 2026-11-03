@@ -65,10 +65,19 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     .replace("</head>", '<meta name="gridlens-private-network" content="1"></head>')
     .replace('<section id="login">', '<section id="login" hidden>'));
   const call = <T>(body: unknown, signal?: AbortSignal) => ownerCall<T>(socketPath, body, signal);
-  const makeSource = (request: IncomingMessage): FleetSource => {
+  const tokenForRead = async (request: IncomingMessage): Promise<string | null> => {
     const token = tokenFor(request);
+    if (transport !== "https" || request.headers.authorization !== undefined || !token) return token;
+    const matches = (request.headers.cookie ?? "").split(";").map(value => value.trim()).filter(value => value.startsWith("__Host-gridlens-owner="));
+    const ownerToken = matches.length === 1 ? matches[0]!.slice("__Host-gridlens-owner=".length) : "";
+    if (!/^[A-Za-z0-9_-]{43}$/.test(ownerToken)) return token;
+    const result = await call<{ authorized: boolean }>({ operation: "owner-browser-resolve", token, ownerToken });
+    return result.authorized === true ? ownerToken : token;
+  };
+  const makeSource = (request: IncomingMessage): FleetSource => {
     return {
       async read<K extends FleetResource>(resource: K, context: FleetContext, signal: AbortSignal): Promise<FleetSnapshots[K]> {
+        const token = await tokenForRead(request);
         if (resource === "job-history") {
           const query = new URL(request.url!, "https://gateway.invalid").searchParams;
           await call({ operation: "history-request", token, rosterRevision: context.rosterRevision, addresses: query.getAll("host"), refresh: query.get("refresh") === "1" }, signal);
@@ -80,6 +89,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         let previous = "";
         for (;;) {
           signal.throwIfAborted();
+          const token = await tokenForRead(request);
           const snapshot = await call<FleetSnapshots[typeof resource]>({ operation: "snapshot", token, resource,
             scopeId: context.scopeId, rosterRevision: context.rosterRevision }, signal);
           const text = JSON.stringify(snapshot);
@@ -100,7 +110,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
     source: { async read() { throw new Error("Request-bound shared access required."); } }, sourceForRequest: makeSource,
     async resolveAccess(request, signal) {
       try {
-        const context = await call<FleetContext>({ operation: "resolve", token: tokenFor(request) }, signal);
+        const context = await call<FleetContext>({ operation: "resolve", token: await tokenForRead(request) }, signal);
         if (request.headers["x-gridlens-scope"] !== undefined && request.headers["x-gridlens-scope"] !== context.scopeId
           || request.headers["x-gridlens-roster-revision"] !== undefined && request.headers["x-gridlens-roster-revision"] !== context.rosterRevision) return null;
         return context;
@@ -236,7 +246,7 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
         response.writeHead(302, { Location: "/#", "Content-Length": 0 }); response.end(); return true;
       }
       if (url.pathname === "/" && (request.method === "GET" || request.method === "HEAD")) {
-        const token = tokenFor(request);
+        const token = await tokenForRead(request);
         let authorized = false;
         if (token) {
           try { await call({ operation: "resolve", token }); authorized = true; }
@@ -257,7 +267,12 @@ export function createGatewayIntegration(socketPath: string, setupHtml: Buffer, 
       }
       if (!url.pathname.startsWith("/api/shared/")) return false;
       try {
-        const token = tokenFor(request), route = url.pathname.slice("/api/shared/".length);
+        if (url.pathname === "/api/shared/viewer/read") {
+          if (transport !== "https" || request.method !== "POST" || url.search || !request.headers.authorization) throw new SharedHttpError(403);
+          const input = await readJson(request, 64 * 1024);
+          sendJson(response, 200, await call({ operation: "viewer-read", token: requestToken(request, transport), request: input })); return true;
+        }
+        const token = await tokenForRead(request), route = url.pathname.slice("/api/shared/".length);
         if (privateNetwork && ["pair", "login", "pair-code", "devices", "revoke"].includes(route)) throw new SharedHttpError(404);
         const getOperations: Record<string, string> = { status: "status", capabilities: "status", observations: "observations", devices: "devices", setup: "setup", monitoring: "monitoring", updates: "updates-status" };
         const postOperations: Record<string, string> = { pair: "pair", login: "pair", "pair-code": "pair-code", revoke: "revoke", "setup-action": "setup-action",

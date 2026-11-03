@@ -48,11 +48,12 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
       if (request.method === "GET" && ["status", "configuration", "operations"].includes(route)) { operation = route; input = {}; }
       else if (request.method === "GET" && /^operations\/[a-zA-Z0-9-]{1,80}$/.test(route)) { operation = "operations"; input = { id: route.slice(11) }; }
       else if (request.method === "GET" && ["claims/status", "claims/operations"].includes(route)) { operation = route.replace("/", "-"); input = {}; }
+      else if (request.method === "GET" && route === "guardians/status") { operation = "guardians-status"; input = {}; }
       else if (request.method === "GET" && /^claims\/operations\/[a-zA-Z0-9-]{1,80}$/.test(route)) { operation = "claims-operations"; input = { id: route.slice(18) }; }
       else {
         const allowed: Record<string, string[]> = { setup: ["ticket", "password", "destinationAddress"], unlock: ["password"], lock: [],
           configuration: ["currentPassword", "destinationAddress", "newPassword"], prepare: ["sourceAddress"], confirm: ["planId", "reviewDigest", "idempotencyKey"],
-          "claims/prepare": ["sourceAddress"], "claims/confirm": ["planId", "reviewDigest", "idempotencyKey"] };
+          "claims/prepare": ["sourceAddress"], "claims/confirm": ["planId", "reviewDigest", "idempotencyKey"], "owner-browser": [], "viewer-invite": [], "guardians/enroll": [] };
         if (request.method !== "POST" || !allowed[route]) throw new SharedHttpError(405);
         if (request.headers.origin !== security.httpsOrigin) throw new SharedHttpError(403);
         operation = route === "configuration" ? "configure" : route.replace("/", "-");
@@ -68,7 +69,13 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
         const result = await ownerCall(options.treasurySocket, { ...input, operation, token: options.token(request),
           ...(unlockToken === undefined ? {} : { unlockToken }), httpsOrigin: security.httpsOrigin, serverCertificateSha256: options.certificateSha256 }, undefined,
           operation === "prepare" || operation === "claims-prepare" ? 35_000 : 60_000);
-        if (["prepare", "confirm", "claims-prepare", "claims-confirm"].includes(operation) && result && typeof result === "object"
+        if (operation === "owner-browser") {
+          const value = result as { version?: unknown; ownerToken?: unknown; expiresAtMs?: unknown };
+          if (value?.version !== 1 || typeof value.ownerToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.ownerToken)
+            || !Number.isSafeInteger(value.expiresAtMs)) throw new SharedHttpError(502);
+          response.setHeader("Set-Cookie", `__Host-gridlens-owner=${value.ownerToken}; Path=/; Secure; HttpOnly; SameSite=Strict; Max-Age=300`);
+          sendJson(response, 200, { version: 1, expiresAtMs: value.expiresAtMs });
+        } else if (["prepare", "confirm", "claims-prepare", "claims-confirm"].includes(operation) && result && typeof result === "object"
           && "kind" in result && result.kind === "preflight-failure") {
           const failure = parseTreasuryPreflightFailure(result);
           sendJson(response, treasuryPreflightStatus(failure.code), failure);

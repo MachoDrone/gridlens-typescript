@@ -28,6 +28,7 @@ import type {
 import { TreasuryPreflightError } from "./treasury-errors.ts";
 import { rewardsClaimerSource, isClaimSignature } from "./rewards-claimer.ts";
 import { verifyClaimReceipt } from "./claim-receipt.ts";
+import type { FinancialGuardianTransport } from "./guardian-transport.ts";
 
 const CLEAN =
   [
@@ -57,6 +58,8 @@ export interface TreasuryClaimDriverOptions {
   contexts: () => readonly FleetContext[];
   now?: () => number;
   connect?: typeof withSsh;
+  securityMode?: "owner-bound" | "legacy";
+  guardian?: FinancialGuardianTransport;
 }
 interface Source {
   association: PcAssociation;
@@ -151,6 +154,9 @@ export function createTreasuryClaimDriver(
     now = Date.now,
     connect = withSsh,
   } = options;
+  const protectedMode = options.securityMode !== "legacy";
+  const target = (source: Source) => ({ computer: source.permission.computer, credential: source.credential });
+  const guardian = (): FinancialGuardianTransport => { if (!options.guardian) throw new TreasuryPreflightError("preflight-unavailable"); return options.guardian; };
   const receiptSession = rpc.createSession("treasury-claim-receipts"),
     attempted = new Set<string>();
   let localWait = 0,
@@ -319,6 +325,7 @@ export function createTreasuryClaimDriver(
         context.rosterRevision,
         sourceAddress,
       );
+      if (protectedMode) await guardian().prepare(target(selected), sourceAddress, undefined);
       const [sourceTokenAddress] = await findAssociatedTokenPda({
         owner: address(sourceAddress),
         mint: address(NOS_MINT),
@@ -345,9 +352,10 @@ export function createTreasuryClaimDriver(
     assertReady(quote) {
       if (attempted.has(hostKey(quote)))
         throw new TreasuryPreflightError("review-expired");
-      current(quote);
+      const selected = current(quote);
+      if (protectedMode) guardian().assertReady(target(selected), quote);
     },
-    async dispatch(quote, authorize) {
+    async dispatch(quote, authorize, operationId) {
       let invoked = false;
       const uncertain = (): ClaimsDispatchResult => ({
         status: "uncertain",
@@ -366,6 +374,13 @@ export function createTreasuryClaimDriver(
         });
         if (expectedAta !== quote.sourceTokenAddress)
           throw new ClaimsNotDispatchedError();
+        if (protectedMode) {
+          if (!operationId) throw new ClaimsNotDispatchedError();
+          guardian().assertReady(target(selected), quote);
+          authorize(); attempted.add(hostKey(quote)); invoked = true;
+          const result = await guardian().claim(target(selected), quote, operationId, authorize);
+          rememberWait(result); return result;
+        }
         const output = await connect(
           selected.permission.computer,
           selected.credential,
@@ -421,10 +436,23 @@ export function createTreasuryClaimDriver(
         );
         rememberWait(result);
         return result;
-      } catch {
+      } catch (error) {
+        if (error instanceof ClaimsNotDispatchedError) throw error;
         if (!invoked) throw new ClaimsNotDispatchedError();
         return uncertain();
       }
+    },
+    async recover(quote, operationId) {
+      if (!protectedMode || !options.guardian?.readOperation) return null;
+      // Recovery concerns an existing dispatch, so it does not require a fresh
+      // rewards amount or the old roster/container to remain active. The same
+      // approved SSH PC identity and owner-pinned guardian remain mandatory.
+      const permission = state.get<PcPermission>(`permission:${quote.scopeId}:${quote.sourceBinding.pcId}`);
+      if (!permission || permission.version !== 1 || permission.paused || permission.revokedAtMs !== null
+        || permission.computer.id !== quote.sourceBinding.pcId || permission.computer.fingerprint !== quote.sourceBinding.sshIdentity) return null;
+      const credential = vault.read(quote.scopeId, permission.computer.id); if (!credential) return null;
+      try { return await options.guardian.readOperation({ computer: permission.computer, credential }, quote, operationId); }
+      catch { return null; }
     },
     async reconcile(input) {
       const uncertain = { status: "uncertain" as const, observedAtMs: now() };

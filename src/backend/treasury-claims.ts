@@ -34,7 +34,9 @@ export interface ClaimsReceipt {
 export interface ClaimsDriver {
   prepare(context: FleetContext, sourceAddress: string): Promise<ClaimsQuote>;
   assertReady(quote: ClaimsQuote): void;
-  dispatch(quote: ClaimsQuote, authorize: () => void): Promise<ClaimsDispatchResult>;
+  dispatch(quote: ClaimsQuote, authorize: () => void, operationId?: string): Promise<ClaimsDispatchResult>;
+  /** Read only the already-journaled guardian result. Never dispatch a claim. */
+  recover?(quote: ClaimsQuote, operationId: string): Promise<ClaimsDispatchResult | null>;
   reconcile(operation: ClaimsReconcileInput): Promise<ClaimsReceipt>;
 }
 /** Only trusted driver code may use this before handing the mutating helper to
@@ -64,7 +66,7 @@ function fields(value: unknown, required: readonly string[], optional: readonly 
   if (!object(value) || required.some(key => !Object.hasOwn(value, key)) || Object.keys(value).some(key => !required.includes(key) && !optional.includes(key)))
     throw new Error("Invalid retained claim state.");
 }
-function parseQuote(value: unknown): ClaimsQuote {
+export function parseQuote(value: unknown): ClaimsQuote {
   fields(value, ["scopeId", "rosterRevision", "sourceAddress", "sourceBinding", "sourceTokenAddress", "mintAddress", "decimals", "lastReportedAmountBaseUnits", "checkedAtMs", "expiresAtMs"]);
   if (!text(value.scopeId) || !text(value.rosterRevision)) throw new Error("Invalid claim scope.");
   const binding = value.sourceBinding;
@@ -84,7 +86,7 @@ function publicQuote(quote: ClaimsQuote): TreasuryClaimQuote {
     mintAddress: quote.mintAddress, decimals: 6, amountMode: "full-available", lastReportedAmountBaseUnits: quote.lastReportedAmountBaseUnits,
     checkedAtMs: quote.checkedAtMs, expiresAtMs: quote.expiresAtMs });
 }
-function parseDispatch(value: unknown, allowLegacy = false): ClaimsDispatchResult {
+export function parseDispatch(value: unknown, allowLegacy = false): ClaimsDispatchResult {
   fields(value, ["status", "success", "observedAtMs"], ["amountUnit", "claimedAmountAtoms", "signature", "retryAfterSeconds"]);
   if (!["acknowledged", "rejected", "uncertain", "rate-limited", "authentication-failed"].includes(String(value.status))
     || value.success !== null && typeof value.success !== "boolean" || !time(value.observedAtMs)
@@ -122,6 +124,7 @@ function parseCorrectionAudit(value: unknown, operation: TreasuryClaimOperation,
 export function createTreasuryClaims(state: PrivateState, options: {
   serverId: string; vault: TreasuryVault; driver: ClaimsDriver; authorizeOperation: (body: Record<string, unknown>) => ClaimsAuthorization;
   initialize?: boolean; now?: () => number; hosts?: (context: FleetContext) => { address: string; label: string }[];
+  requireFinancialReady?: (context: FleetContext) => void;
 }) {
   const { serverId, vault, driver, authorizeOperation } = options, now = options.now ?? Date.now;
   let index: Index | undefined, broken = false, closing = false, preparing = false, reconciliation: Promise<void> | undefined;
@@ -198,10 +201,22 @@ export function createTreasuryClaims(state: PrivateState, options: {
     const current = read(operationId); save({ ...current, public: { ...current.public, phase, error, updatedAtMs: Math.max(now(), current.public.updatedAtMs) } });
   }
   async function reconcileOne(operationId: string): Promise<void> {
-    const current = read(operationId);
-    if (!verifiable(current.dispatch) || !["verifying", "needs-verification"].includes(current.public.phase) || current.nextReconcileAtMs > now()) return;
+    let current = read(operationId);
+    if (!verifiable(current.dispatch) && !driver.recover || !["verifying", "needs-verification"].includes(current.public.phase) || current.nextReconcileAtMs > now()) return;
     const count = Math.min(4, current.reconcileAttempts + 1), delay = [15_000, 30_000, 60_000, 300_000][count - 1]!;
     save({ ...current, reconcileAttempts: count, nextReconcileAtMs: now() + delay });
+    if (!verifiable(current.dispatch)) {
+      let captured: ClaimsDispatchResult | null = null;
+      try { const recovered = await driver.recover!(structuredClone(current.quote), operationId); if (recovered !== null) captured = parseDispatch(recovered); }
+      catch { /* A failed guardian read never becomes another claim request. */ }
+      if (!verifiable(captured)) return;
+      current = read(operationId);
+      current = { ...current, dispatch: captured, public: { ...current.public, phase: "verifying", signature: captured.signature,
+        paidAmountBaseUnits: captured.claimedAmountAtoms, updatedAtMs: Math.max(now(), current.public.updatedAtMs),
+        error: "The recorded guardian payout is awaiting finalized verification. No claim request will be repeated." } };
+      save(current);
+    }
+    if (!verifiable(current.dispatch)) return;
     let receipt: ClaimsReceipt;
     try { receipt = await driver.reconcile({ quote: structuredClone(current.quote), dispatch: structuredClone(current.dispatch) }); }
     catch { receipt = { status: "uncertain", observedAtMs: now() }; }
@@ -252,7 +267,7 @@ export function createTreasuryClaims(state: PrivateState, options: {
         response = parseDispatch(await driver.dispatch(structuredClone(current.quote), () => {
           if (closing) fail(503); auth.guard();
           if (read(operationId).public.phase !== "dispatch-started") fail(409);
-        }));
+        }, operationId));
         // A clock step after dispatch must not erase the only known payout
         // signature/amount. The bounded timestamp is retained as reported;
         // finalized receipt evidence, not ACK wall-clock ordering, proves payment.
@@ -280,7 +295,12 @@ export function createTreasuryClaims(state: PrivateState, options: {
     const body = { ...input }, name = String(body.operation), allowed = Object.hasOwn(routes, name) ? routes[name]! : undefined;
     if (!allowed || Object.keys(body).some(key => !common.includes(key) && !allowed.includes(key))
       || Object.values(body).some(value => value !== undefined && typeof value !== "string")) fail(400);
-    const auth = authorizeOperation(body); auth.guard();
+    const initialAuthorization = authorizeOperation(body); initialAuthorization.guard();
+    const financial = name === "claims-prepare" || name === "claims-confirm";
+    if (financial) { try { options.requireFinancialReady?.(initialAuthorization.context); } catch (error) { return treasuryPreflightFailure(error); } }
+    const auth: ClaimsAuthorization = { ...initialAuthorization, guard() {
+      initialAuthorization.guard(); if (financial) options.requireFinancialReady?.(initialAuthorization.context);
+    } };
     if (name === "claims-status") return status(auth);
     const saved = available();
     if (name === "claims-operations") {

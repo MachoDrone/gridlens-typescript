@@ -13,6 +13,7 @@ import type { PrivateState } from "../src/backend/access.ts";
 import type { TreasuryClaimPlan, TreasuryClaimOperation } from "../src/contracts/treasury-claims.ts";
 import { claimSignature, parseClaimsOperation, parseClaimsPlan, parseClaimsStatus } from "../src/contracts/treasury-claims.ts";
 import { TreasuryPreflightError } from "../src/backend/treasury-errors.ts";
+import { parseTreasuryPreflightFailure } from "../src/contracts/treasury.ts";
 import { SharedHttpError } from "../src/backend/ipc.ts";
 import { openSharedState } from "../src/backend/sqlite-state.ts";
 import { initializeClaimsMarker } from "../src/backend/treasury-claims-marker.ts";
@@ -31,6 +32,7 @@ async function fixture() {
   const oldTransfer = { consumed: true, operation: "original encrypted successful 1 NOS receipt", configuration: "original encrypted destination", owner: "original verifier" };
   const values = new Map<string, unknown>([["treasury.v1", structuredClone(oldTransfer)]]);
   let at = 1_800_000_000_000, active = true, revision = 2, session = "generated-session-1";
+  let financialReady = true;
   const context = { scopeId: "main", rosterRevision: "roster-1", addresses: [sourceA, sourceB] };
   const accounts = new Map<string, string>();
   for (const source of context.addresses) accounts.set(source, (await findAssociatedTokenPda({ owner: address(source), mint: address(NOS_MINT), tokenProgram: TOKEN_PROGRAM_ADDRESS }))[0]);
@@ -42,7 +44,7 @@ async function fixture() {
       const next = new Map(values); for (const [key, value] of entries) next.set(key, structuredClone(value));
       values.clear(); for (const [key, value] of next) values.set(key, value);
     } };
-  const calls = { prepare: 0, dispatch: 0, helper: 0, reconcile: 0 };
+  const calls = { prepare: 0, dispatch: 0, helper: 0, reconcile: 0, recover: 0 };
   let prelaunch: ReturnType<typeof deferred> | undefined, reply: ReturnType<typeof deferred> | undefined;
   let dispatchSnapshot: [string, unknown][] | undefined, lost = false, receiptMode: ClaimsReceipt["status"] = "confirmed";
   let prepareError: unknown, admissionError: unknown, changeQuote: ((quote: ClaimsQuote) => ClaimsQuote) | undefined;
@@ -85,7 +87,8 @@ async function fixture() {
       || bound.httpsOrigin !== "https://fixture.invalid" || bound.serverCertificateSha256 !== "e".repeat(64)) throw new SharedHttpError(401); };
     guard(); return { context: structuredClone(context), deviceId: "generated-device", configurationRevision: revision, authorizationId: session, guard, touch: guard };
   };
-  const make = (initialize = false) => createTreasuryClaims(state, { serverId, vault, driver, authorizeOperation, now: () => at, initialize });
+  const make = (initialize = false) => createTreasuryClaims(state, { serverId, vault, driver, authorizeOperation, now: () => at, initialize,
+    requireFinancialReady() { if (!financialReady) throw new TreasuryPreflightError("source-changed"); } });
   let engine = make(true);
   const request = (operation: string, input: Record<string, unknown> = {}) => engine.dispatch({ operation, token: "generated-app-token", unlockToken: "generated-owner-token",
     httpsOrigin: "https://fixture.invalid", serverCertificateSha256: "e".repeat(64), ...input });
@@ -95,6 +98,10 @@ async function fixture() {
   const status = async () => parseClaimsStatus(await request("claims-status"));
   return { directory, values, state, vault, accounts, calls, request, prepare, confirm, status, oldTransfer, authorizeOperation,
     get engine() { return engine; }, advance(ms: number) { at += ms; }, lock() { active = false; }, unlock() { active = true; }, resetOwner() { revision++; session = "new-generated-session"; },
+    ready(value: boolean) { financialReady = value; },
+    recover(response: ClaimsDispatchResult | null) { driver.recover = async (quote, operationId) => {
+      calls.recover++; assert.equal(readStored(operationId).quote.sourceAddress, quote.sourceAddress); return response;
+    }; },
     scope(value: string) { context.scopeId = value; context.rosterRevision = `roster-${value}`; revision++; session = `session-${value}`; },
     prepareFailure(error: unknown) { prepareError = error; }, admissionFailure(error: unknown) { admissionError = error; }, quote(change: (value: ClaimsQuote) => ClaimsQuote) { changeQuote = change; },
     response(change: (value: ClaimsDispatchResult) => unknown) { responseChange = change; }, receipt(mode: ClaimsReceipt["status"]) { receiptMode = mode; },
@@ -109,7 +116,43 @@ async function fixture() {
     },
     async close() { prelaunch?.release(); reply?.release(); await engine.close(); vault.close(); rmSync(directory, { recursive: true, force: true }); },
   };
+  function readStored(operationId: string): TestStored { return vault.open<TestStored>(values.get(`${TREASURY_CLAIMS_LEDGER_KEY}/operation/${operationId}`) as string, `${serverId}:claims-v1:${operationId}`); }
 }
+
+test("partial guardian enrollment blocks claims before reservation and fences an admitted operation before helper launch", async () => {
+  const f = await fixture();
+  try {
+    f.ready(false);
+    assert.equal(parseTreasuryPreflightFailure(await f.prepare()).code, "source-changed"); assert.equal(f.calls.prepare, 0);
+    assert.equal((await f.status()).attemptedHosts.length, 0);
+    f.ready(true); const plan = await f.prepare(); f.ready(false);
+    assert.equal(parseTreasuryPreflightFailure(await f.confirm(plan)).code, "source-changed");
+    assert.equal((await f.status()).attemptedHosts.length, 0); assert.equal(f.calls.helper, 0);
+    f.ready(true); const release = f.blockBeforeHelper(); const accepted = await f.confirm(plan); f.ready(false); release(); await f.engine.waitForIdle();
+    assert.equal(f.stored(accepted.operation.id).public.phase, "cancelled"); assert.equal(f.calls.helper, 0);
+    assert.deepEqual(f.values.get("treasury.v1"), f.oldTransfer);
+  } finally { await f.close(); }
+});
+
+test("lost guardian ACK recovery reads only the recorded operation with durable pacing and still requires exact finalized payout proof", async () => {
+  const f = await fixture();
+  try {
+    f.loseReply(); f.recover(null);
+    const accepted = await f.confirm(await f.prepare()); await f.engine.waitForIdle();
+    assert.equal(f.stored(accepted.operation.id).public.phase, "needs-verification"); assert.equal(f.calls.helper, 1);
+    f.lock(); await f.engine.reconcilePending(); assert.equal(f.calls.recover, 1); assert.equal(f.calls.reconcile, 0);
+    await f.restart(); f.advance(14_999); await f.engine.reconcilePending(); assert.equal(f.calls.recover, 1);
+    f.recover({ status: "acknowledged", success: true, amountUnit: "base-units", claimedAmountAtoms: "2500000", signature: "2".repeat(88), observedAtMs: 1_800_000_000_000 });
+    f.receiptFields(receipt => ({ ...receipt, payoutOwner: sourceB }));
+    f.advance(1); await f.engine.reconcilePending();
+    assert.equal(f.calls.recover, 2); assert.equal(f.stored(accepted.operation.id).public.phase, "verifying");
+    assert.equal(f.stored(accepted.operation.id).public.signature, "2".repeat(88));
+    f.receiptFields(receipt => receipt); f.advance(30_000); await f.engine.reconcilePending();
+    assert.equal(f.stored(accepted.operation.id).public.phase, "confirmed");
+    assert.equal(f.calls.recover, 2); assert.equal(f.calls.helper, 1); assert.equal(f.calls.dispatch, 1);
+    assert.deepEqual(f.values.get("treasury.v1"), f.oldTransfer);
+  } finally { await f.close(); }
+});
 
 test("full reward claim verifies host payout, preserves original NOS pilot and permits a different host only afterward", async () => {
   const f = await fixture();

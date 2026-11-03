@@ -3,8 +3,10 @@ import { mkdir, lstat, open, readdir, rename, unlink } from "node:fs/promises";
 import { join } from "node:path";
 import { parseUpdateBuild } from "../contracts/updates.ts";
 import type { UpdateCandidate } from "../contracts/updates.ts";
-import { parseRelease, releaseURL, verifyRelease } from "../installer/release.ts";
+import { COORDINATOR_VERSION, parseRelease, releaseURL, verifyRelease } from "../installer/release.ts";
 import type { ModernRelease } from "../installer/release.ts";
+import { channelAssets, channelFamilyForCoordinator } from "./channel-paths.ts";
+import type { ChannelFamily } from "./channel-paths.ts";
 
 export const WORKER_PROTOCOL = 1;
 export const CHANNEL_FORMAT = "gridlens-modern-channel-v1";
@@ -18,12 +20,13 @@ export interface UpdateChannel {
 }
 export class UpdateError extends Error {
   readonly retryAtMs: number | undefined;
-  constructor(message: string, retryAtMs?: number) { super(message); this.name = "UpdateError"; this.retryAtMs = retryAtMs; }
+  readonly httpStatus: number | undefined;
+  constructor(message: string, retryAtMs?: number, httpStatus?: number) { super(message); this.name = "UpdateError"; this.retryAtMs = retryAtMs; this.httpStatus = httpStatus; }
 }
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === "object" && !Array.isArray(value);
-export function channelURL(platform: UpdatePlatform): URL {
+export function channelURL(platform: UpdatePlatform, family: ChannelFamily = channelFamilyForCoordinator(COORDINATOR_VERSION)): URL {
   if (platform !== "linux-x64" && platform !== "linux-arm64") throw new UpdateError("This platform cannot use this update channel.");
-  return new URL(`https://github.com/MachoDrone/gridlens-typescript/releases/download/modern-development/modern-channel-${platform}.json`);
+  return new URL(`https://github.com/MachoDrone/gridlens-typescript/releases/download/modern-development/${channelAssets(platform, family).manifest}`);
 }
 export function parseChannel(value: unknown): UpdateChannel {
   if (!object(value) || value.format !== CHANNEL_FORMAT || value.channel !== "development"
@@ -73,7 +76,7 @@ async function responseFor(url: URL, fetcher: typeof fetch, signal: AbortSignal,
     if (!response.ok || !response.body) {
       const retryAt = retryDeadline(response.headers, now()); await response.body?.cancel();
       throw new UpdateError(response.status === 429 || retryAt !== undefined ? "Release checks are waiting for the download service."
-        : "The update download service could not supply the release.", retryAt);
+        : "The update download service could not supply the release.", retryAt, response.status);
     }
     return response;
   }
@@ -89,14 +92,32 @@ async function boundedDownload(url: URL, maximum: number, fetcher: typeof fetch,
   }
   return Buffer.concat(chunks);
 }
+async function optionalChannelFile(url: URL, maximum: number, fetcher: typeof fetch, signal: AbortSignal, now: () => number): Promise<Buffer | undefined> {
+  try { return await boundedDownload(url, maximum, fetcher, signal, now); }
+  catch (error) {
+    // A service pause, denial, malformed body or bad signature is never absence.
+    if (error instanceof UpdateError && error.httpStatus === 404 && error.retryAtMs === undefined) return undefined;
+    throw error;
+  }
+}
+async function discoverChannel(platform: UpdatePlatform, publicKey: string, fetcher: typeof fetch, signal: AbortSignal, now: () => number): Promise<UpdateChannel> {
+  const family = channelFamilyForCoordinator(COORDINATOR_VERSION), url = channelURL(platform, family);
+  if (family === "legacy") return verifyChannel(await boundedDownload(url, 16_384, fetcher, signal, now),
+    await boundedDownload(new URL(url.href.replace(/\.json$/, ".sig")), 64, fetcher, signal, now), publicKey);
+  const bytes = await optionalChannelFile(url, 16_384, fetcher, signal, now);
+  const signature = await optionalChannelFile(new URL(url.href.replace(/\.json$/, ".sig")), 64, fetcher, signal, now);
+  if (bytes !== undefined && signature !== undefined) return verifyChannel(bytes, signature, publicKey);
+  if (bytes !== undefined || signature !== undefined) throw new UpdateError("The coordinator-compatible signed channel pair is incomplete; no fallback was used.");
+  const legacy = channelURL(platform, "legacy");
+  return verifyChannel(await boundedDownload(legacy, 16_384, fetcher, signal, now),
+    await boundedDownload(new URL(legacy.href.replace(/\.json$/, ".sig")), 64, fetcher, signal, now), publicKey);
+}
 export async function discoverUpdate({ platform, publicKey, signal, fetch: fetcher = globalThis.fetch, now = Date.now }: {
   platform: UpdatePlatform; publicKey: string; signal?: AbortSignal; fetch?: typeof fetch; now?: () => number;
 }): Promise<VerifiedCandidate> {
   const abort = AbortSignal.any([AbortSignal.timeout(60_000), ...(signal ? [signal] : [])]);
   try {
-    const url = channelURL(platform);
-    const channel = verifyChannel(await boundedDownload(url, 16_384, fetcher, abort, now),
-      await boundedDownload(new URL(url.href.replace(/\.json$/, ".sig")), 64, fetcher, abort, now), publicKey);
+    const channel = await discoverChannel(platform, publicKey, fetcher, abort, now);
     if (channel.platform !== platform) throw new UpdateError("The signed update is for a different platform.");
     const base = `https://github.com/MachoDrone/gridlens-typescript/releases/download/${channel.releaseTag}/`;
     const bytes = await boundedDownload(releaseURL(base, "modern-release.json"), 16_384, fetcher, abort, now);

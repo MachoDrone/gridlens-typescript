@@ -6,11 +6,28 @@ import type { NodeGpuObservation } from "../fleet/pc-observations.ts";
 import type { JobHistoryItem } from "../fleet/job-history.ts";
 import { formatIPDisplay } from "../fleet/ip-display.ts";
 import type { IPDisplayMode } from "../fleet/ip-display.ts";
+import { DRIVER_FRESH_MS, pcDriverView } from "../fleet/pc-drivers.ts";
 
 /** Optional installed-backend data adapter. Never enabled by the development preview. */
 export function createSharedTelemetry(changed: () => void, now = Date.now) {
   const enabled = document.querySelector('meta[name="gridlens-shared-backend"]')?.getAttribute("content") === "1";
+  const viewerOnly = document.querySelector('meta[name="gridlens-viewer-only"]')?.getAttribute("content") === "1";
   let data: SharedObservations | undefined, controller: AbortController | undefined, failed = false, timer: ReturnType<typeof setTimeout> | undefined;
+  let driverExpiryTimer: ReturnType<typeof setTimeout> | undefined;
+  function scheduleDriverExpiry(): void {
+    if (driverExpiryTimer) clearTimeout(driverExpiryTimer);
+    driverExpiryTimer = undefined;
+    if (!enabled || document.hidden) return;
+    const at = now(), deadlines = (data?.drivers ?? []).flatMap(row => row.driver.status === "ok" && row.driver.observedAtMs + DRIVER_FRESH_MS > at
+      ? [row.driver.observedAtMs + DRIVER_FRESH_MS] : []);
+    if (deadlines.length) driverExpiryTimer = setTimeout(() => { changed(); scheduleDriverExpiry(); }, Math.max(1, Math.min(...deadlines) - at));
+  }
+  function driver(address: string, at: number) {
+    if (!enabled) return undefined;
+    const association = data?.associations.find(row => row.address === address);
+    const record = data?.drivers?.find(row => row.pcId === association?.binding.pcId && row.sshFingerprint === association?.sshFingerprint);
+    return record && association ? { ...pcDriverView(record, at, failed), pcName: association.name } : undefined;
+  }
   const gpuHistory = new Map<string, { gpu: NodeGpuObservation; receivedAtMs: number }>();
   const historyQueue = new Set<string>(); let historyActive = 0;
   const historyControllers = new Map<string, AbortController>();
@@ -52,21 +69,22 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
       const next = parseSharedObservations(await json("/api/shared/observations", pending.signal), status.serverId, status.context);
       if (JSON.stringify(next) !== JSON.stringify(data) || failed) { data = next; failed = false; changed(); }
     } catch { if (!failed) { failed = true; changed(); } }
-    finally { clearTimeout(timeout); controller = undefined; if (!document.hidden) timer = setTimeout(() => { void refresh(); }, 30_000); }
+    finally { clearTimeout(timeout); controller = undefined; scheduleDriverExpiry(); if (!document.hidden) timer = setTimeout(() => { void refresh(); }, 30_000); }
   }
   if (enabled) {
     const hostsLink = document.querySelector<HTMLAnchorElement>("#sidebar-hosts");
-    if (hostsLink) hostsLink.hidden = false;
+    if (hostsLink) hostsLink.hidden = viewerOnly;
     const secureLink = document.querySelector<HTMLAnchorElement>("#sidebar-secure");
-    if (secureLink) secureLink.hidden = false;
+    if (secureLink) secureLink.hidden = viewerOnly;
     document.querySelector<HTMLElement>(".scenario-controls")?.setAttribute("hidden", "");
-    document.addEventListener("visibilitychange", () => { if (document.hidden) { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); }
-      else { void refresh(); pumpHistory(); } });
-    window.addEventListener("pagehide", () => { if (timer) clearTimeout(timer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); });
+    document.addEventListener("visibilitychange", () => { if (document.hidden) { if (timer) clearTimeout(timer); if (driverExpiryTimer) clearTimeout(driverExpiryTimer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); }
+      else { changed(); scheduleDriverExpiry(); void refresh(); pumpHistory(); } });
+    window.addEventListener("pagehide", () => { if (timer) clearTimeout(timer); if (driverExpiryTimer) clearTimeout(driverExpiryTimer); controller?.abort(); for (const item of historyControllers.values()) item.abort(); });
     queueMicrotask(() => { void refresh(); });
   }
   return {
     enabled,
+    driver,
     requestHistory(address: string): void {
       if (!enabled || historyControllers.has(address) || !data?.associations.some(row => row.address === address) || Date.now() - (gpuHistory.get(address)?.receivedAtMs ?? 0) < 300_000) return;
       historyQueue.add(address); pumpHistory();
@@ -98,7 +116,9 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
       if (key === "rewards" && reward.amount) { cell.style.color = "#0f5c2b"; cell.style.fontWeight = "400"; }
       else cell.style.removeProperty("color");
       if (key === "pc" || key === "ip") {
-        const description = key === "pc" ? `${value}; verified computer association at ${association ? new Date(association.verifiedAtMs).toISOString() : "unknown"}`
+        const version = driver(address, now);
+        const versionDescription = version?.driverVersion ? ` ${version.current ? "PC" : "Retained PC"} NVIDIA driver ${version.driverVersion}; driver-supported CUDA ${version.cudaDriverVersion}, read via NVIDIA-SMI at ${new Date(version.observedAtMs!).toISOString()}. Version information does not establish GPU health.` : "";
+        const description = key === "pc" ? `${value}; verified computer association at ${association ? new Date(association.verifiedAtMs).toISOString() : "unknown"}.${versionDescription}`
           : `${formatIPDisplay({ internal: network.privateIp, global: network.publicIp }, ipMode).description} Public checked ${network.publicObservedAtMs ? new Date(network.publicObservedAtMs).toISOString() : "unknown"}; private checked ${network.privateObservedAtMs ? new Date(network.privateObservedAtMs).toISOString() : "unknown"}.`;
         cell.setAttribute("aria-label", description); cell.title = description;
       }

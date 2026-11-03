@@ -11,8 +11,8 @@ export interface InspectedContainer {
   Mounts: { Type: string; Name?: string; Destination: string; RW: boolean }[];
 }
 export function validateFixture(fixture: Fixture): void {
-  if (!/^fixture-rel-[a-f0-9]{12}-(?:new|up)$/.test(fixture.instance) || fixture.instance.length > 32
-    || !Number.isInteger(fixture.webPort) || fixture.webPort < 1024 || fixture.webPort > 65534 || fixture.httpsPort !== fixture.webPort + 1
+  if (!/^fixture-(?:rel-[a-f0-9]{12}-(?:new|up)|[a-f0-9]{12})$/.test(fixture.instance) || fixture.instance.length > 32
+    || ![fixture.webPort, fixture.httpsPort].every(port => Number.isInteger(port) && port >= 1024 && port <= 65535) || fixture.httpsPort === fixture.webPort
     || [fixture.webPort, fixture.httpsPort].some(port => port === 8789 || port === 8790)) throw new Error("Invalid isolated release fixture identity.");
 }
 export function fixturePrefix(fixture: Fixture): string { validateFixture(fixture); return `gridlens-modern-${fixture.instance}-`; }
@@ -45,9 +45,10 @@ export function fixtureDocker(profile: FixtureProfile, runner: CommandRunner = r
         if (values.trim()) throw new Error("Release fixture identity already has resources; use a fresh fixture generation.");
       }
     },
-    async portsAvailable(fixtures: Fixture[]): Promise<void> {
+    async portsAvailable(fixtures: Fixture[], additionalPorts: readonly number[] = []): Promise<void> {
       const listeners = await ssh(["ss", "-H", "-ltn"]), published = await docker(["ps", "--format", "{{.Ports}}"]);
-      const ports = fixtures.flatMap(fixture => [fixture.webPort, fixture.httpsPort]);
+      const ports = [...fixtures.flatMap(fixture => [fixture.webPort, fixture.httpsPort]), ...additionalPorts];
+      if (ports.some(port => !Number.isInteger(port) || port < 1024 || port > 65535)) throw new Error("Invalid fixture port preflight.");
       for (const line of listeners.split("\n")) {
         const port = Number(line.trim().split(/\s+/)[3]?.match(/:(\d+)$/)?.[1]);
         if (ports.includes(port)) throw new Error("A release fixture port is already in use.");

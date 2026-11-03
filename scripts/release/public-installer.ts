@@ -7,15 +7,19 @@ import { verifyRelease } from "../../src/installer/release.ts";
 import type { ModernRelease } from "../../src/installer/release.ts";
 import { fixtureDocker } from "./fixture-docker.ts";
 import type { Fixture, FixtureDocker } from "./fixture-docker.ts";
-import { fixtureOwner } from "./fixture-http.ts";
+import { fixtureOwner, fixtureOwnerEntry } from "./fixture-http.ts";
 import { assertPreserved, snapshotFixture } from "./fixture-snapshot.ts";
 import { atomicJson, ordinaryFile, readJson } from "./files.ts";
 import { digest, identity, REPOSITORY } from "./model.ts";
 import type { ReleasePlan, Candidate, FixtureProfile } from "./model.ts";
 import type { GitHub } from "./github.ts";
 import { shellWords } from "./commands.ts";
+import { walletReleaseProtocol } from "../../src/installer/financial-security.ts";
+import { assertViewerFixtureAbsent, cleanupViewerFixture, viewerFixtureNames, viewerFixtureRunner } from "./fixture-viewer.ts";
+import type { ViewerFixture } from "./fixture-viewer.ts";
+import { publicViewerAcceptance, removeViewerInvitation } from "./public-viewer.ts";
 
-interface FixtureGeneration { format: "gridlens-public-fixture-v1"; planHash: string; candidateHash: string; generation: string; fixtures: Fixture[] }
+interface FixtureGeneration { format: "gridlens-public-fixture-v1"; planHash: string; candidateHash: string; generation: string; fixtures: Fixture[]; viewer?: ViewerFixture }
 export interface InstallerReceipt {
   format: "gridlens-public-installer-acceptance-v1";
   passed: true;
@@ -35,6 +39,8 @@ export interface InstallerReceipt {
   hostCollectionRequests: 0;
   stages: { stage: string; tag: string; exitCode: 0 }[];
   evidence: { path: string; sha256: string }[];
+  viewerJoinVerified?: true;
+  viewerResumeVerified?: true;
 }
 function addressPrompt(output: string): { clean: string; offset: number } | undefined {
   const clean = stripVTControlCharacters(output).replaceAll("\r", "");
@@ -63,10 +69,11 @@ export function createAddressPromptResponder(address: string): (output: string) 
     return answer;
   };
 }
-export type PublicLauncher = (profile: FixtureProfile, fixture: Fixture, tag: string, action: "setup" | "upgrade", logPath: string) => Promise<void>;
-export const runPublicLauncher: PublicLauncher = (profile, fixture, tag, action, logPath) => new Promise((resolve, reject) => {
+export type PublicLauncher = (profile: FixtureProfile, fixture: Fixture, tag: string, action: "setup" | "upgrade", logPath: string, viewerInvitePath?: string) => Promise<void>;
+export const runPublicLauncher: PublicLauncher = (profile, fixture, tag, action, logPath, viewerInvitePath) => new Promise((resolve, reject) => {
   const url = `https://github.com/${REPOSITORY}/releases/download/${tag}/modern-start.sh`;
-  const args = ["--instance", fixture.instance, ...(action === "upgrade" ? ["--upgrade"] : ["--vpn-web", "--web-port", String(fixture.webPort)])];
+  const args = ["--instance", fixture.instance, ...(viewerInvitePath ? ["--viewer-join", viewerInvitePath, "--web-port", String(fixture.webPort)]
+    : action === "upgrade" ? ["--upgrade"] : ["--vpn-web", "--web-port", String(fixture.webPort)])];
   const command = `set -o pipefail; ${shellWords(["curl", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--fail", "--location", "--max-time", "300", url])} | ${shellWords(["bash", "-s", "--", ...args])}`;
   const env = ["env", ...["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE", "NODE_USE_ENV_PROXY"].flatMap(name => ["-u", name]), "NO_COLOR=1", "bash", "-c", command];
   const child = spawn("ssh", ["-tt", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", profile.sshTarget, shellWords(env)], { stdio: ["pipe", "pipe", "pipe"] });
@@ -98,6 +105,7 @@ function validateReceipt(value: unknown, plan: ReleasePlan, candidate: Candidate
     || receipt.manifestSha256 !== candidate.manifestSha256 || receipt.financialPrepareOrConfirmRequests !== 0 || receipt.claimsRequested !== 0
     || receipt.hostCollectionRequests !== 0 || plan.config.enableWallet && !receipt.configuredOwnerPreserved
     || plan.config.fixture.requireColdDownload && !receipt.coldRuntimeDownload || !Array.isArray(receipt.evidence) || receipt.evidence.length < 8
+    || walletReleaseProtocol(plan.config) === 2 && (receipt.viewerJoinVerified !== true || receipt.viewerResumeVerified !== true)
     || receipt.stages?.map(stage => stage.stage).join("|") !== "fresh|seed|upgrade|retain-setup|retain-upgrade" || receipt.stages.some(stage => stage.exitCode !== 0)) throw new Error("Public installer receipt does not bind the completed candidate workflow.");
   for (const item of receipt.evidence) if (identityFile(item.path) !== item.sha256) throw new Error("Public installer evidence changed after verification.");
   return receipt;
@@ -111,12 +119,16 @@ export async function cleanupPublicFixtures(directory: string, plan: ReleasePlan
   if (!existsSync(path)) return { cleanupVerified: true, removed: [] };
   const generation = readJson(path) as FixtureGeneration;
   if (generation.format !== "gridlens-public-fixture-v1" || generation.planHash !== plan.planHash || generation.fixtures.length !== 2) throw new Error("Fixture cleanup manifest does not belong to this release plan.");
+  if (generation.viewer) {
+    cleanupViewerFixture(viewerFixtureRunner(plan.config.fixture), generation.viewer);
+    if (generation.viewer.invitationDirectory) await removeViewerInvitation(docker, generation.viewer, generation.viewer.invitationDirectory);
+  }
   const result = await docker.cleanup(generation.fixtures);
   atomicJson(join(directory, `cleanup-${generation.generation}.json`), result);
   return result;
 }
 export async function publicInstallerAcceptance(plan: ReleasePlan, candidate: Candidate, directory: string, github: GitHub,
-  dependencies: { docker?: FixtureDocker; launcher?: PublicLauncher; snapshot?: typeof snapshotFixture; owner?: typeof fixtureOwner; beforeMutation?: () => void } = {}): Promise<InstallerReceipt> {
+  dependencies: { docker?: FixtureDocker; launcher?: PublicLauncher; snapshot?: typeof snapshotFixture; owner?: typeof fixtureOwner; ownerEntry?: typeof fixtureOwnerEntry; beforeMutation?: () => void } = {}): Promise<InstallerReceipt> {
   mkdirSync(directory, { recursive: true, mode: 0o700 });
   const docker = dependencies.docker ?? fixtureDocker(plan.config.fixture), launcher = dependencies.launcher ?? runPublicLauncher;
   const snapshot = dependencies.snapshot ?? snapshotFixture, createOwner = dependencies.owner ?? fixtureOwner;
@@ -125,10 +137,13 @@ export async function publicInstallerAcceptance(plan: ReleasePlan, candidate: Ca
   if (existsSync(join(directory, "fixtures.json"))) await cleanupPublicFixtures(directory, plan, docker);
   const generation = randomBytes(6).toString("hex");
   const fixtures = plan.config.fixture.webPorts.map((port, index): Fixture => ({ instance: `fixture-rel-${generation}-${index === 0 ? "new" : "up"}`, webPort: port, httpsPort: port + 1 }));
+  const viewer: ViewerFixture | undefined = walletReleaseProtocol(plan.config) === 2 ? { instance: `fixture-view-${generation}`, port: Math.max(...plan.config.fixture.webPorts) + 2 } : undefined;
+  if (viewer) viewerFixtureNames(viewer);
   const work = join(directory, generation); mkdirSync(work, { mode: 0o700 });
-  await docker.portsAvailable(fixtures);
+  await docker.portsAvailable(fixtures, viewer ? [viewer.port] : []);
   for (const fixture of fixtures) await docker.absent(fixture);
-  const metadata: FixtureGeneration = { format: "gridlens-public-fixture-v1", planHash: plan.planHash, candidateHash: candidate.candidateHash, generation, fixtures };
+  if (viewer) assertViewerFixtureAbsent(viewerFixtureRunner(plan.config.fixture), viewer);
+  const metadata: FixtureGeneration = { format: "gridlens-public-fixture-v1", planHash: plan.planHash, candidateHash: candidate.candidateHash, generation, fixtures, ...(viewer ? { viewer } : {}) };
   atomicJson(join(directory, "fixtures.json"), metadata); // Intent before invoking any public installer.
   const publicKey = ordinaryFile(plan.config.publicKeyPath, 8192).toString("utf8");
   const current = verifyRelease(ordinaryFile(join(candidate.bundleDirectory, "modern-release.json"), 16384), ordinaryFile(join(candidate.bundleDirectory, "modern-release.sig"), 64), publicKey);
@@ -140,7 +155,7 @@ export async function publicInstallerAcceptance(plan: ReleasePlan, candidate: Ca
   const present = await docker.imagePresent([current.imageId, ...(current.configImageId ? [current.configImageId] : [])]);
   if (present && plan.config.fixture.requireColdDownload) throw new Error("Candidate image is already present on the fixture daemon. Cold download was required; no shared image was removed.");
   const stages: InstallerReceipt["stages"] = [], evidencePaths: string[] = [oldManifest, oldSignature];
-  let owner: Awaited<ReturnType<typeof fixtureOwner>> | undefined, failure: unknown;
+  let owner: Awaited<ReturnType<typeof fixtureOwner>> | undefined, failure: unknown, viewerVerified = false;
   async function stage(name: string, fixture: Fixture, release: ModernRelease, action: "setup" | "upgrade") {
     const log = join(work, `${name}.log`), tag = `modern-v${release.version}`;
     dependencies.beforeMutation?.();
@@ -152,6 +167,10 @@ export async function publicInstallerAcceptance(plan: ReleasePlan, candidate: Ca
   try {
     const fresh = await stage("fresh", fixtures[0]!, current, "setup");
     if (fresh.audit.walletOwnerConfigured) throw new Error("Fresh fixture unexpectedly has an owner.");
+    if (walletReleaseProtocol(plan.config) === 2) {
+      const proof = await (dependencies.ownerEntry ?? fixtureOwnerEntry)(plan.config.fixture, fixtures[0]!, docker, ordinaryFile(join(work, "fresh.log"), 16 * 1024 ** 2).toString("utf8"));
+      const path = join(work, "fresh-owner-entry.json"); atomicJson(path, proof); evidencePaths.push(path);
+    }
     await stage("seed", fixtures[1]!, previous, "setup");
     if (plan.config.enableWallet) { dependencies.beforeMutation?.(); owner = await createOwner(plan.config.fixture, fixtures[1]!, docker); }
     const seeded = await snapshot(plan.config.fixture, fixtures[1]!, docker, previous);
@@ -164,9 +183,20 @@ export async function publicInstallerAcceptance(plan: ReleasePlan, candidate: Ca
       if (identity(retained) !== identity(upgraded)) throw new Error("Older public installer changed the newer fixture installation.");
       if (owner) { const path = join(work, `owner-retain-${action}.json`); atomicJson(path, await owner.check(false)); evidencePaths.push(path); }
     }
+    if (viewer) {
+      if (!owner) throw new Error("Protected public viewer acceptance requires the generated fixture owner.");
+      const proof = await publicViewerAcceptance({ profile: plan.config.fixture, viewer, owner: fixtures[1]!, docker, release: current, directory: work,
+        invite: owner.createViewerInvite, launch: (profile, fixture, tag, invitePath, logPath) => launcher(profile,
+          { instance: fixture.instance, webPort: fixture.port, httpsPort: fixture.port }, tag, "setup", logPath, invitePath),
+        ...(dependencies.beforeMutation ? { beforeMutation: dependencies.beforeMutation } : {}),
+        onInvitationDirectory(path) { if (path) viewer.invitationDirectory = path; else delete viewer.invitationDirectory; atomicJson(join(directory, "fixtures.json"), metadata); } });
+      const path = join(work, "public-viewer.json"); atomicJson(path, proof); evidencePaths.push(path, ...proof.logPaths); viewerVerified = true;
+    }
   } catch (error) { failure = error; }
   finally {
     owner?.close();
+    if (viewer) try { cleanupViewerFixture(viewerFixtureRunner(plan.config.fixture), viewer); }
+    catch (error) { atomicJson(join(work, "viewer-cleanup-failure.json"), { message: error instanceof Error ? error.message : "Viewer cleanup failed." }); failure ??= error; }
     try { const path = join(work, "cleanup.json"); atomicJson(path, await docker.cleanup(fixtures)); evidencePaths.push(path); }
     catch (error) { atomicJson(join(work, "cleanup-failure.json"), { message: error instanceof Error ? error.message : "Fixture cleanup failed." }); failure ??= error; }
   }
@@ -174,6 +204,7 @@ export async function publicInstallerAcceptance(plan: ReleasePlan, candidate: Ca
   const report: InstallerReceipt = { format: "gridlens-public-installer-acceptance-v1", passed: true, sourceCommit: plan.config.sourceCommit, planHash: plan.planHash,
     candidateHash: candidate.candidateHash, version: current.version, sequence: current.sequence, manifestSha256: candidate.manifestSha256,
     mode: "actual-public-GitHub", cleanupVerified: true, configuredOwnerPreserved: Boolean(owner), runtimeImageInitiallyPresent: present, coldRuntimeDownload: !present,
-    financialPrepareOrConfirmRequests: 0, claimsRequested: 0, hostCollectionRequests: 0, stages, evidence: evidencePaths.map(path => ({ path, sha256: identityFile(path) })) };
+    financialPrepareOrConfirmRequests: 0, claimsRequested: 0, hostCollectionRequests: 0, stages, evidence: evidencePaths.map(path => ({ path, sha256: identityFile(path) })),
+    ...(viewerVerified ? { viewerJoinVerified: true, viewerResumeVerified: true } : {}) };
   validateReceipt(report, plan, candidate); atomicJson(reportPath, report); return report;
 }

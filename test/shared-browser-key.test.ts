@@ -98,7 +98,7 @@ test("invalid, public-only, mixed, orphaned and oversized key submissions fail b
 
 test("SSH key passphrases are never used as sudo passwords", async () => {
   for (const administrator of [undefined, "generated-administrator-password"] as const) {
-    const calls: { command: string; input?: string }[] = [];
+    const calls: { command: string; input?: string | Uint8Array }[] = [];
     const run: SshRun = async (command, options) => {
       calls.push({ command, ...(options?.input === undefined ? {} : { input: options.input }) });
       if (command === "/bin/hostname") return { code: 0, stdout: "fixture-pc\n" };

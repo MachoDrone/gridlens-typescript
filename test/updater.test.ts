@@ -195,15 +195,15 @@ test("signed development channel pins platform, build, manifest and release arti
   const selected = candidate(), manifest = Buffer.from(JSON.stringify(selected.release));
   const channel = Buffer.from(JSON.stringify({ format: CHANNEL_FORMAT, channel: "development", platform: "linux-x64", ...build(2), releaseTag: selected.releaseTag,
     manifestSha256: hash(manifest), workerProtocol: 1 }));
-  const files = new Map<string, Uint8Array>([["modern-channel-linux-x64.json", channel], ["modern-channel-linux-x64.sig", sign(null, channel, keys.privateKey)],
+  const files = new Map<string, Uint8Array>([["modern-channel-v3-linux-x64.json", channel], ["modern-channel-v3-linux-x64.sig", sign(null, channel, keys.privateKey)],
     ["modern-release.json", manifest], ["modern-release.sig", sign(null, manifest, keys.privateKey)]]);
   const fetcher: typeof fetch = async input => { const url = new URL(String(input)); assert.equal(url.hostname, "github.com"); return new Response(files.get(url.pathname.split("/").at(-1)!) as Uint8Array<ArrayBuffer>); };
   assert.deepEqual(await discoverUpdate({ platform: "linux-x64", publicKey, fetch: fetcher }), selected);
   files.set("modern-release.json", Buffer.from(JSON.stringify(candidate(3).release)));
   await assert.rejects(discoverUpdate({ platform: "linux-x64", publicKey, fetch: fetcher }), /manifest does not match/);
-  files.set("modern-channel-linux-x64.sig", Buffer.alloc(64));
+  files.set("modern-channel-v3-linux-x64.sig", Buffer.alloc(64));
   await assert.rejects(discoverUpdate({ platform: "linux-x64", publicKey, fetch: fetcher }), /signature verification/);
-  assert.match(channelURL("linux-arm64").href, /modern-development\/modern-channel-linux-arm64\.json$/);
+  assert.match(channelURL("linux-arm64").href, /modern-development\/modern-channel-v3-linux-arm64\.json$/);
 });
 
 test("streamed artifact is checksum bounded, atomically retained and reused without another download", async () => {

@@ -9,7 +9,7 @@ import type { PcAssociation } from "../contracts/shared.ts";
 export interface Computer { id: string; host: string; port: number; name: string; fingerprint: string; hostKey: string }
 export interface SshCredential { username: string; password?: string; privateKey?: string; passphrase?: string; sudoPassword?: string }
 export type SshResult = { code: number; stdout: string };
-export type SshRun = (command: string, options?: { input?: string; maximum?: number; timeoutMs?: number }) => Promise<SshResult>;
+export type SshRun = (command: string, options?: { input?: string | Uint8Array; maximum?: number; timeoutMs?: number }) => Promise<SshResult>;
 export class SshAccessError extends Error {
   readonly kind: "credential-rejected" | "identity-changed" | "connection";
   constructor(kind: SshAccessError["kind"]) { super("Approved SSH access failed."); this.kind = kind; }

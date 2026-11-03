@@ -27,6 +27,8 @@ export interface FleetIntegration {
   demonstration?: boolean;
   /** Only the installed shared owner supplies the optional verified PC telemetry API. */
   sharedBackend?: boolean;
+  /** Credential-free local viewer: no owner, Wallet or host-management surface. */
+  viewerOnly?: boolean;
   /** Only a configured installed updater enables the update controls. */
   updates?: { build: UpdateBuild };
 }
@@ -116,6 +118,7 @@ export async function startFleetServer({ integration, directory = defaultDirecto
           `<meta name="gridlens-api-base" content="${basePath}/api/fleet">`,
           '<meta name="gridlens-source-mode" content="snapshot">',
           ...(integration.sharedBackend ? ['<meta name="gridlens-shared-backend" content="1">'] : []),
+          ...(integration.viewerOnly ? ['<meta name="gridlens-viewer-only" content="1">'] : []),
           ...(integration.updates ? ['<meta name="gridlens-updates" content="1">',
             `<meta name="gridlens-build-id" content="${escapeAttribute(integration.updates.build.buildId)}">`] : []),
           `<meta name="gridlens-source-label" content="${escapeAttribute(label)}">`, "</head>",

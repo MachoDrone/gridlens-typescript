@@ -3,18 +3,19 @@ import type { DockerRunner } from "../src/installer/docker.ts";
 import type { SourceInput } from "./release-context.ts";
 import { sourceInputFingerprint } from "./release-context.ts";
 import { publicKeyFingerprint } from "./release-coordinator.ts";
+import type { TreasuryProtocol } from "../src/installer/financial-security.ts";
 
 export interface BakedFile { path: string; bytes: number; sha256: string }
 export interface BakedImageProof {
   version: 1; imageId: string; sourceFingerprint: string;
   build: { version: string; sequence: number; buildId: string };
   node: "24.14.1"; platform: "linux-x64" | "linux-arm64"; publicKeySha256: string;
-  capabilities: { updaterProtocol: 1; browserSecurityProtocol: 1; treasuryProtocol: 0 | 1 };
+  capabilities: { updaterProtocol: 1; browserSecurityProtocol: 1; treasuryProtocol: TreasuryProtocol; financialSecurityProtocol: 1; guardianProtocol: 1 };
   bakedFiles: BakedFile[];
 }
 export interface BakedImageExpectation {
   imageId: string; version: string; sequence: number; platform: "linux-x64" | "linux-arm64";
-  publicKey: string; treasuryProtocol: 0 | 1; inputs: readonly SourceInput[];
+  publicKey: string; treasuryProtocol: TreasuryProtocol; inputs: readonly SourceInput[];
   labels: Readonly<Record<string, string>>;
 }
 export function bakedSourceFiles(inputs: readonly SourceInput[]): BakedFile[] {
@@ -65,14 +66,15 @@ try {
 export function expectedBakedImageProof(expected: BakedImageExpectation): BakedImageProof {
   if (!/^sha256:[a-f0-9]{64}$/.test(expected.imageId) || !Number.isSafeInteger(expected.sequence) || expected.sequence < 1
     || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(expected.version) || !["linux-x64", "linux-arm64"].includes(expected.platform)
-    || ![0, 1].includes(expected.treasuryProtocol) || expected.labels["io.gridlens.product"] !== "shared-backend"
+    || ![0, 1, 2].includes(expected.treasuryProtocol) || expected.labels["io.gridlens.product"] !== "shared-backend"
     || expected.labels["io.gridlens.version"] !== expected.version || expected.labels["io.gridlens.updater-protocol"] !== "1"
-    || expected.labels["io.gridlens.browser-security-protocol"] !== "1" || expected.labels["io.gridlens.treasury-protocol"] !== String(expected.treasuryProtocol))
+    || expected.labels["io.gridlens.browser-security-protocol"] !== "1" || expected.labels["io.gridlens.treasury-protocol"] !== String(expected.treasuryProtocol)
+    || expected.labels["io.gridlens.financial-security-protocol"] !== "1" || expected.labels["io.gridlens.guardian-protocol"] !== "1")
     throw new Error("Baked image metadata differs from the requested release.");
   return { version: 1, imageId: expected.imageId, sourceFingerprint: sourceInputFingerprint(expected.inputs),
     build: { version: expected.version, sequence: expected.sequence, buildId: `${expected.sequence}:${expected.version}` },
     node: "24.14.1", platform: expected.platform, publicKeySha256: publicKeyFingerprint(expected.publicKey),
-    capabilities: { updaterProtocol: 1, browserSecurityProtocol: 1, treasuryProtocol: expected.treasuryProtocol }, bakedFiles: bakedSourceFiles(expected.inputs) };
+    capabilities: { updaterProtocol: 1, browserSecurityProtocol: 1, treasuryProtocol: expected.treasuryProtocol, financialSecurityProtocol: 1, guardianProtocol: 1 }, bakedFiles: bakedSourceFiles(expected.inputs) };
 }
 export function probeBakedImage(runner: DockerRunner, expected: BakedImageExpectation): BakedImageProof {
   const proof = expectedBakedImageProof(expected);

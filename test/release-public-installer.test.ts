@@ -12,6 +12,7 @@ import type { FixtureDocker } from "../scripts/release/fixture-docker.ts";
 import type { Snapshot } from "../scripts/release/fixture-snapshot.ts";
 import type { GitHub } from "../scripts/release/github.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
+import { ownerEntryFromTranscript } from "../scripts/release/fixture-http.ts";
 
 function setup(t: { after(callback: () => void): void }) {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-public-installer-test-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
@@ -19,7 +20,7 @@ function setup(t: { after(callback: () => void): void }) {
   const keys = generateKeyPairSync("ed25519"), publicPath = join(directory, "public.pem"); writeFileSync(publicPath, keys.publicKey.export({ type: "spki", format: "pem" }));
   const config: ReleaseConfig = { sourceDirectory: join(directory, "source"), sourceCommit: "a".repeat(40), version: "0.1.0-dev.22", sequence: 22,
     platform: "linux-x64", repository: REPOSITORY, publicKeyPath: publicPath, signingKeyPath: join(directory, "never-read.pem"), notesPath: join(directory, "notes"),
-    previousTag: "modern-v0.1.0-dev.21", enableWallet: true, verification: { base: "b".repeat(40), full: true }, build: { cold: true },
+    previousTag: "modern-v0.1.0-dev.21", enableWallet: true, treasuryProtocol: 1, verification: { base: "b".repeat(40), full: true }, build: { cold: true },
     fixture: { sshTarget: "generated@192.168.22.2", address: "192.168.22.2", webPorts: [23101, 23103], requireColdDownload: false } };
   const definition = { format: "gridlens-release-plan-v1" as const, config, sourceTree: "c".repeat(40), sourceFingerprint: "d".repeat(64), notesSha256: "e".repeat(64), publicKeySha256: PUBLIC_KEY_SHA256, toolchain: { node: "24.14.1", npm: "11.11.0" }, docker: { endpointFingerprint: "f".repeat(64), daemonId: "generated-daemon-identity" } };
   const plan: ReleasePlan = { ...definition, planHash: identity(definition) };
@@ -56,7 +57,8 @@ function setup(t: { after(callback: () => void): void }) {
   };
   const owner: NonNullable<Parameters<typeof publicInstallerAcceptance>[4]>["owner"] = async (_profile, fixture) => {
     steps.push("configure-owner"); configured.add(fixture.instance);
-    return { async check(restarted) { steps.push(`owner-check:${restarted}`); return { sameGeneratedPasswordUnlocks: true }; }, close() { closes++; } };
+    return { async createViewerInvite() { throw new Error("Generated compatibility fixture does not request a viewer invitation."); },
+      async check(restarted) { steps.push(`owner-check:${restarted}`); return { sameGeneratedPasswordUnlocks: true }; }, close() { closes++; } };
   };
   return { directory, plan, candidate, github, dependencies: { docker, launcher, snapshot, owner }, steps, flags, closes: () => closes };
 }
@@ -93,4 +95,11 @@ test("interrupted fixture generation is cleaned before a fresh generation can be
   const receipt = await publicInstallerAcceptance(f.plan, f.candidate, directory, f.github, f.dependencies);
   const fresh = JSON.parse(readFileSync(join(directory, "fixtures.json"), "utf8")) as { generation: string };
   assert.equal(f.steps[0], "cleanup"); assert.notEqual(fresh.generation, old.generation); assert.equal(receipt.cleanupVerified, true);
+});
+test("owner entry parsing binds one terminal-issued code to the exact saved HTTPS endpoint", () => {
+  const origin = "https://192.168.55.5:23102", line = `Owner setup: ${origin}/connect#code=GENERATED123\n`;
+  assert.equal(ownerEntryFromTranscript(line, origin), "GENERATED123");
+  assert.throws(() => ownerEntryFromTranscript(line + line, origin), /unambiguous/);
+  assert.throws(() => ownerEntryFromTranscript(line.replace("192.168.55.5", "192.168.55.6"), origin), /differs/);
+  assert.throws(() => ownerEntryFromTranscript(line.replace("/connect", "/wallet"), origin), /differs/);
 });

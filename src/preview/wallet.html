@@ -34,6 +34,12 @@
     <details><summary>Forgot your password?</summary><p>Use Wallet recovery from the installer on the GridLens installation PC. Recovery locks existing sessions and keeps transaction history.</p></details>
   </section>
   <div id="wallet-unlocked" hidden>
+    <section id="owner-protection" hidden aria-labelledby="owner-protection-heading"><h2 id="owner-protection-heading">Owner protection</h2>
+      <p id="guardian-state">Source protection has not been configured.</p>
+      <p class="muted small">Staff can monitor this fleet. Another installation's password cannot authorize enrolled sources. The owner must control the source PCs and keep their administrator credentials private.</p>
+      <div class="actions"><button id="guardian-enroll" type="button">Protect sources</button><button id="guardian-refresh" type="button">Refresh protection</button><button id="owner-admin" type="button">Manage hosts</button><button id="viewer-invite" type="button">Share monitoring</button></div>
+      <div id="guardian-review" hidden><p>Protect the currently approved source PCs under this owner and preserve all previous transfer and claim attempts. This installs source protection; it does not move funds. Staff must not have root, unrestricted Docker access, or source administrator credentials.</p><p><button id="guardian-confirm" type="button">Confirm source protection</button><button id="guardian-cancel" type="button">Cancel</button></p></div>
+    </section>
     <section aria-labelledby="receiving-heading"><h2 id="receiving-heading">Receiving wallet for transfers</h2><p id="receiving-address" class="address"></p><p class="muted small">NOS transfers use this address. Rewards claims are paid to the selected host's own wallet.</p><p class="muted small">Wallet locks when you leave, reload, or stop using it for five minutes.</p>
       <details id="wallet-settings"><summary>Change wallet or password</summary><form id="wallet-configuration-form">
         <label for="change-destination">Receiving wallet address</label><input id="change-destination" maxlength="44" required autocomplete="off" autocapitalize="none" spellcheck="false">

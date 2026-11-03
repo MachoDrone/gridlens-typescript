@@ -11,10 +11,15 @@ export interface TreasuryStatus {
   version: 1; supported: boolean; state: "setup-required" | "locked" | "unlocked" | "recovery-required";
   pilotConsumed: boolean; serverId: string; scopeId: string; revision: number;
 }
+export interface TreasuryGuardianStatus {
+  required: true; authorityId: string | null;
+  state: "not-enrolled" | "ready" | "recovery-required" | "sync-required" | "enrolling";
+}
 export interface TreasuryConfiguration {
   version: 1; revision: number; destinationAddress: string; hosts: { address: string; label: string }[];
   amountBaseUnits: typeof TREASURY_AMOUNT; reserveLamports: typeof TREASURY_RESERVE;
   maxCostLamports: typeof TREASURY_MAX_COST; pilotConsumed: boolean;
+  guardian?: TreasuryGuardianStatus;
 }
 export interface TreasuryPublicQuote {
   sourceAddress: string; destinationAddress: string; sourceTokenAddress: string; destinationTokenAddress: string; mintAddress: string;
@@ -72,9 +77,18 @@ export function parseTreasuryConfiguration(value: unknown): TreasuryConfiguratio
     || typeof value.pilotConsumed !== "boolean" || !Array.isArray(value.hosts) || value.hosts.length > 10_000
     || value.hosts.some(row => !object(row) || !isMetadataAddress(row.address) || !text(row.label, 256))
     || new Set(value.hosts.map(row => (row as { address: string }).address)).size !== value.hosts.length) throw new Error("Invalid Wallet configuration.");
+  let guardian: TreasuryGuardianStatus | undefined;
+  if (value.guardian !== undefined) {
+    if (!object(value.guardian) || Object.keys(value.guardian).sort().join(",") !== "authorityId,required,state" || value.guardian.required !== true
+      || !["not-enrolled", "ready", "recovery-required", "sync-required", "enrolling"].includes(String(value.guardian.state))
+      || value.guardian.authorityId !== null && (typeof value.guardian.authorityId !== "string" || !/^[a-f0-9]{64}$/.test(value.guardian.authorityId))
+      || value.guardian.state === "ready" && value.guardian.authorityId === null) throw new Error("Invalid source guardian status.");
+    guardian = { required: true, authorityId: value.guardian.authorityId as string | null, state: value.guardian.state as TreasuryGuardianStatus["state"] };
+  }
   return { version: 1, revision: value.revision, destinationAddress: value.destinationAddress,
     hosts: value.hosts.map(row => ({ address: (row as { address: string }).address, label: (row as { label: string }).label })),
-    amountBaseUnits: TREASURY_AMOUNT, reserveLamports: TREASURY_RESERVE, maxCostLamports: TREASURY_MAX_COST, pilotConsumed: value.pilotConsumed };
+    amountBaseUnits: TREASURY_AMOUNT, reserveLamports: TREASURY_RESERVE, maxCostLamports: TREASURY_MAX_COST, pilotConsumed: value.pilotConsumed,
+    ...(guardian ? { guardian } : {}) };
 }
 export function parseTreasuryQuote(value: unknown): TreasuryPublicQuote {
   if (!object(value) || ![value.sourceAddress, value.destinationAddress, value.sourceTokenAddress, value.destinationTokenAddress, value.mintAddress].every(isMetadataAddress)

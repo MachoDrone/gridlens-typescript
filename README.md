@@ -122,6 +122,16 @@ Online GPU Hosts uses already cached records. History shares the existing job
 request limits, so a large expansion may remain pending. A five-minute cache
 avoids repeated page reads; Refresh remains subject to shared limits and backoff.
 
+Protected-runtime candidates add [owner-bound finance and staff viewers](docs/OWNER_BOUND_FINANCE.md).
+Wallet enrollment pins the owner's authority on each source PC; another
+installation's password grants no access to enrolled sources. Staff viewers get
+read-only fleet data and no source credentials. Source administrators remain trusted.
+
+For approved PCs, CUDA/NVIDIA can use dated `nvidia-smi --version` readings when
+Nosana reports an unavailable value. One PC read serves its associated hosts;
+the display retains source/time and stale styling. CUDA means driver-supported
+CUDA, and a successful version read does not establish GPU health.
+
 **Current status:** the live local preview, portable hosting gateway and shared
 backend are implemented. The shared backend passed isolated Docker acceptance;
 installer endpoint repair was separately verified on an existing installation

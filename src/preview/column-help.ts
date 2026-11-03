@@ -25,7 +25,7 @@ export const COLUMN_HELP = {
   market: "The reported Nosana market for this host, shown as a full label or its first two characters.",
   gpuID: "Physical GPU index on the PC, requiring local hardware mapping that is not connected yet.",
   currentNode: "Reported Nosana package version; pink marks a prerelease, and no comparison with the latest release is available.",
-  cuda: "CUDA driver version reported by the host.",
+  cuda: "CUDA version supported by the reported driver; not the installed toolkit or proof of GPU health.",
   nvidia: "Reported NVIDIA driver version, shown as its major version or full version.",
   cpu: "Reported processor model, shown as a short label or full description.",
   system: "Reported system release, shown in short or full form; a kernel release does not identify the full OS distribution.",

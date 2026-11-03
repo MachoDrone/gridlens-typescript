@@ -12,7 +12,7 @@ separate from the preview behavior documented below. See the
 commands. Earlier published releases remain immutable; physical reboot, GPU
 recorder lifecycle and physical-phone acceptance have separate evidence.
 
-The explicitly selected `--vpn-web` address uses the existing private LAN/VPN
+Legacy runtimes' explicitly selected `--vpn-web` address uses the existing private LAN/VPN
 without browser codes or sign-in expiry. A dedicated server-side grant follows
 the configured fleet's current roster, survives restart, and remains revocable.
 Rerunning setup cannot revive revoked access. Anyone who can reach this private
@@ -81,6 +81,21 @@ explicit isolated Docker test target and generates a unique fixture identity,
 empty fleet, disposable signing identity and fixture-only release transport.
 It removes only its own labeled resources. Normal users update through the
 browser; these commands are development verification, not the operator workflow.
+
+Protected runtimes replace anonymous/private-network administration with viewer
+access. Trusted terminal owner links and authorized owner-browser sessions
+provide administration; staff invitations provide only Fleet reads. HTTPS
+handoff never elevates a viewer. Source guardians independently enforce owner
+identity, signed policy, spent history and replay protection. See
+[owner-bound finance](OWNER_BOUND_FINANCE.md) for enrollment, recovery and the
+required source/hub administrator trust boundary. Installing GridLens does not
+revoke existing source-host privileges.
+
+For missing CUDA/NVIDIA fields, the approved PC monitor reads the fixed,
+unprivileged NVIDIA-SMI version command at most once per PC every five minutes.
+Readings retain SSH identity, approval epoch and observation time; one PC record
+serves its associated host rows. Valid Nosana metadata remains preferred.
+Driver-supported CUDA is not an installed toolkit or a GPU-health result.
 
 ## Toolchain and commands
 

@@ -7,7 +7,7 @@ import { TreasuryPreflightError, treasuryPreflightFailure } from "./treasury-err
 import { isMetadataAddress } from "../fleet/host-metadata.ts";
 import { NOS_MINT } from "../fleet/nos.ts";
 import { TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_RESERVE, parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryQuote } from "../contracts/treasury.ts";
-import type { TreasuryConfiguration, TreasuryOperation, TreasuryPlan, TreasuryPublicQuote, TreasuryStatus, TreasuryUnlock } from "../contracts/treasury.ts";
+import type { TreasuryConfiguration, TreasuryGuardianStatus, TreasuryOperation, TreasuryPlan, TreasuryPublicQuote, TreasuryStatus, TreasuryUnlock } from "../contracts/treasury.ts";
 
 /** Internal driver contracts never go to the browser. The source helper signs
  * this exact bounded message but must NEVER submit it. */
@@ -23,7 +23,7 @@ export interface TreasuryDriver {
    * production driver supplies this; injected isolated fixtures may omit it. */
   assertReady?(quote: TreasuryQuote): void;
   prepare(context: FleetContext, sourceAddress: string, destinationAddress: string): Promise<TreasuryQuote>;
-  sign(quote: TreasuryQuote, authorize?: () => void): Promise<TreasurySigned>;
+  sign(quote: TreasuryQuote, authorize?: () => void, operationId?: string): Promise<TreasurySigned>;
   submit(signed: TreasurySigned, authorize?: () => void): Promise<void>;
   reconcile(signed: TreasurySigned): Promise<TreasuryReceipt>;
 }
@@ -75,7 +75,7 @@ const derive = (password: string, salt: string): Promise<Buffer> => new Promise(
   scrypt(password, Buffer.from(salt, "hex"), 64, { N: 2 ** 17, r: 8, p: 1, maxmem: 256 * 1024 * 1024 },
     (error, result) => error ? reject(error) : resolve(result));
 });
-function parseQuote(value: unknown): TreasuryQuote {
+export function parseQuote(value: unknown): TreasuryQuote {
   if (!object(value)) throw new Error("Invalid Wallet quote.");
   const publicQuote = parseTreasuryQuote(value), binding = value.sourceBinding;
   if (publicQuote.mintAddress !== NOS_MINT || !validId(value.scopeId) || !validId(value.rosterRevision)
@@ -112,6 +112,9 @@ function parseLedger(value: unknown, serverId: string, keyId: string): Ledger {
 export function createTreasury(state: PrivateState, options: {
   access: TreasuryAccess; vault: TreasuryVault; driver: TreasuryDriver; security: () => TreasurySecurity;
   now?: () => number; hosts?: (context: FleetContext) => { address: string; label: string }[];
+  protectedMode?: boolean;
+  guardianStatus?: (context: FleetContext, destinationAddress: string) => TreasuryGuardianStatus;
+  onConfigure?: (change: { context: FleetContext; destinationAddress: string }, authorize: () => void) => Promise<void>;
 }) {
   const { access, vault, driver, security } = options, now = options.now ?? Date.now;
   const sessions = new Map<string, Unlock>(), plans = new Map<string, Prepared>(), pending = new Set<Promise<void>>();
@@ -178,7 +181,7 @@ export function createTreasury(state: PrivateState, options: {
     return { value, hash: digest(JSON.stringify([access.serverId, value.httpsOrigin, value.serverCertificateSha256])) };
   }
   function device(token: unknown): DeviceAccess {
-    try { return access.requireAccess(token, "operator"); } catch { return fail(401); }
+    try { return access.requireAccess(token, options.protectedMode ? "viewer" : "operator"); } catch { return fail(401); }
   }
   function sameScope(principal: DeviceAccess): void {
     const saved = available(); if (saved.scopeId !== null && saved.scopeId !== principal.context.scopeId) fail(403);
@@ -214,8 +217,15 @@ export function createTreasury(state: PrivateState, options: {
   function configuration(principal: DeviceAccess): TreasuryConfiguration {
     const saved = available(), rows = options.hosts?.(principal.context) ?? principal.context.addresses.map(address => ({ address, label: address }));
     if (rows.some(row => !principal.context.addresses.includes(row.address))) fail(503);
-    return parseTreasuryConfiguration({ version: 1, revision: saved.revision, destinationAddress: destination(), hosts: rows,
-      amountBaseUnits: TREASURY_AMOUNT, reserveLamports: TREASURY_RESERVE, maxCostLamports: TREASURY_MAX_COST, pilotConsumed: saved.consumed });
+    const recipient = destination();
+    return parseTreasuryConfiguration({ version: 1, revision: saved.revision, destinationAddress: recipient, hosts: rows,
+      amountBaseUnits: TREASURY_AMOUNT, reserveLamports: TREASURY_RESERVE, maxCostLamports: TREASURY_MAX_COST, pilotConsumed: saved.consumed,
+      ...(options.protectedMode ? { guardian: options.guardianStatus?.(principal.context, recipient) ?? { required: true, authorityId: null, state: "not-enrolled" } } : {}) });
+  }
+  function requireFinancialReady(context: FleetContext): void {
+    if (!options.protectedMode) return;
+    const status = options.guardianStatus?.(context, destination());
+    if (!status || status.required !== true || status.state !== "ready" || !hash(status.authorityId)) throw new TreasuryPreflightError("source-changed");
   }
   function issueUnlock(principal: DeviceAccess): TreasuryUnlock {
     const saved = available(), token = randomBytes(32).toString("base64url"), tokenHash = digest(token), expiresAtMs = now() + WINDOW;
@@ -275,6 +285,7 @@ export function createTreasury(state: PrivateState, options: {
   async function execute(id: string, body: Record<string, unknown>, expected: Prepared): Promise<void> {
     const authorize = (phase: TreasuryOperation["phase"]): void => {
       requireUnlock(body);
+      requireFinancialReady(access.fleet(expected.quote.scopeId));
       const current = operation();
       if (closed || binding().hash !== expected.binding || available().revision !== expected.revision || now() >= expected.quote.expiresAtMs
         || current?.public.id !== id || current.public.phase !== phase) fail(409);
@@ -284,7 +295,7 @@ export function createTreasury(state: PrivateState, options: {
       let signed: TreasurySigned;
       try {
         authorize("authorized");
-        signed = parseSigned(await driver.sign(structuredClone(original.quote), () => authorize("authorized")), original.quote);
+        signed = parseSigned(await driver.sign(structuredClone(original.quote), () => authorize("authorized"), id), original.quote);
       } catch {
         try { authorize("authorized"); }
         catch { transition(id, "cancelled", "Wallet authority changed before signing completed. No transaction will be submitted."); return; }
@@ -361,11 +372,18 @@ export function createTreasury(state: PrivateState, options: {
       const owner = body.newPassword === undefined ? saved.owner : await passwordHash(body.newPassword);
       requireUnlock(body);
       if (available().revision !== revision || binding().hash !== securityBinding.hash) fail(409);
-      const recipient = body.destinationAddress ?? destination();
+      const previousDestination = destination(), recipient = body.destinationAddress ?? previousDestination;
+      if (recipient !== previousDestination && options.onConfigure) {
+        await options.onConfigure({ context: structuredClone(principal.context), destinationAddress: recipient as string }, () => {
+          requireUnlock(body); if (available().revision !== revision || binding().hash !== securityBinding.hash) fail(409);
+        });
+        requireUnlock(body); if (available().revision !== revision || binding().hash !== securityBinding.hash) fail(409);
+      }
       persist({ ...available(), revision: revision + 1, owner, ticket: null, configuration: vault.seal({ destinationAddress: recipient }, purpose("configuration")) });
       clearAuthority(); return { version: 1, locked: true };
     }
     if (name === "prepare") {
+      try { requireFinancialReady(principal.context); } catch (error) { return treasuryPreflightFailure(error); }
       if (available().consumed || preparing) fail(409);
       if (!isMetadataAddress(body.sourceAddress) || !principal.context.addresses.includes(body.sourceAddress)) fail(400);
       const recipient = destination(), revision = available().revision;
@@ -401,6 +419,7 @@ export function createTreasury(state: PrivateState, options: {
           && existing.scopeId === principal.context.scopeId) return { version: 1, operation: existing.public };
         fail(409);
       }
+      try { requireFinancialReady(principal.context); } catch (error) { return treasuryPreflightFailure(error); }
       const prepared = plans.get(body.planId);
       if (available().consumed || !prepared || prepared.public.reviewDigest !== body.reviewDigest || prepared.revision !== available().revision
         || prepared.deviceId !== principal.deviceId || prepared.unlockHash !== authorization.unlock.hash || prepared.binding !== securityBinding.hash
@@ -460,7 +479,13 @@ export function createTreasury(state: PrivateState, options: {
       await reconcileOne(current.public.id);
     } finally { reconciling = false; }
   }
-  return { dispatch, control, reconcilePending, authorizeOperation,
+  return { dispatch, control, reconcilePending, authorizeOperation, requireFinancialReady,
+    matchesConfiguration(context: FleetContext, revision: number, destinationAddress: string): boolean {
+      try { const saved = available(), current = access.fleet(context.scopeId);
+        return !!saved.owner && saved.scopeId === context.scopeId && saved.revision === revision && destination() === destinationAddress
+          && current.rosterRevision === context.rosterRevision && JSON.stringify(current.addresses) === JSON.stringify(context.addresses);
+      } catch { return false; }
+    },
     async waitForIdle() { await Promise.allSettled([...pending]); },
     async close() { closed = true; clearAuthority(); await Promise.allSettled([...pending]); },
   };

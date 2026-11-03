@@ -25,6 +25,7 @@ export interface ReleaseConfig {
   notesPath: string;
   previousTag: string;
   enableWallet: boolean;
+  treasuryProtocol?: 1 | 2;
   verification: { base: string; full: boolean };
   build: { cold: boolean; coordinatorComponent?: string };
   fixture: FixtureProfile;
@@ -105,10 +106,10 @@ function path(value: unknown): string {
 }
 export function parseConfig(input: unknown): ReleaseConfig {
   const value = object(input);
-  exact(value, ["sourceDirectory", "sourceCommit", "version", "sequence", "platform", "repository", "publicKeyPath", "signingKeyPath", "notesPath", "previousTag", "enableWallet", "verification", "build", "fixture"]);
+  exact(value, ["sourceDirectory", "sourceCommit", "version", "sequence", "platform", "repository", "publicKeyPath", "signingKeyPath", "notesPath", "previousTag", "enableWallet", "verification", "build", "fixture", ...(Object.hasOwn(value, "treasuryProtocol") ? ["treasuryProtocol"] : [])]);
   if (!commit(value.sourceCommit) || typeof value.version !== "string" || !/^\d+\.\d+\.\d+-dev\.\d+$/.test(value.version)
     || !Number.isSafeInteger(value.sequence) || Number(value.sequence) < 1 || !["linux-x64", "linux-arm64"].includes(String(value.platform))
-    || value.repository !== REPOSITORY || typeof value.enableWallet !== "boolean" || typeof value.previousTag !== "string"
+    || value.repository !== REPOSITORY || typeof value.enableWallet !== "boolean" || value.treasuryProtocol !== undefined && (value.enableWallet !== true || ![1, 2].includes(Number(value.treasuryProtocol)) || typeof value.treasuryProtocol !== "number") || typeof value.previousTag !== "string"
     || !/^modern-v\d+\.\d+\.\d+-dev\.\d+$/.test(value.previousTag) || value.previousTag === `modern-v${value.version}`) throw new Error("Invalid development release configuration.");
   const verification = object(value.verification), build = object(value.build), fixture = object(value.fixture);
   exact(verification, ["base", "full"]);
@@ -123,7 +124,7 @@ export function parseConfig(input: unknown): ReleaseConfig {
     || Math.abs(Number(fixture.webPorts[0]) - Number(fixture.webPorts[1])) < 2) throw new Error("Invalid verification or isolated fixture profile.");
   return { sourceDirectory: path(value.sourceDirectory), sourceCommit: value.sourceCommit, version: value.version, sequence: Number(value.sequence),
     platform: value.platform as ReleaseConfig["platform"], repository: REPOSITORY, publicKeyPath: path(value.publicKeyPath), signingKeyPath: path(value.signingKeyPath),
-    notesPath: path(value.notesPath), previousTag: value.previousTag, enableWallet: value.enableWallet,
+    notesPath: path(value.notesPath), previousTag: value.previousTag, enableWallet: value.enableWallet, ...(value.treasuryProtocol === undefined ? {} : { treasuryProtocol: value.treasuryProtocol as 1 | 2 }),
     verification: { base: verification.base, full: verification.full }, build: { cold: build.cold, ...(build.coordinatorComponent === undefined ? {} : { coordinatorComponent: path(build.coordinatorComponent) }) },
     fixture: { sshTarget: fixture.sshTarget, address: fixture.address, webPorts: [Number(fixture.webPorts[0]), Number(fixture.webPorts[1])], requireColdDownload: fixture.requireColdDownload } };
 }

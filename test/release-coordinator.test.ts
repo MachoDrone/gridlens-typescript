@@ -11,7 +11,7 @@ import { sha256 } from "../scripts/release-runtime.ts";
 function fixture() {
   const keys = generateKeyPairSync("ed25519"), publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
   const binary = Buffer.from("Generated inert component; never executed.");
-  const descriptor = parseCoordinatorComponent({ format: "gridlens-coordinator-component-v1", coordinatorVersion: 2, node: "24.14.1", platform: "linux-x64",
+  const descriptor = parseCoordinatorComponent({ format: "gridlens-coordinator-component-v1", coordinatorVersion: 3, node: "24.14.1", platform: "linux-x64",
     releaseTag: "modern-v0.1.0-component-fixture", name: "gridlens-coordinator-linux-x64", bytes: binary.length, sha256: sha256(binary),
     signature: "gridlens-coordinator-linux-x64.sig", inputFingerprint: "b".repeat(64), publicKeySha256: publicKeyFingerprint(publicKey) });
   const bytes = Buffer.from(JSON.stringify(descriptor));
@@ -28,7 +28,7 @@ test("signed component binds immutable location, executable, complete input fing
     assert.throws(() => loadCoordinatorComponent(directory, f.publicKey, { ...expected, platform: "linux-arm64" }), /platform/);
     assert.throws(() => verifyCoordinatorComponent(f.bytes, f.signature, fixture().publicKey));
     assert.throws(() => verifyCoordinatorComponent(Buffer.alloc(16385), f.signature, f.publicKey));
-    for (const patch of [{ releaseTag: "../wrong" }, { bytes: 256 * 1024 ** 2 + 1 }, { coordinatorVersion: 3 }, { node: "24.0.0" }, { extra: true }]) {
+    for (const patch of [{ releaseTag: "../wrong" }, { bytes: 256 * 1024 ** 2 + 1 }, { coordinatorVersion: 4 }, { node: "24.0.0" }, { extra: true }]) {
       const changed = Buffer.from(JSON.stringify({ ...f.descriptor, ...patch }));
       assert.throws(() => verifyCoordinatorComponent(changed, sign(null, changed, f.keys.privateKey), f.publicKey));
     }

@@ -19,15 +19,16 @@ For example, replace every illustrative path/commit/address before use:
 {
   "sourceDirectory": "/path/to/clean/gridlens-checkout",
   "sourceCommit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-  "version": "0.1.0-dev.22",
-  "sequence": 22,
+  "version": "0.1.0-dev.24",
+  "sequence": 24,
   "platform": "linux-x64",
   "repository": "MachoDrone/gridlens-typescript",
   "publicKeyPath": "/protected/modern-release-public.pem",
   "signingKeyPath": "/protected/modern-release-signing.pem",
   "notesPath": "/private/release-notes.txt",
-  "previousTag": "modern-v0.1.0-dev.21",
+  "previousTag": "modern-v0.1.0-dev.23",
   "enableWallet": true,
+  "treasuryProtocol": 2,
   "verification": {
     "base": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "full": false
@@ -46,6 +47,21 @@ The fixture address must belong to the explicitly approved fixture host. It must
 not select a live/default instance or its ports. Each web port reserves its next
 port for HTTPS. Docker destination identity is bound to the plan; changing the
 Docker endpoint/context does not redirect a saved run's cleanup or recovery.
+
+Owner-bound rollout first publishes coordinator3 in a compatibility runtime
+(`treasuryProtocol:1`, minimum coordinator2). Only afterward publish the protected
+runtime (`treasuryProtocol:2`, minimum coordinator3). The retained financial floor
+prevents unsafe rollback. Changing this build capability requires image-bound
+guardian/updater/installer acceptance even when the source commit is unchanged;
+unchanged source-check evidence can still be reused.
+
+The existing `modern-development` release retains the legacy channel filenames
+for the compatibility bridge. Coordinator3 reads the separate
+`modern-channel-v3-PLATFORM.json/.sig` pair; it falls back only when both new files
+are absent. Protected publication preserves the legacy pair and verifies the
+bridge's immutable prerequisites throughout promotion. Declared predecessor
+identity and signed source proof remain mandatory even when a sequence is
+skipped after an immutable but unpromoted failed release.
 
 ```sh
 npm run release -- plan --config /private/release-config.json --output /private/release-plan.json

@@ -14,6 +14,7 @@ import type { ReleaseBuildResult } from "../scripts/build-modern-release.ts";
 import { digest, identity, REPOSITORY } from "../scripts/release/model.ts";
 import type { ReleasePlan } from "../scripts/release/model.ts";
 import { verifyBuild, verifyCurrentBuild } from "../scripts/release/artifacts.ts";
+import { channelAssets, channelFamilyForCoordinator } from "../src/updater/channel-paths.ts";
 
 function tar(entries: [string, Buffer][]): Buffer {
   const chunks: Buffer[] = [];
@@ -25,7 +26,7 @@ function tar(entries: [string, Buffer][]): Buffer {
   }
   return Buffer.concat([...chunks, Buffer.alloc(1024)]);
 }
-function fixture(t: { after(callback: () => void): void }) {
+function fixture(t: { after(callback: () => void): void }, treasuryProtocol: 1 | 2 = 1) {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-artifact-proof-test-")); t.after(() => rmSync(directory, { recursive: true, force: true }));
   const source = join(directory, "source"), bundle = join(directory, "bundle"); mkdirSync(source); mkdirSync(bundle);
   const template = "runtime=@RELEASE_TAG@\ncomponent=@COORDINATOR_RELEASE_TAG@\nbinary=@COORDINATOR_NAME@\nhash=@COORDINATOR_SHA256@\n";
@@ -36,7 +37,7 @@ function fixture(t: { after(callback: () => void): void }) {
   const publicKey = canonicalPublicKey(keys.publicKey.export({ type: "spki", format: "pem" }).toString()), publicPath = join(directory, "public.pem");
   writeFileSync(publicPath, publicKey);
   const version = "0.1.0-dev.22", sequence = 22, platform = "linux-x64" as const, tag = `modern-v${version}`, imageTag = `gridlens-modern-build:${version}-${sequence}`;
-  const labels = { "io.gridlens.product": "shared-backend", "io.gridlens.version": version, "io.gridlens.updater-protocol": "1", "io.gridlens.browser-security-protocol": "1", "io.gridlens.treasury-protocol": "1" };
+  const labels = { "io.gridlens.product": "shared-backend", "io.gridlens.version": version, "io.gridlens.updater-protocol": "1", "io.gridlens.browser-security-protocol": "1", "io.gridlens.treasury-protocol": String(treasuryProtocol), "io.gridlens.financial-security-protocol": "1", "io.gridlens.guardian-protocol": "1" };
   const json = (value: unknown): Buffer => Buffer.from(JSON.stringify(value));
   const layer = Buffer.from("generated inert layer bytes"), config = json({ architecture: "amd64", os: "linux", config: { Labels: labels }, rootfs: { type: "layers", diff_ids: [`sha256:${digest(layer)}`] } });
   const manifest = json({ schemaVersion: 2, config: { digest: `sha256:${digest(config)}`, size: config.length, mediaType: "application/vnd.oci.image.config.v1+json" },
@@ -46,23 +47,24 @@ function fixture(t: { after(callback: () => void): void }) {
     ["manifest.json", json([{ Config: blob(config), RepoTags: [imageTag], Layers: [blob(layer)] }])], [blob(config), config], [blob(manifest), manifest], [blob(layer), layer]]);
   const archive = compressRuntimeArchive(raw, { imageId: `sha256:${digest(config)}`, version, platform, imageTag });
   const runtime = { name: `gridlens-runtime-${platform}-${version}.tar`, bytes: archive.bytes.length, sha256: digest(archive.bytes) };
-  const release = { format: "gridlens-modern-release-v1" as const, version, sequence, platform, minimumCoordinator: 2, imageId: archive.imageId, configImageId: archive.configImageId, runtime };
-  const binary = Buffer.from("generated inert coordinator fixture"), component: CoordinatorComponent = { format: "gridlens-coordinator-component-v1", coordinatorVersion: 2, node: "24.14.1", platform,
+  const release = { format: "gridlens-modern-release-v1" as const, version, sequence, platform, minimumCoordinator: treasuryProtocol === 1 ? 2 : 3, imageId: archive.imageId, configImageId: archive.configImageId, runtime };
+  const channelNames = channelAssets(platform, channelFamilyForCoordinator(release.minimumCoordinator));
+  const binary = Buffer.from("generated inert coordinator fixture"), component: CoordinatorComponent = { format: "gridlens-coordinator-component-v1", coordinatorVersion: 3, node: "24.14.1", platform,
     releaseTag: tag, name: `gridlens-coordinator-${platform}`, bytes: binary.length, sha256: digest(binary), signature: `gridlens-coordinator-${platform}.sig`, inputFingerprint: "9".repeat(64), publicKeySha256: publicKeyFingerprint(publicKey) };
   const put = (name: string, bytes: Buffer | string): void => { writeFileSync(join(bundle, name), bytes); };
   const signed = (name: string, value: unknown): Buffer => { const bytes = json(value); put(`${name}.json`, bytes); put(`${name}.sig`, sign(null, bytes, keys.privateKey)); return bytes; };
   put(runtime.name, archive.bytes); const releaseBytes = signed("modern-release", release);
-  signed(`modern-channel-${platform}`, { format: "gridlens-modern-channel-v1", channel: "development", platform, version, sequence, buildId: `${sequence}:${version}`, releaseTag: tag, manifestSha256: digest(releaseBytes), workerProtocol: 1 });
+  signed(channelNames.manifest.slice(0, -5), { format: "gridlens-modern-channel-v1", channel: "development", platform, version, sequence, buildId: `${sequence}:${version}`, releaseTag: tag, manifestSha256: digest(releaseBytes), workerProtocol: 1 });
   signed("coordinator-component", component); put(component.name, binary); put(component.signature, sign(null, binary, keys.privateKey));
-  put("coordinator-manifest.json", json({ format: "gridlens-modern-coordinator-v1", coordinatorVersion: 2, node: component.node, platform, releaseTag: tag, name: component.name, bytes: component.bytes, sha256: component.sha256, signature: component.signature, signingPublicKey: publicKey }));
+  put("coordinator-manifest.json", json({ format: "gridlens-modern-coordinator-v1", coordinatorVersion: 3, node: component.node, platform, releaseTag: tag, name: component.name, bytes: component.bytes, sha256: component.sha256, signature: component.signature, signingPublicKey: publicKey }));
   put("modern-start.sh", renderCoordinatorLauncher(template, tag, component)); copyFileSync(join(source, "LICENSE"), join(bundle, "LICENSE")); copyFileSync(join(dirname(dirname(process.execPath)), "LICENSE"), join(bundle, "NODE-LICENSE"));
-  const inventory = [runtime.name, "modern-release.json", "modern-release.sig", `modern-channel-${platform}.json`, `modern-channel-${platform}.sig`, "coordinator-component.json", "coordinator-component.sig", component.name, component.signature, "coordinator-manifest.json", "modern-start.sh", "LICENSE", "NODE-LICENSE"];
+  const inventory = [runtime.name, "modern-release.json", "modern-release.sig", channelNames.manifest, channelNames.signature, "coordinator-component.json", "coordinator-component.sig", component.name, component.signature, "coordinator-manifest.json", "modern-start.sh", "LICENSE", "NODE-LICENSE"];
   const result: ReleaseBuildResult = { bundleDirectory: bundle, release, sourceFingerprint: fingerprint, runtime: { ...runtime, compression: "gzip", expandedBytes: archive.expandedBytes, expandedSha256: archive.expandedSha256 },
     coordinator: { mode: "new", descriptor: component, descriptorSignatureName: "coordinator-component.sig", componentDirectory: bundle },
-    bakedProof: expectedBakedImageProof({ imageId: archive.configImageId, version, sequence, platform, publicKey, treasuryProtocol: 1, inputs, labels }),
+    bakedProof: expectedBakedImageProof({ imageId: archive.configImageId, version, sequence, platform, publicKey, treasuryProtocol, inputs, labels }),
     assets: inventory.map(name => { const path = join(bundle, name), bytes = readFileSync(path); return { name, path, bytes: bytes.length, sha256: digest(bytes) }; }) };
   const definition: Omit<ReleasePlan, "planHash"> = { format: "gridlens-release-plan-v1", config: { sourceDirectory: source, sourceCommit: "a".repeat(40), version, sequence, platform, repository: REPOSITORY,
-    publicKeyPath: publicPath, signingKeyPath: join(directory, "never-read.pem"), notesPath: join(directory, "notes"), previousTag: "modern-v0.1.0-dev.21", enableWallet: true,
+    publicKeyPath: publicPath, signingKeyPath: join(directory, "never-read.pem"), notesPath: join(directory, "notes"), previousTag: "modern-v0.1.0-dev.21", enableWallet: true, treasuryProtocol,
     verification: { base: "b".repeat(40), full: true }, build: { cold: true }, fixture: { sshTarget: "generated@192.168.22.2", address: "192.168.22.2", webPorts: [23101, 23103] as [number, number], requireColdDownload: false } },
     sourceTree: "c".repeat(40), sourceFingerprint: fingerprint, notesSha256: "d".repeat(64), publicKeySha256: component.publicKeySha256, toolchain: { node: "24.14.1", npm: "11.11.0" }, docker: { endpointFingerprint: "e".repeat(64), daemonId: "generated-daemon-id" } };
   const plan: ReleasePlan = { ...definition, planHash: identity(definition) };
@@ -97,4 +99,13 @@ test("baked proof accepts either independently inspected signed image identity, 
   const f = fixture(t); verifyBuild(f.result, f.plan, f.resultPath);
   f.result.bakedProof.imageId = f.result.release.imageId;
   assert.doesNotThrow(() => verifyBuild(f.result, f.plan, f.resultPath));
+});
+test("protected artifact inventory uses only the v3 channel pair without adding assets or exposing it under legacy filenames", t => {
+  const f = fixture(t, 2), candidate = verifyBuild(f.result, f.plan, f.resultPath);
+  assert.equal(candidate.assets.length, 13);
+  assert.ok(candidate.assets.some(asset => asset.name === "modern-channel-v3-linux-x64.json"));
+  assert.ok(!candidate.assets.some(asset => asset.name === "modern-channel-linux-x64.json"));
+  const wrong = structuredClone(f.result), index = wrong.assets.findIndex(asset => asset.name === "modern-channel-v3-linux-x64.json");
+  wrong.assets[index]!.name = "modern-channel-linux-x64.json";
+  assert.throws(() => verifyBuild(wrong, f.plan, f.resultPath));
 });

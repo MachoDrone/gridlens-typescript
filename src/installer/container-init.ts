@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { validateInstallation, originFor } from "./config.ts";
 import type { InstallationConfig } from "./config.ts";
 import { InstallerError } from "./release.ts";
+import { validFinancialFloor } from "./financial-security.ts";
 
 function atomic(path: string, value: string, mode = 0o600): void {
   const temporary = `${path}.pending-${randomBytes(6).toString("hex")}`;
@@ -90,6 +91,10 @@ export function publicBrowserCertificates(configDirectory = "/config", tlsDirect
   return { certificatePem: trust.join("\n") + "\n", serverCertificatePem: server[0]! + "\n" };
 }
 export function containerOperation(operation: string, body: unknown): unknown {
+  if (operation === "guardian-cache-initialize") {
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) throw new InstallerError("Guardian cache initialization accepts no options.");
+    ownedDirectory("/guardian-cache"); return { initialized: true };
+  }
   if (operation === "treasury-initialize") {
     if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length) throw new InstallerError("Wallet initialization accepts no options.");
     ownedDirectory("/treasury");
@@ -114,7 +119,8 @@ export function containerOperation(operation: string, body: unknown): unknown {
   if(operation==="copy-state") {if(readdirSync("/destination").length)throw new InstallerError("Recovery destination is not empty.");copyDirectory("/source","/destination");return {copied:true};}
   if(operation!=="initialize"||!body||typeof body!=="object")throw new InstallerError("Unsupported installer operation.");
   if(existsSync("/config/installation.json"))return validateInstallation(JSON.parse(readFileSync("/config/installation.json","utf8")));
-  const input=body as {instance:string;bindAddress:string;port:number;origin:string;active:InstallationConfig["active"];certificate?:{certificate:string;privateKey:string}};
+  const input=body as {instance:string;bindAddress:string;port:number;origin:string;active:InstallationConfig["active"];financialSecurity?:InstallationConfig["financialSecurity"];certificate?:{certificate:string;privateKey:string}};
+  if (input.financialSecurity !== undefined && !validFinancialFloor(input.financialSecurity)) throw new InstallerError("Invalid financial security floor.");
   if(input.origin!==originFor(input.bindAddress,input.port))throw new InstallerError("Invalid certificate address.");
   const staged="/config/tls-staging";mkdirSync(staged,{recursive:true,mode:0o700});
   const keyPath=join(staged,"server.key"),certPath=join(staged,"server.crt");
@@ -139,7 +145,7 @@ export function containerOperation(operation: string, body: unknown): unknown {
   chownSync("/tls/server.key",1000,1000);chownSync("/tls/server.crt",1000,1000);
   for(const dir of ["/state","/ledger","/ipc","/control","/credentials","/tls"])ownedDirectory(dir);
   chmodSync("/config",0o700);
-  const config=validateInstallation({schema:1,instance:input.instance,bindAddress:input.bindAddress,port:input.port,origin:input.origin,
+  const config=validateInstallation({schema:input.financialSecurity ? 2 : 1,...(input.financialSecurity ? {financialSecurity:input.financialSecurity} : {}),instance:input.instance,bindAddress:input.bindAddress,port:input.port,origin:input.origin,
     certificateSha256:createHash("sha256").update(verified.raw).digest("hex"),phase:"prepared",active:input.active});
   atomic("/config/installation.json",JSON.stringify(config));
   return config;

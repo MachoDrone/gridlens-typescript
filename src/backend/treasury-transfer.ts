@@ -15,6 +15,7 @@ import { cleanNodeRuntime, verifyNode } from "./pc-rewards.ts";
 import { shellQuote, withSsh } from "./ssh.ts";
 import type { SshCredential, SshRun } from "./ssh.ts";
 import type { TreasuryDriver, TreasuryQuote, TreasurySigned } from "./treasury.ts";
+import type { FinancialGuardianTransport } from "./guardian-transport.ts";
 import { TreasuryPreflightError } from "./treasury-errors.ts";
 import { canonicalBase64, transferAccounts, transferTransaction, validatedTransferMessage, validateSignedTransfer,
   TREASURY_AMOUNT, TREASURY_MAX_COST, TREASURY_NOS_MINT, TREASURY_RESERVE } from "./treasury-transaction.ts";
@@ -27,6 +28,9 @@ export interface TreasuryTransferOptions {
   contexts: () => readonly FleetContext[]; now?: () => number; connect?: typeof withSsh;
   /** Trusted build output or isolated test fixture; never supplied by a browser request. */
   signerSource?: string;
+  /** Legacy is explicit and used only by the compatibility release. */
+  securityMode?: "owner-bound" | "legacy";
+  guardian?: FinancialGuardianTransport;
 }
 interface Source { context: FleetContext; association: PcAssociation; permission: PcPermission; credential: SshCredential; binding: TreasuryQuote["sourceBinding"] }
 interface ChainSnapshot { slot:number; blockTimeMs:number; sourceNos:bigint; destinationNos:bigint; sourceSol:bigint; createDestinationAta:boolean }
@@ -73,6 +77,9 @@ function messageInput(quote: TreasuryQuote) {
 export function createTreasuryTransferDriver(options: TreasuryTransferOptions): TreasuryDriver {
   const { rpc: transport, state, vault, observations, contexts, connect = withSsh, now = Date.now } = options;
   const session = transport.createSession("treasury-one-nos");
+  const protectedMode = options.securityMode !== "legacy";
+  const target = (source: Source) => ({ computer: source.permission.computer, credential: source.credential });
+  const guardian = (): FinancialGuardianTransport => { if (!options.guardian) throw new TreasuryPreflightError("preflight-unavailable"); return options.guardian; };
   // Reviews and preflight attestations are process-local. Restart recovery can
   // inspect a journaled signature, but cannot sign or broadcast it again.
   const preparedReviews = new Map<string, PreparedReview>();
@@ -209,10 +216,11 @@ export function createTreasuryTransferDriver(options: TreasuryTransferOptions): 
     return {rent,slot:slotNumber(simulation.context.slot),checkedAtMs:now()};
   }
   return {
-    assertReady(quote) { quoteCurrent(quote);sameSource(quote);preparedReview(quote);remainingCapacity(quote,3); },
+    assertReady(quote) { quoteCurrent(quote);const current=sameSource(quote);if(protectedMode)guardian().assertReady(target(current),quote);preparedReview(quote);remainingCapacity(quote,3); },
     async prepare(context, sourceAddress, destinationAddress) {
       preparedReviews.clear();
       const approved = source(context.scopeId, context.rosterRevision, sourceAddress), accounts = await transferAccounts(sourceAddress,destinationAddress);
+      if (protectedMode) await guardian().prepare(target(approved), sourceAddress, destinationAddress);
       return usingRpc(async (_provider, read) => {
         const before = await snapshot(read,{sourceAddress,destinationAddress,...accounts});
         const latest = await read("getLatestBlockhash",[{commitment:"confirmed",minContextSlot:before.slot}]);
@@ -241,7 +249,8 @@ export function createTreasuryTransferDriver(options: TreasuryTransferOptions): 
         preparedReviews.set(reviewKey(quote),{slot:simulation.slot,expiresAtMs:quote.expiresAtMs,signing:false});return quote;
       });
     },
-    async sign(quote, authorize = () => {}) {
+    async sign(quote, authorize = () => {}, operationId) {
+      if (protectedMode && (!operationId || !options.guardian)) throw new TreasuryPreflightError("preflight-unavailable");
       authorize();quoteCurrent(quote);remainingCapacity(quote,3);
       const review=preparedReview(quote),key=reviewKey(quote);
       review.signing=true;
@@ -259,20 +268,24 @@ export function createTreasuryTransferDriver(options: TreasuryTransferOptions): 
         });
         const guard=():void=>{authorize();quoteCurrent(quote);sameSource(quote);freshPreflight(preflight.checkedAtMs);remainingCapacity(quote,1,preflight.checkedAtMs+PREFLIGHT_MAX_AGE_MS);};
         guard();
-        const helper=options.signerSource??readFileSync(new URL("../../dist/backend/treasury-signer.cjs",import.meta.url),"utf8");
-        if(helper.length<1||Buffer.byteLength(helper)>120_000) throw new TreasuryPreflightError("preflight-unavailable");
-        const output=await connect(approved.permission.computer,approved.credential,async run=>{
-          const guarded:SshRun=(command,settings)=>{
-            guard();
-            return run(approved.credential.sudoPassword===undefined?command:`/usr/bin/sudo -S -p '' -- ${command}`,
-              {...settings,...(approved.credential.sudoPassword===undefined?{}:{input:approved.credential.sudoPassword+"\n"})});
-          };
-          if(await verifyNode(guarded,approved.association)!=="ok")throw new TreasuryPreflightError("source-changed");
-          const prelude='ulimit -S -c 0 && ulimit -H -c 0 && printf 0 > /proc/self/coredump_filter && exec /usr/local/bin/node -e "$1" -- --gridlens-one-nos-transfer "$2"';
-          return guarded(`${cleanNodeRuntime(approved.association)} exec${CLEAN} ${approved.association.binding.nodeContainerId} /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C /bin/sh -c ${shellQuote(prelude)} gridlens-one-nos-transfer ${shellQuote(helper)} ${shellQuote(JSON.stringify(messageInput(quote)))}`,{maximum:4096,timeoutMs:10_000});
-        });
-        if(output.code!==0)throw new TreasuryPreflightError("preflight-unavailable");
-        let response:unknown;try{response=JSON.parse(output.stdout);}catch{throw new TreasuryPreflightError("preflight-unavailable");}
+        let response: unknown;
+        if (protectedMode) response = await guardian().transfer(target(approved), quote, operationId!, guard);
+        else {
+          const helper=options.signerSource??readFileSync(new URL("../../dist/backend/treasury-signer.cjs",import.meta.url),"utf8");
+          if(helper.length<1||Buffer.byteLength(helper)>120_000) throw new TreasuryPreflightError("preflight-unavailable");
+          const output=await connect(approved.permission.computer,approved.credential,async run=>{
+            const guarded:SshRun=(command,settings)=>{
+              guard();
+              return run(approved.credential.sudoPassword===undefined?command:`/usr/bin/sudo -S -p '' -- ${command}`,
+                {...settings,...(approved.credential.sudoPassword===undefined?{}:{input:approved.credential.sudoPassword+"\n"})});
+            };
+            if(await verifyNode(guarded,approved.association)!=="ok")throw new TreasuryPreflightError("source-changed");
+            const prelude='ulimit -S -c 0 && ulimit -H -c 0 && printf 0 > /proc/self/coredump_filter && exec /usr/local/bin/node -e "$1" -- --gridlens-one-nos-transfer "$2"';
+            return guarded(`${cleanNodeRuntime(approved.association)} exec${CLEAN} ${approved.association.binding.nodeContainerId} /usr/bin/env -i PATH=/usr/local/bin:/usr/bin:/bin LANG=C /bin/sh -c ${shellQuote(prelude)} gridlens-one-nos-transfer ${shellQuote(helper)} ${shellQuote(JSON.stringify(messageInput(quote)))}`,{maximum:4096,timeoutMs:10_000});
+          });
+          if(output.code!==0)throw new TreasuryPreflightError("preflight-unavailable");
+          try{response=JSON.parse(output.stdout);}catch{throw new TreasuryPreflightError("preflight-unavailable");}
+        }
         if(!rpcObject(response)||Object.keys(response).sort().join(",")!=="signature,transactionBase64"||typeof response.transactionBase64!=="string"||typeof response.signature!=="string")
           throw new TreasuryPreflightError("preflight-unavailable");
         await validateSignedTransfer(quote,response.transactionBase64,response.signature);guard();

@@ -22,6 +22,7 @@ import type { PcAssociation } from "../src/contracts/shared.ts";
 import type { FleetContext } from "../src/contracts/fleet.ts";
 import type { withSsh } from "../src/backend/ssh.ts";
 import { TreasuryPreflightError } from "../src/backend/treasury-errors.ts";
+import type { FinancialGuardianTransport } from "../src/backend/guardian-transport.ts";
 
 const nowBase=1_800_000_000_000, blockHash="11111111111111111111111111111112", require=createRequire(import.meta.url);
 const key=generateKeyPairSync("ed25519"), other=generateKeyPairSync("ed25519");
@@ -30,7 +31,7 @@ const sourceAddress=publicAddress(key),destinationAddress=publicAddress(other),p
 const context:FleetContext={scopeId:"synthetic",rosterRevision:"one",addresses:[sourceAddress]};
 const association:PcAssociation={address:sourceAddress,binding:{pcId,runtime:"docker",wrapperId:null,nodeContainerId:containerId},
   name:"Synthetic",sshFingerprint:"SHA256:"+"A".repeat(43),verifiedAtMs:nowBase,privateIp:"10.0.0.2",gpuUuids:[]};
-function fixture(overrides:{destinationAbsent?:boolean;fee?:number;rent?:number;sol?:number;frozen?:boolean;genesis?:string;simulationBad?:boolean;phaseDeadlineMs?:number;blockTimeMs?:number}={}) {
+function fixture(overrides:{destinationAbsent?:boolean;fee?:number;rent?:number;sol?:number;frozen?:boolean;genesis?:string;simulationBad?:boolean;phaseDeadlineMs?:number;blockTimeMs?:number;ownerBound?:boolean;guardian?:FinancialGuardianTransport}={}) {
   let time=nowBase,selectedQuote:TreasuryQuote|undefined,submitted:TreasurySigned|undefined;
   let transactionResult:unknown=null, revoked=false,wrongIdentity=false;
   let onRpc:((method:string)=>Promise<void>)|undefined;
@@ -80,7 +81,8 @@ function fixture(overrides:{destinationAbsent?:boolean;fee?:number;rent?:number;
     if(command.includes("--gridlens-one-nos-transfer")){assert(selectedQuote);return{code:0,stdout:JSON.stringify(await signPilotTransfer(selectedQuote,work=>work(key.privateKey)))};}
     return{code:0,stdout:wrongIdentity?destinationAddress:sourceAddress};
   });
-  const driver=createTreasuryTransferDriver({rpc,state,vault,observations,contexts:()=>[context],now:()=>time,connect,signerSource:"/* generated isolated fixture helper */"});
+  const driver=createTreasuryTransferDriver({rpc,state,vault,observations,contexts:()=>[context],now:()=>time,connect,signerSource:"/* generated isolated fixture helper */",
+    securityMode:overrides.ownerBound?"owner-bound":"legacy",...(overrides.guardian?{guardian:overrides.guardian}:{})});
   return{driver,calls,commands,dispatches,token,select:(quote:TreasuryQuote)=>{selectedQuote=quote;},submit:(signed:TreasurySigned)=>{submitted=signed;},receipt:(value:unknown)=>{transactionResult=value;},
     advance:(ms:number)=>{time+=ms;},revoke:()=>{revoked=true;},wrongIdentity:()=>{wrongIdentity=true;},hook:(value:(method:string)=>Promise<void>)=>{onRpc=value;},
     telemetry:async(count:number)=>{const provider=rpc.createSession("telemetry-fixture").eligible()!;for(let i=0;i<count;i++)await rpc.rpc(provider,"getBlockTime",[1000],new AbortController().signal,time+28_000);},
@@ -93,6 +95,23 @@ function fixture(overrides:{destinationAbsent?:boolean;fee?:number;rent?:number;
     warm:async()=>{const provider=rpc.createSession("telemetry-fixture").eligible()!;await rpc.verifyMainnet(provider,new AbortController().signal,time+28_000);}};
 }
 const reason=(code:string)=>(error:unknown)=>error instanceof TreasuryPreflightError&&error.code===code;
+test("owner-bound transfers have no direct SSH fallback when authority or source enrollment is missing",async()=>{
+  const f=fixture({ownerBound:true});
+  await assert.rejects(f.driver.prepare(context,sourceAddress,destinationAddress),reason("preflight-unavailable"));
+  assert.deepEqual(f.calls,[]);assert.deepEqual(f.commands,[]);
+});
+test("owner-bound transfer preserves preflight and submission checks while routing signing only through the guardian",async()=>{
+  const operationId="aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";let calls=0;
+  const guardian:FinancialGuardianTransport={
+    async status(){throw Error("not used");},async prepare(target,source,destination){assert.equal(target.computer.id,pcId);assert.equal(source,sourceAddress);assert.equal(destination,destinationAddress);},
+    assertReady(){},async transfer(_target,quote,id,authorize){assert.equal(id,operationId);authorize();calls++;return signPilotTransfer(quote,work=>work(key.privateKey));},
+    async claim(){throw Error("not used");},async setPolicy(){throw Error("not used");},
+  };
+  const f=fixture({ownerBound:true,guardian}),quote=await f.driver.prepare(context,sourceAddress,destinationAddress);
+  await assert.rejects(f.driver.sign(quote),reason("preflight-unavailable"));assert.equal(calls,0);
+  const signed=await f.driver.sign(quote,()=>{},operationId);f.submit(signed);await f.driver.submit(signed);
+  assert.equal(calls,1);assert.deepEqual(f.commands,[]);assert.equal(f.calls.filter(method=>method==="sendTransaction").length,1);
+});
 function receipt(signed:TreasurySigned,create=false) {
   const keys=getCompiledTransactionMessageDecoder().decode(Buffer.from(signed.quote.messageBase64,"base64")).staticAccounts;
   const balance=(account:string,owner:string,amount:string)=>({accountIndex:keys.indexOf(account as never),owner,mint:TREASURY_NOS_MINT,programId:TOKEN_PROGRAM_ADDRESS,uiTokenAmount:{amount,decimals:6,uiAmount:null}});

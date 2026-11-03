@@ -35,7 +35,7 @@ interface Reply { code: number; text: string; headers: IncomingHttpHeaders }
 
 /** Actual CA-validated loopback TLS and Unix sockets, with a transaction driver
  * that only returns synthetic values and never contacts a provider or wallet. */
-async function fixture(t: TestContext, claimsEnabled = false, markerBroken = false) {
+async function fixture(t: TestContext, claimsEnabled = false, markerBroken = false, protectedMode = false) {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-wallet-gateway-"));
   const run = (args: string[]) => execFileSync("openssl", args, { cwd: directory, stdio: "ignore" });
   run(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.crt", "-days", "3",
@@ -89,7 +89,7 @@ async function fixture(t: TestContext, claimsEnabled = false, markerBroken = fal
         payoutOwner: quote.sourceAddress, payoutTokenAddress: quote.sourceTokenAddress, mintAddress: NOS_MINT };
     },
   };
-  const service = createSharedService(state, { treasury: { vault, driver: () => driver, ...(claimsEnabled ? { claims: {
+  const service = createSharedService(state, { protectedMode, treasury: { vault, driver: () => driver, ...(claimsEnabled ? { claims: {
     driver: () => claimDriver, initialize(serverId: string) {
       if (markerBroken) throw new Error("Synthetic missing initialization witness");
       return initializeClaimsMarker(directory, serverId, vault.keyId, false);
@@ -149,6 +149,53 @@ async function fixture(t: TestContext, claimsEnabled = false, markerBroken = fal
     loseClaimResponse() { uncertainClaim = true; },
     failPreparation(error: unknown) { prepareFailure = error; }, failAdmission(error: unknown) { admissionFailure = error; } };
 }
+
+test("protected viewer browsers need owner proof for administration and still need a separate Wallet unlock", async t => {
+  const f = await fixture(t, false, false, true);
+  assert.equal(JSON.parse((await f.call(true, "/api/shared/status", undefined, f.browser)).text).role, "viewer");
+  assert.equal((await f.call(true, "/api/shared/setup", undefined, f.browser)).code, 401);
+  assert.equal((await f.treasury("owner-browser", { version: 1 })).code, 401);
+  const unlock = await f.setup();
+  assert.equal(unlock.configuration.guardian?.state, "not-enrolled");
+  assert.equal((await f.treasury("prepare", { version: 1, sourceAddress: SOURCE }, unlock.unlockToken)).code, 409);
+  assert.equal(f.calls.prepare, 0); assert.equal(f.calls.sign, 0);
+  const elevated = await f.treasury("owner-browser", { version: 1 }, unlock.unlockToken);
+  assert.equal(elevated.code, 200, elevated.text); assert.equal(JSON.parse(elevated.text).ownerToken, undefined);
+  const header = elevated.headers["set-cookie"]?.[0]; assert(header); assert.match(header, /Secure; HttpOnly; SameSite=Strict; Max-Age=300/);
+  const ownerCookie = header.split(";", 1)[0]!, owner = { Cookie: f.browser.Cookie + "; " + ownerCookie };
+  assert.equal(JSON.parse((await f.call(true, "/api/shared/status", undefined, owner)).text).role, "operator");
+  assert.equal((await f.call(true, "/api/shared/setup", undefined, owner)).code, 200);
+  assert.equal((await f.call(true, "/api/shared/treasury/configuration", undefined, owner)).code, 401);
+  assert.equal(JSON.parse((await f.call(false, "/api/shared/status")).text).role, "viewer");
+  const code = JSON.parse((await f.call(false, "/secure-setup/connect-code", {})).text).code;
+  const next = await f.call(true, "/secure-setup/connect", { version: 1, code });
+  const otherCookie = next.headers["set-cookie"]![0]!.split(";", 1)[0]!;
+  assert.equal(JSON.parse((await f.call(true, "/api/shared/status", undefined, { Cookie: otherCookie + "; " + ownerCookie })).text).role, "viewer");
+  f.service.access.revokeGateway("default");
+  assert.equal((await f.call(true, "/api/shared/status", undefined, owner)).code, 401);
+});
+
+test("owner-issued secondary-install invitation grants only bounded fleet reads and never source control", async t => {
+  const f = await fixture(t, false, false, true), unlock = await f.setup();
+  assert.equal((await f.treasury("viewer-invite", { version: 1 })).code, 401);
+  const invitation = await f.treasury("viewer-invite", { version: 1 }, unlock.unlockToken); assert.equal(invitation.code, 200);
+  const invite = JSON.parse(invitation.text); assert.equal(invite.kind, "gridlens-viewer-invite"); assert.doesNotMatch(invitation.text, /PRIVATE KEY|generated test credential/);
+  const paired = await f.call(true, "/api/shared/pair", { version: 1, code: invite.code, deviceName: "Generated second installation" });
+  assert.equal(paired.code, 200); const viewer = JSON.parse(paired.text); assert.equal(viewer.role, "viewer");
+  const bearer = { Authorization: `Bearer ${viewer.token}` };
+  const read = await f.call(true, "/api/shared/viewer/read", { operation: "status" }, bearer); assert.equal(read.code, 200);
+  const envelope = JSON.parse(read.text); assert.equal(envelope.role, "viewer"); assert.equal(envelope.serverId, invite.serverId); assert.equal(envelope.result.role, "viewer");
+  assert.equal(read.text.includes(viewer.token), false);
+  for (const operation of ["treasury-setup", "setup-configure", "owner-browser", "control", "updates-start", "pair-code"])
+    assert.equal((await f.call(true, "/api/shared/viewer/read", { operation }, bearer)).code, 400);
+  assert.equal((await f.call(true, "/api/shared/viewer/read", { operation: "status", token: f.operator.token }, bearer)).code, 400);
+  assert.equal((await f.call(true, "/api/shared/viewer/read", { operation: "status" }, { Authorization: `Bearer ${f.operator.token}` })).code, 403);
+  assert.equal((await f.call(true, "/api/shared/treasury/unlock", { version: 1, password: "second installation's different password" }, bearer)).code, 401);
+  f.service.access.setFleet("default", [SOURCE, address("9")]);
+  const following = await f.call(true, "/api/shared/viewer/read", { operation: "resolve" }, bearer);
+  assert.equal(following.code, 200); assert.equal(JSON.parse(following.text).result.addresses.length, 2);
+  assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
+});
 
 test("typed review failures cross real TLS and dedicated IPC without consuming the pilot or reaching a signer", async t => {
   const f = await fixture(t), unlock = await f.setup();

@@ -4,10 +4,11 @@ import { updaterAcceptanceOptions, updaterAcceptanceSource, verifyUpdaterTreasur
 import type { DockerRunner } from "../src/installer/docker.ts";
 
 const args = ["--instance", "fixture-123456789abc", "--address", "10.71.0.8", "--https-port", "19790", "--web-port", "19789", "--base-image", "gridlens-source:current"];
-const image = (security = true, treasury?: "0" | "1") => ({ Id: `sha256:${"a".repeat(64)}`, Config: { Labels: {
+const image = (security = true, treasury?: "0" | "1" | "2") => ({ Id: `sha256:${"a".repeat(64)}`, Config: { Labels: {
   "io.gridlens.product": "shared-backend", "io.gridlens.version": "0.1.0-dev.13", "io.gridlens.updater-protocol": "1",
   ...(security ? { "io.gridlens.browser-security-protocol": "1" } : {}),
   ...(treasury === undefined ? {} : { "io.gridlens.treasury-protocol": treasury }),
+  ...(treasury === "2" ? { "io.gridlens.financial-security-protocol": "1", "io.gridlens.guardian-protocol": "1" } : {}),
 } } });
 function runner(value: unknown): DockerRunner {
   return { run(command) { assert.deepEqual(command, ["image", "inspect", "gridlens-source:fixture"]);
@@ -33,8 +34,8 @@ test("cold updater acceptance explicitly selects gzip without changing the legac
 
 test("source inspection pins immutable identity and distinguishes old guide migration from already supported HTTPS", () => {
   const current = image(), previous = image(false);
-  assert.deepEqual(updaterAcceptanceSource(runner([current]), "gridlens-source:fixture"), { imageId: current.Id, version: "0.1.0-dev.13", browserSecurity: true, treasury: false, minimumCoordinator: 1 });
-  assert.deepEqual(updaterAcceptanceSource(runner([previous]), "gridlens-source:fixture", true), { imageId: previous.Id, version: "0.1.0-dev.13", browserSecurity: false, treasury: false, minimumCoordinator: 1 });
+  assert.deepEqual(updaterAcceptanceSource(runner([current]), "gridlens-source:fixture"), { imageId: current.Id, version: "0.1.0-dev.13", browserSecurity: true, treasury: false, treasuryProtocol: 0, financialSecurity: false, minimumCoordinator: 1 });
+  assert.deepEqual(updaterAcceptanceSource(runner([previous]), "gridlens-source:fixture", true), { imageId: previous.Id, version: "0.1.0-dev.13", browserSecurity: false, treasury: false, treasuryProtocol: 0, financialSecurity: false, minimumCoordinator: 1 });
   assert.equal(updaterAcceptanceSource(runner([current]), "gridlens-source:fixture", true).browserSecurity, true);
   assert.throws(() => updaterAcceptanceSource(runner([previous]), "gridlens-source:fixture"), /guided browser setup support/);
   for (const invalid of [[], [current, current], null, [{ ...current, Id: "mutable-tag" }],
@@ -49,6 +50,8 @@ test("staged Wallet acceptance derives the coordinator requirement from the immu
     assert.equal(compatible.treasury, false); assert.equal(compatible.minimumCoordinator, 1);
     const wallet = updaterAcceptanceSource(runner([image(true, "1")]), "gridlens-source:fixture", previous);
     assert.equal(wallet.treasury, true); assert.equal(wallet.minimumCoordinator, 2);
+    const protectedImage = updaterAcceptanceSource(runner([image(true, "2")]), "gridlens-source:fixture", previous);
+    assert.equal(protectedImage.treasuryProtocol, 2); assert.equal(protectedImage.financialSecurity, true); assert.equal(protectedImage.minimumCoordinator, 3);
   }
   assert.throws(() => updaterAcceptanceSource(runner([image(false, "1")]), "gridlens-source:fixture", true));
   for (const field of ["io.gridlens.browser-security-protocol", "io.gridlens.treasury-protocol"]) {

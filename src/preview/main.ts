@@ -1,6 +1,7 @@
 import "./sidebar.ts";
 const walletLink = document.querySelector<HTMLAnchorElement>("#sidebar-wallet");
-if (walletLink && document.querySelector('meta[name="gridlens-shared-backend"]')?.getAttribute("content") === "1") walletLink.hidden = false;
+const viewerOnly = document.querySelector('meta[name="gridlens-viewer-only"]')?.getAttribute("content") === "1";
+if (walletLink && !viewerOnly && document.querySelector('meta[name="gridlens-shared-backend"]')?.getAttribute("content") === "1") walletLink.hidden = false;
 import { createSharedTelemetry } from "./shared-telemetry.ts";
 import { bindFleetViewport } from "./viewport.ts";
 import { bindFleetTableScroll } from "./table-scroll.ts";
@@ -30,6 +31,7 @@ import type { HardwareColumn, HardwareDisplayMode } from "../fleet/hardware-disp
 import { formatCountry, normalizeCountryMode } from "../fleet/country-display.ts";
 import type { CountryDisplayMode } from "../fleet/country-display.ts";
 import type { HostMetadataRecord, HostMetadataValues } from "../fleet/host-metadata.ts";
+import { reportedDriverVersion } from "../fleet/host-metadata.ts";
 import type { NodeInfoRecord } from "../fleet/node-info.ts";
 import { isHostMetadataRecord as isMetadataRecord, isNodeInfoRecord } from "../contracts/fleet.ts";
 import type { FleetResource } from "../contracts/fleet.ts";
@@ -113,8 +115,8 @@ const COLUMNS = [
   ["market", "Market", "Toggle between the full reported market label and its first two characters. Sorting uses the full label. Supplied hosts resolve their market address through Nosana’s market lookup, preferring its slug. Missing labels stay unknown. This association does not identify the physical GPU or establish current activity; recommendations are separate."],
   ["gpuID", "GPU ID", "The current physical GPU index, resolved from measured UUID identity. No hardware observations are connected."],
   ["currentNode", "Current Node", "The reported Nosana package version. This does not prove which process is currently running. Prerelease versions are pink; no comparison with the latest release is connected."],
-  ["cuda", "CUDA", "CUDA driver version reported by Nosana metrics."],
-  ["nvidia", "NVIDIA", "Toggle between the major NVIDIA driver version and the full reported version. Sorting uses the full version. Supplied hosts use reported Nosana metadata; sample scenarios remain synthetic."],
+  ["cuda", "CUDA", "Driver-supported CUDA version reported by Nosana. If unavailable, installed backends may use a verified PC NVIDIA-SMI reading; its source and time are in the PC details. This is not the installed toolkit version or proof of GPU health."],
+  ["nvidia", "NVIDIA", "Toggle between the major NVIDIA driver version and the full reported version. Sorting uses the full version. If Nosana metadata is unavailable, installed backends may use a verified PC NVIDIA-SMI reading; its source and time are in the PC details. Retained readings stay dimmed. Version information does not establish GPU health; sample scenarios remain synthetic."],
   ["cpu", "CPU", "Toggle between a short CPU label and the full processor description. Compact mode shows the generation (such as 13th), otherwise the vendor, otherwise the first word. Sorting uses the full description. Supplied hosts use reported Nosana metadata."],
   ["system", "System", "Toggle between the release before its first hyphen and the full reported system string. A kernel release does not identify the complete OS or distribution. Sorting uses the full string. Supplied hosts use reported Nosana metadata."],
   ["country", "Country", "Country reported by Nosana, not verified physical location. Toggle between recognized country codes and full English names; other reported text stays unchanged. Sorting uses the full name. Uses the existing five-minute metadata reads, preferring metrics.network.country then metrics.country. Missing values stay unknown; failed reads retain the original value and check time. No city or region is inferred."],
@@ -2160,16 +2162,25 @@ function isMetadataColumn(key: SortColumn): key is MetadataColumn {
   return METADATA_COLUMNS.some((column) => column === key);
 }
 
-function metadataValue(values: HostMetadataValues | null | undefined, key: MetadataColumn): string | number | null {
+function metadataValue(values: HostMetadataValues | null | undefined, key: MetadataColumn, address?: string): string | number | null {
   if (key === "status") return statusLabel(values?.status);
+  if (key === "cuda" || key === "nvidia") {
+    const reported = reportedDriverVersion(values?.[key]);
+    if (reported !== null) return reported;
+    const fallback = address ? sharedTelemetry.driver(address, liveNow()) : undefined;
+    return (key === "cuda" ? fallback?.cudaDriverVersion : fallback?.driverVersion) ?? null;
+  }
   return (key === "market" ? values?.marketLabel : values?.[key]) ?? null;
 }
 
 function renderMetadataCell(
   cell: HTMLTableCellElement, key: MetadataColumn, label: string, address: string, record: HostMetadataRecord | undefined,
 ): void {
-  const raw = metadataValue(record?.values, key);
-  const retained = record?.retained === true || (metadataError !== null && record?.values != null);
+  const fallback = (key === "cuda" || key === "nvidia") && reportedDriverVersion(record?.values?.[key]) === null
+    ? sharedTelemetry.driver(address, liveNow()) : undefined;
+  const raw = metadataValue(record?.values, key, address);
+  const usesPc = fallback !== undefined && raw !== null;
+  const retained = usesPc ? !fallback.current : record?.retained === true || (metadataError !== null && record?.values != null);
   const marketError = key === "market" ? record?.marketError : null;
   const failed = retained || Boolean(marketError);
   let text = raw === null ? "—" : String(raw);
@@ -2185,9 +2196,12 @@ function renderMetadataCell(
   const full = raw === null ? "unknown" : key === "country" ? formatCountry(String(raw), "full").fullName!
     : `${raw}${key === "ram" || key === "disk" ? " GB" : ""}`;
   const note = COLUMNS.find(([column]) => column === key)![2];
-  const issue = record?.error ?? metadataError;
-  const details = `${label}: ${full}${key === "status" && record?.values?.status ? `\nRaw Nosana status: ${record.values.status}` : ""}${key === "market" && record?.values?.marketAddress ? `\nMarket address: ${record.values.marketAddress}` : ""}\n\n${note}\n\n${retained ? "Retained from the last successful read. " : ""}Reported Nosana metadata; current host activity is not established.${issue ? `\nRead unavailable: ${issue}` : ""}${marketError ? `\nMarket label unavailable: ${marketError}` : ""}`;
+  const issue = usesPc ? null : record?.error ?? metadataError;
+  const source = usesPc ? `Read from ${fallback.pcName} via NVIDIA-SMI at ${new Date(fallback.observedAtMs!).toISOString()}. Version information does not establish GPU health.`
+    : "Reported Nosana metadata; current host activity is not established.";
+  const details = `${label}: ${full}${key === "status" && record?.values?.status ? `\nRaw Nosana status: ${record.values.status}` : ""}${key === "market" && record?.values?.marketAddress ? `\nMarket address: ${record.values.marketAddress}` : ""}\n\n${note}\n\n${retained ? "Retained from the last successful read. " : ""}${source}${issue ? `\nRead unavailable: ${issue}` : ""}${marketError ? `\nMarket label unavailable: ${marketError}` : ""}`;
   cell.dataset.metadataState = raw === null ? "unknown" : failed ? "retained" : "reported";
+  cell.dataset.metadataSource = usesPc ? "pc-nvidia-smi-version" : "nosana";
   const value = rowValue(cell, "metadata-value");
   const classes = ["metadata-value"];
   if (failed) classes.push("metadata-retained");
@@ -2199,13 +2213,13 @@ function renderMetadataCell(
   const className = classes.join(" ");
   if (value.className !== className) value.className = className;
   setText(value, text);
-  value.setAttribute("aria-label", `${failed && raw !== null ? "Retained " : ""}${label}: ${full} for ${address}. Open details.`);
+  value.setAttribute("aria-label", `${failed && raw !== null ? "Retained " : ""}${label}: ${full} for ${address}.${usesPc ? ` ${source}` : " Open details."}`);
   const tone: InfoTone = raw === null ? "warning" : failed ? "muted" : key !== "status" ? "accent"
     : statusTone(String(raw)) === "premium" ? "positive" : statusTone(String(raw)) === "rejected" ? "negative"
       : statusTone(String(raw)) === "community" ? "warning" : "plain";
   rememberInfo(cell, {
     summary: [ink(`${failed && raw !== null ? "Retained " : ""}${label}: `), ink(brief(full, 160), tone), ink(".")],
-    facts: [COLUMN_HELP[key], checkedFact(record?.fetchedAtMs, "Metadata checked"),
+    facts: [COLUMN_HELP[key], checkedFact(usesPc ? fallback.observedAtMs : record?.fetchedAtMs, usesPc ? "PC version checked" : "Metadata checked"),
       ...(key === "status" && record?.values?.status ? [`Raw Nosana status: ${record.values.status}.`] : []),
       ...(issue || marketError || failed ? [[ink(raw === null ? "Reading unavailable; no verified value yet."
         : "Latest reading is unavailable; retained values are unconfirmed.", "warning")]] : [])],
@@ -2507,7 +2521,7 @@ function renderSupplied(): void {
       queued: liveQueue(address, nodeProjectionTime).sortValue,
       ...Object.fromEntries(METADATA_COLUMNS.map((key) => [key, key === "country"
         ? formatCountry(metadataRecords.get(address)?.values?.country, "full").fullName
-        : metadataValue(metadataRecords.get(address)?.values, key)])),
+        : metadataValue(metadataRecords.get(address)?.values, key, address)])),
       state: liveActivity(address, nodeProjectionTime).state.reported,
       api: liveApi(nodeInfoRecords.get(address), nodeProjectionTime).label,
       dl: nodeInfoRecords.get(address)?.values?.dl ?? null,

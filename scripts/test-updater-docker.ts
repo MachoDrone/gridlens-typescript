@@ -22,6 +22,8 @@ import type { ModernRelease } from "../src/installer/release.ts";
 import { parseUpdateStatus, updateActive } from "../src/contracts/updates.ts";
 import { CHANNEL_FORMAT } from "../src/updater/release.ts";
 import { ensureUpdater, DOCKER_SOCKET } from "../src/updater/deployment.ts";
+import { channelAssets } from "../src/updater/channel-paths.ts";
+import type { ChannelFamily } from "../src/updater/channel-paths.ts";
 
 export interface UpdaterAcceptanceOptions {
   instance: string; address: string; httpsPort: number; webPort: number; baseImage: string; previousImage?: string; report?: string;
@@ -52,7 +54,7 @@ export function updaterAcceptanceOptions(args: readonly string[]): UpdaterAccept
 }
 /** Inspect once and derive by immutable ID, so changing a source tag cannot replace
  * the old application's code during the transition under test. */
-export interface UpdaterAcceptanceSource { imageId: string; version: string; browserSecurity: boolean; treasury: boolean; minimumCoordinator: 1 | 2 }
+export interface UpdaterAcceptanceSource { imageId: string; version: string; browserSecurity: boolean; treasury: boolean; treasuryProtocol: 0 | 1 | 2; financialSecurity: boolean; minimumCoordinator: 1 | 2 | 3 }
 export function updaterAcceptanceSource(runner: DockerRunner, image: string, previous = false): UpdaterAcceptanceSource {
   const values: unknown = JSON.parse(checked(runner, ["image", "inspect", image]));
   if (!Array.isArray(values) || values.length !== 1) throw new Error("The fixture source image could not be verified.");
@@ -61,14 +63,15 @@ export function updaterAcceptanceSource(runner: DockerRunner, image: string, pre
     || typeof identity["io.gridlens.version"] !== "string" || !/^\d+\.\d+\.\d+(?:-[a-z0-9.-]+)?$/.test(identity["io.gridlens.version"])
     || identity["io.gridlens.updater-protocol"] !== "1"
     || ![undefined, "1"].includes(identity["io.gridlens.browser-security-protocol"] as string | undefined)
-    || ![undefined, "0", "1"].includes(identity["io.gridlens.treasury-protocol"] as string | undefined)
+    || ![undefined, "0", "1", "2"].includes(identity["io.gridlens.treasury-protocol"] as string | undefined)
     || !previous && identity["io.gridlens.browser-security-protocol"] !== "1"
-    || identity["io.gridlens.treasury-protocol"] === "1" && identity["io.gridlens.browser-security-protocol"] !== "1")
+    || ["1", "2"].includes(String(identity["io.gridlens.treasury-protocol"])) && identity["io.gridlens.browser-security-protocol"] !== "1"
+    || identity["io.gridlens.treasury-protocol"] === "2" && (identity["io.gridlens.financial-security-protocol"] !== "1" || identity["io.gridlens.guardian-protocol"] !== "1"))
     throw new Error(previous ? "The previous fixture source must be an updater-capable GridLens image with supported declared capabilities."
       : "The target fixture source must advertise updater and guided browser setup support.");
-  const treasury = identity["io.gridlens.treasury-protocol"] === "1";
+  const treasuryProtocol = identity["io.gridlens.treasury-protocol"] === "2" ? 2 : identity["io.gridlens.treasury-protocol"] === "1" ? 1 : 0;
   return { imageId: value.Id, version: identity["io.gridlens.version"], browserSecurity: identity["io.gridlens.browser-security-protocol"] === "1",
-    treasury, minimumCoordinator: treasury ? 2 : 1 };
+    treasury: treasuryProtocol !== 0, treasuryProtocol, financialSecurity: identity["io.gridlens.financial-security-protocol"] === "1", minimumCoordinator: treasuryProtocol === 2 ? 3 : treasuryProtocol === 1 ? 2 : 1 };
 }
 /** Inspect only mount topology and public environment names. The updater's
  * Docker authority is separate from having a mounted financial socket. */
@@ -98,9 +101,10 @@ globalThis.fetch = async function fixtureFetch(input, options = {}) {
   if (url.protocol !== "https:" || url.hostname !== "github.com" || url.port || url.username || url.password || url.search || url.hash
     || !url.pathname.startsWith("/MachoDrone/gridlens-typescript/releases/download/")) throw new Error("Fixture blocked an external fetch.");
   let index; try { index = JSON.parse(readFileSync("/update-state/fixture/index.json", "utf8")); } catch { return new Response("Fixture release not published", {status:503}); }
-  const item = index[url.pathname]; if (!item) return new Response("Fixture artifact missing", {status:404});
+  const item = index[url.pathname];
+  appendFileSync("/update-state/fixture/fetches.jsonl", JSON.stringify({path:url.pathname,status:item?200:404,at:Date.now()})+"\\n");
+  if (!item) return new Response("Fixture artifact missing", {status:404});
   if (!/^[a-zA-Z0-9.-]+$/.test(item.file) || !Number.isSafeInteger(item.bytes) || item.bytes < 1) throw new Error("Invalid fixture artifact map.");
-  appendFileSync("/update-state/fixture/fetches.jsonl", JSON.stringify({path:url.pathname,at:Date.now()})+"\\n");
   const stream = createReadStream("/update-state/fixture/" + item.file, options.signal ? {signal:options.signal} : {});
   return new Response(Readable.toWeb(stream), {status:200, headers:{"content-length":String(item.bytes)}});
 };
@@ -181,6 +185,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.dockerVersion = checked(runner, ["version", "--format", "{{.Server.Version}}"]);
     const base = updaterAcceptanceSource(runner, options.baseImage);
     const previous = options.previousImage ? updaterAcceptanceSource(runner, options.previousImage, true) : undefined;
+    if (base.treasuryProtocol === 2 && !previous?.financialSecurity) throw new Error("Protected Wallet acceptance requires the previously published floor-aware compatibility runtime.");
     evidence.baseImageId = base.imageId; evidence.targetCapabilities = { browserSecurity: base.browserSecurity, treasury: base.treasury, minimumCoordinator: base.minimumCoordinator };
     if (previous) evidence.previousSource = { reference: options.previousImage, ...previous,
       codePreserved: "Only fixture build metadata, update public key and fetch transport are replaced; application and worker source stay from this older image." };
@@ -198,7 +203,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     claimed = true;
     const keys = generateKeyPairSync("ed25519"), publicKey = keys.publicKey.export({ type: "spki", format: "pem" }).toString();
-    const buildImage = (sequence: number, failingOwner = false): { tag: string; imageId: string; version: string; minimumCoordinator: 1 | 2 } => {
+    const buildImage = (sequence: number, failingOwner = false): { tag: string; imageId: string; version: string; minimumCoordinator: 1 | 2 | 3 } => {
       const tag = `gridlens-modern-${instance}:${sequence}`, version = `0.0.${sequence}-updater-fixture`;
       const files = { "build.json": JSON.stringify({ version, sequence, buildId: `${sequence}:${version}` }), "update-public-key.pem": publicKey, "fixture-fetch.mjs": fixtureFetch,
         ...(failingOwner ? { "scripts/shared-owner.ts": 'throw new Error("Generated isolated updater startup failure.");\n' } : {}) };
@@ -216,6 +221,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const web = ensureVpnWeb(runner, installed.config, firstRelease, options.webPort, { upgrade: true });
     evidence.origins = { https: installed.config.origin, browser: web.origin };
     const initialStatus = await call(web.origin, "/api/shared/status");
+    let protectedNow = (previous ?? base).treasuryProtocol === 2;
+    assert.equal(initialStatus.role, protectedNow ? "viewer" : "operator");
     assert.deepEqual((initialStatus.context as { addresses: unknown[] }).addresses, []);
     evidence.initialServerId = initialStatus.serverId;
     const publicCertificateSha256 = hash(new X509Certificate(installed.certificate).raw);
@@ -255,7 +262,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const checkSecureBrowser = async () => {
       assert.ok(browserCookie, "The fixture has not established its HTTPS browser session.");
       const result = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie });
-      assert.equal(result.status, 200); assert.equal(result.value.serverId, initialBrowserSecurity.serverId); assert.equal(result.value.role, "operator");
+      assert.equal(result.status, 200); assert.equal(result.value.serverId, initialBrowserSecurity.serverId); assert.equal(result.value.role, protectedNow ? "viewer" : "operator");
     };
     const connectSecureBrowser = async () => {
       const handoff = await call(web.origin, "/secure-setup/connect-code", {});
@@ -308,13 +315,14 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     progress("saving signed target archives and removing their images from the daemon");
     const target = createRelease(second, 2), broken = createRelease(third, 3);
     evidence.coldTargetImages = [target.release.imageId, broken.release.imageId];
-    const publishFixture = (selected: FixtureRelease) => {
+    const publishFixture = (selected: FixtureRelease, family: ChannelFamily) => {
       const tag = `modern-v${selected.release.version}`, base = `/MachoDrone/gridlens-typescript/releases/download/`;
+      const names = channelAssets(selected.release.platform, family);
       const files = { [`manifest-${selected.release.sequence}.json`]: selected.manifest.toString("base64"), [`manifest-${selected.release.sequence}.sig`]: selected.signature.toString("base64"),
-        "modern-channel-linux-x64.json": selected.channel.toString("base64"), "modern-channel-linux-x64.sig": selected.channelSignature.toString("base64") };
+        [names.manifest]: selected.channel.toString("base64"), [names.signature]: selected.channelSignature.toString("base64") };
       const entries = {
-        [`${base}modern-development/modern-channel-linux-x64.json`]: { file: "modern-channel-linux-x64.json", bytes: selected.channel.length },
-        [`${base}modern-development/modern-channel-linux-x64.sig`]: { file: "modern-channel-linux-x64.sig", bytes: selected.channelSignature.length },
+        [`${base}modern-development/${names.manifest}`]: { file: names.manifest, bytes: selected.channel.length },
+        [`${base}modern-development/${names.signature}`]: { file: names.signature, bytes: selected.channelSignature.length },
         [`${base}${tag}/modern-release.json`]: { file: `manifest-${selected.release.sequence}.json`, bytes: selected.manifest.length },
         [`${base}${tag}/modern-release.sig`]: { file: `manifest-${selected.release.sequence}.sig`, bytes: selected.signature.length },
         [`${base}${tag}/${selected.release.runtime.name}`]: { file: selected.release.runtime.name, bytes: selected.release.runtime.bytes },
@@ -322,7 +330,16 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       helper(first.imageId, `import{readFileSync,writeFileSync,renameSync}from"node:fs";const input=JSON.parse(readFileSync(0,"utf8"));for(const[name,value]of Object.entries(input.files))writeFileSync("/update-state/fixture/"+name,Buffer.from(value,"base64"));
         let prior={};try{prior=JSON.parse(readFileSync("/update-state/fixture/index.json","utf8"));}catch{}writeFileSync("/update-state/fixture/index.pending",JSON.stringify({...prior,...input.entries}));renameSync("/update-state/fixture/index.pending","/update-state/fixture/index.json");`, { files, entries });
     };
-    publishFixture(target); ensureUpdater(runner, installed.config);
+    const initialFamily: ChannelFamily = target.release.minimumCoordinator >= 3 ? "coordinator3" : "legacy";
+    if (initialFamily === "coordinator3") {
+      // The already-installed compatibility source remains the primary lane;
+      // no old reader is ever shown the protected min-coordinator3 candidate.
+      const manifest = Buffer.from(JSON.stringify(firstRelease)), signature = sign(null, manifest, keys.privateKey);
+      const channel = Buffer.from(JSON.stringify({ format: CHANNEL_FORMAT, channel: "development", platform: firstRelease.platform, version: firstRelease.version,
+        sequence: firstRelease.sequence, buildId: `${firstRelease.sequence}:${firstRelease.version}`, releaseTag: `modern-v${firstRelease.version}`, manifestSha256: hash(manifest), workerProtocol: 1 }));
+      publishFixture({ release: firstRelease, tag: first.tag, manifest, signature, channel, channelSignature: sign(null, channel, keys.privateKey) }, "legacy");
+    }
+    publishFixture(target, initialFamily); ensureUpdater(runner, installed.config);
     const readStatus = async () => parseUpdateStatus(await call(web.origin, "/api/shared/updates"));
     const available = await until(readStatus, value => value.candidate?.sequence === 2);
     const initial = snapshot(); evidence.initial = initial;
@@ -346,6 +363,11 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected
       && !(document.querySelector("#update-dialog") as HTMLDialogElement | null)?.open, completed.current!.buildId, { timeout: 60_000 });
     const upgraded = snapshot();
+    protectedNow = base.treasuryProtocol === 2;
+    if (protectedNow) {
+      assert.equal(upgraded.config.schema, 2); assert.equal(upgraded.config.financialSecurity?.minimumTreasuryProtocol, 2);
+      assert.equal(upgraded.config.financialSecurity?.minimumCoordinator, 3);
+    }
     checkTreasuryIsolation(base.treasury);
     for (const role of ["owner", "gateway", "vpn-web", "updater"]) {
       assert.equal(upgraded.roles[role]!.image, second.imageId); assert.equal(upgraded.roles[role]!.readOnlyRoot, true);
@@ -364,7 +386,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.update = { operation: completed.operation, observedPhases: [...phases], disconnectedReads: disconnected, automaticBrowserReturn: true, ...upgraded };
     // This owner and its receiving address belong only to the empty, labeled
     // fixture. No source hosts, source keys or transfer requests are introduced.
-    let walletPassword: string | undefined, walletUnlock: string | undefined;
+    let walletPassword: string | undefined, walletUnlock: string | undefined, ownerBrowserCookie: string | undefined;
     const walletDestination = "1".repeat(31) + "9";
     const targetStatus = await call(web.origin, "/api/shared/status");
     const claimsSupported = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("treasury-claims-pilot-v1");
@@ -428,19 +450,43 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         const history = await walletCall("claims/operations", undefined, walletUnlock); assert.equal(history.status, 200); assert.deepEqual(history.value.operations, []);
         evidence.claimsAfterUpgrade = { retainedInitializationEstablished: true, httpsOwnerStatusVerified: true, emptyFleet: true, claimsRequested: 0 };
       }
-      evidence.walletAfterUpgrade = { sourceCapability: (previous ?? base).treasury ? 1 : 0, targetCapability: 1,
+      if (base.treasuryProtocol === 2) {
+        assert.equal(targetStatus.role, "viewer", "The private gateway must become a viewer after protection");
+        const denied = await fetch(new URL("/api/shared/updates/check", web.origin), { method: "POST", headers: { Origin: web.origin, "Content-Type": "application/json" }, body: "{}" });
+        await denied.body?.cancel(); assert.equal(denied.status, 403, "Private HTTP viewer acquired update authority");
+        const granted = await walletCall("owner-browser", { version: 1 }, walletUnlock);
+        const grantedCookie = granted.cookie;
+        assert.equal(granted.status, 200); assert.ok(typeof grantedCookie === "string" && grantedCookie.startsWith("__Host-gridlens-owner="));
+        ownerBrowserCookie = `${browserCookie}; ${grantedCookie.split(";")[0]}`;
+        evidence.protectedOwnerAuthorization = { privateGatewayRole: "viewer", privateHttpAdministrationDenied: true, walletAuthorizedHttpsOwnerCookie: true, financialRequests: 0 };
+      }
+      evidence.walletAfterUpgrade = { sourceCapability: (previous ?? base).treasuryProtocol, targetCapability: base.treasuryProtocol,
         minimumCoordinator: target.release.minimumCoordinator, socketIsolation: "owner and HTTPS gateway only; absent from HTTP gateway and updater",
         httpsCertificateValidated: true, httpFinancialRequestsDenied: true, terminalSetupAndOwnerPasswordVerified: true,
         encryptedConfigurationEstablished: true, emptyFleet: true, transactionsRequested: 0 };
     } else evidence.walletAfterUpgrade = { targetCapability: 0, minimumCoordinator: target.release.minimumCoordinator,
       financialSocketAbsent: true, ownerSetupAttempted: false, transactionsRequested: 0 };
     progress("publishing a signed fixture with an intentionally failing owner");
-    publishFixture(broken);
-    await until(async () => { await call(web.origin, "/api/shared/updates/check", {}); return readStatus(); }, value => value.candidate?.sequence === 3, 90_000);
-    await page.locator("#sidebar-update").click();
-    await page.getByRole("button", { name: "Check for updates", exact: true }).click();
-    await page.getByRole("button", { name: "Update now", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
-    await page.getByRole("button", { name: "Update now", exact: true }).click();
+    // The replacement worker contains coordinator3. This second phase proves
+    // it can follow the new lane, while primary retains the compatible source.
+    publishFixture(broken, "coordinator3");
+    const next = await until(async () => {
+      if (base.treasuryProtocol === 2) {
+        const checked = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} });
+        assert.equal(checked.status, 200);
+      } else await call(web.origin, "/api/shared/updates/check", {});
+      return readStatus();
+    }, value => value.candidate?.sequence === 3, 90_000);
+    if (base.treasuryProtocol === 2) {
+      const started = await secureCall(installed.config.origin, "/api/shared/updates/start", installed.certificate, { cookie: ownerBrowserCookie!,
+        body: { candidateId: next.candidate!.id, idempotencyKey: `fixture_protected_${randomBytes(8).toString("hex")}` } });
+      assert.equal(started.status, 200);
+    } else {
+      await page.locator("#sidebar-update").click();
+      await page.getByRole("button", { name: "Check for updates", exact: true }).click();
+      await page.getByRole("button", { name: "Update now", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
+      await page.getByRole("button", { name: "Update now", exact: true }).click();
+    }
     const restoring = await until(readStatus, value => value.operation?.target.sequence === 3, 60_000);
     const restored = await until(readStatus, value => value.operation?.id === restoring.operation!.id && !updateActive(value.operation), 240_000);
     assert.equal(restored.operation?.phase, "rolled-back", restored.operation?.error ?? "Fixture failure was not rolled back");
@@ -480,8 +526,15 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     evidence.browserSecurityAfterRollback = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
-    await page.waitForFunction(() => document.querySelector("#update-status")?.textContent === "Update failed; previous version restored", undefined, { timeout: 60_000 });
-    await page.getByRole("button", { name: "Close update", exact: true }).click();
+    if (base.treasuryProtocol === 2) {
+      assert.equal((await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} })).status, 403,
+        "Owner browser authorization survived owner replacement");
+      await page.goto(web.origin, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected, completed.current!.buildId, { timeout: 60_000 });
+    } else {
+      await page.waitForFunction(() => document.querySelector("#update-status")?.textContent === "Update failed; previous version restored", undefined, { timeout: 60_000 });
+      await page.getByRole("button", { name: "Close update", exact: true }).click();
+    }
     assert.equal(await page.locator("html").getAttribute("data-gridlens-fleet-ready"), completed.current!.buildId);
     evidence.rollback = { operation: restored.operation, usableBrowser: true, ...rolledBack };
     evidence.browserPageErrors = pageErrors;
@@ -492,6 +545,16 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     assert.ok(browserCookie);
     assert.equal((await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie })).status, 401);
     evidence.secureBrowserParentRevocation = "Derived browser access revoked with its private-network gateway grant";
+    const channelReads = JSON.parse(helper(first.imageId, 'import{readFileSync}from"node:fs";const text=readFileSync("/update-state/fixture/fetches.jsonl","utf8");if(text.length>1048576)throw Error("Fixture trace bound");process.stdout.write(JSON.stringify(text.trim().split("\\n").filter(Boolean).map(line=>JSON.parse(line))));')) as { path: string; status: number }[];
+    const prefix = "/MachoDrone/gridlens-typescript/releases/download/modern-development/";
+    const primary = channelAssets("linux-x64", "legacy"), modern = channelAssets("linux-x64", "coordinator3");
+    const legacyReads = channelReads.filter(row => row.path === prefix + primary.manifest && row.status === 200).length;
+    const modernReads = channelReads.filter(row => row.path === prefix + modern.manifest && row.status === 200).length;
+    if (initialFamily === "legacy") assert.ok(legacyReads > 0, "The old/compatibility worker never read its retained primary channel");
+    assert.ok(modernReads > 0, "The replacement coordinator3 worker never read its v3 channel");
+    evidence.channelFamilies = { initialFamily, replacementFamily: "coordinator3", legacySuccessfulReads: legacyReads, v3SuccessfulReads: modernReads,
+      legacyPrimaryRetained: true, legacyMinimumCoordinator: initialFamily === "legacy" ? target.release.minimumCoordinator : firstRelease.minimumCoordinator,
+      protectedMinimumCoordinator: target.release.minimumCoordinator };
     evidence.passed = true; progress("real worker upgrade, self-replacement, browser return and rollback passed");
   } catch (error) {
     failure = error; evidence.passed = false; evidence.failure = error instanceof Error ? error.message : "Updater acceptance failed.";

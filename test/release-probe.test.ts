@@ -56,7 +56,7 @@ function fixture() {
   data.set("/app/build.json", Buffer.from(JSON.stringify({ version: "0.1.0-fixture", sequence: 22, buildId: "22:0.1.0-fixture" })));
   data.set("/app/update-public-key.pem", Buffer.from(publicKey));
   const expected: BakedImageExpectation = { imageId: `sha256:${"a".repeat(64)}`, version: "0.1.0-fixture", sequence: 22, platform: "linux-x64", publicKey, treasuryProtocol: 1, inputs,
-    labels: { "io.gridlens.product": "shared-backend", "io.gridlens.version": "0.1.0-fixture", "io.gridlens.updater-protocol": "1", "io.gridlens.browser-security-protocol": "1", "io.gridlens.treasury-protocol": "1" } };
+    labels: { "io.gridlens.product": "shared-backend", "io.gridlens.version": "0.1.0-fixture", "io.gridlens.updater-protocol": "1", "io.gridlens.browser-security-protocol": "1", "io.gridlens.treasury-protocol": "1", "io.gridlens.financial-security-protocol": "1", "io.gridlens.guardian-protocol": "1" } };
   const calls: { args: readonly string[]; input: string }[] = [];
   let unreadable = "", node = "24.14.1";
   const runner: DockerRunner = { run(args, input) {

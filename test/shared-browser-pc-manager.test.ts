@@ -151,7 +151,7 @@ test("shutdown fences unfinished browser setup and restart requests sign-in agai
 
 test("automatic sudo uses fixed commands and stdin, and absent optional native Podman is not reported as a failure", async () => {
   for (const mode of ["direct", "passwordless", "password"] as const) {
-    const calls: { command: string; input?: string }[] = [], wrapper = "f".repeat(64), node = "d".repeat(64);
+    const calls: { command: string; input?: string | Uint8Array }[] = [], wrapper = "f".repeat(64), node = "d".repeat(64);
     const run: SshRun = async (command, options) => {
       calls.push({ command, ...(options?.input === undefined ? {} : { input: options.input }) });
       if (command === "/bin/hostname") return { code: 0, stdout: "fixture-pc\n" };

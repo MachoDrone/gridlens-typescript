@@ -12,8 +12,15 @@ import { digest, hash, object } from "./model.ts";
 import type { ReleaseContext } from "./engine.ts";
 import type { GitHub } from "./github.ts";
 import { fixtureDocker } from "./fixture-docker.ts";
+import type { AcceptanceKind } from "../verification-groups.ts";
+import type { ReleaseConfig } from "./model.ts";
 
-export const DOCKER_ACCEPTANCES = ["docker-shared", "docker-updater", "docker-claims-shutdown", "docker-claim-units"] as const;
+export const DOCKER_ACCEPTANCES = ["docker-shared", "docker-updater", "docker-claims-shutdown", "docker-claim-units", "docker-owner-bound"] as const;
+/** Build capabilities can change without a source diff, e.g. compat -> protected.
+ * They require image-bound proof even when all source checks are reusable. */
+export function additionalReleaseAcceptances(config: Pick<ReleaseConfig, "enableWallet" | "treasuryProtocol">): AcceptanceKind[] {
+  return config.enableWallet && (config.treasuryProtocol ?? 2) === 2 ? [...DOCKER_ACCEPTANCES, "public-installer"] : [];
+}
 export type DockerAcceptance = typeof DOCKER_ACCEPTANCES[number];
 export interface AcceptanceReceipt {
   format: "gridlens-release-acceptance-v1";
@@ -45,6 +52,9 @@ export function validateAcceptanceReport(kind: DockerAcceptance, value: unknown,
   if (kind === "docker-claim-units" && (report.network !== "none" || report.liveApiRequests !== 0 || report.sourceWalletKeyReads !== 0 || report.signingOperations !== 0
     || !previousImages?.includes(String(report.oldImageId)) || !Array.isArray(report.stages) || report.stages.length < 4)) throw new Error("Legacy claim-unit proof is incomplete.");
   if (kind === "docker-shared" && (!report.afterRestart || !report.afterUpgrade || !report.afterRollback || !report.initialImageBindings)) throw new Error("Shared runtime preservation proof is incomplete.");
+  if (kind === "docker-owner-bound" && (report.network !== "none" || report.liveApiRequests !== 0 || report.existingWalletKeyAccess !== false
+    || report.ownerTransferValidated !== true || report.foreignOwnerRejected !== true || report.replayRejected !== true
+    || report.historyPreserved !== true || report.claimAckRecovered !== true)) throw new Error("Owner-bound guardian acceptance proof is incomplete.");
 }
 export function readAcceptanceReceipt(path: string, context: ReleaseContext, verification: VerificationReceipt, images: string[], previousImages?: string[]): AcceptanceReceipt {
   const receipt = readJson(path) as AcceptanceReceipt;
@@ -82,7 +92,7 @@ async function signedPrevious(context: ReleaseContext, github: GitHub, tag: stri
 }
 export async function runAcceptances(context: ReleaseContext, verification: VerificationReceipt, build: ReleaseBuildResult, github: GitHub,
   imported: string[] = [], runner: CommandRunner = runCommand): Promise<AcceptanceReceipt[]> {
-  const required = verification.missingAcceptances.filter(kind => kind !== "public-installer");
+  const required = [...new Set([...verification.missingAcceptances, ...additionalReleaseAcceptances(context.journal.plan.config)])].filter(kind => kind !== "public-installer").sort();
   for (const kind of required) if (!DOCKER_ACCEPTANCES.includes(kind as DockerAcceptance)) throw new Error("No maintained adapter exists for a required acceptance check.");
   const directory = join(context.directory, "acceptance"); mkdirSync(directory, { recursive: true, mode: 0o700 });
   const images = [build.release.imageId, ...(build.release.configImageId ? [build.release.configImageId] : [])];
@@ -110,6 +120,7 @@ export async function runAcceptances(context: ReleaseContext, verification: Veri
       "--address", profile.address, "--web-port", String(profile.webPorts[0]), "--https-port", String(profile.webPorts[0] + 1), "--archive-compression", "gzip", "--report", reportPath];
     else if (kind === "docker-shared") args = ["scripts/test-shared-docker.ts", "--instance", instance, "--prebuilt-image", actualImageId, "--prebuilt-version", build.release.version, "--address", profile.address, "--port", String(profile.webPorts[0]), "--report", reportPath];
     else if (kind === "docker-claims-shutdown") args = ["scripts/test-claims-shutdown-docker.ts", "--instance", instance, "--image", actualImageId, "--report", reportPath];
+    else if (kind === "docker-owner-bound") args = ["scripts/test-owner-bound-docker.ts", "--instance", instance, "--image", actualImageId, "--report", reportPath];
     else args = ["scripts/test-claim-units-docker.ts", "--instance", instance, "--old-image", previous!.reference, "--image", actualImageId, "--report", reportPath];
     context.journal.mutations.push({ key: `acceptance:${instance}`, kind: "isolated-docker-acceptance", identity: { instance, kind, reportPath, images }, status: "intent", intentAt: new Date().toISOString() }); context.save();
     context.assertActive();

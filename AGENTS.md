@@ -60,6 +60,10 @@ dependencies with `npm ci --ignore-scripts`; do not install host OS packages.
 - Existing source wallet keys and reusable authorization never leave the verified
   source container. Tests use generated data and keys. Do not initiate a live claim,
   transfer or signing action as part of implementation, tests or publication.
+- Protected finance requires the pinned source guardian and retained owner
+  authority. Never fall back to direct SSH signing, reinitialize a missing pin or
+  ledger, or give a viewer installation source credentials or financial IPC.
+  Follow `docs/OWNER_BOUND_FINANCE.md`; source/hub root administrators remain trusted.
 - The original balance-transfer pilot is exactly 1 NOS total, once. The rewards
   pilot claims all available uptime rewards into the selected host's own NOS ATA,
   one unresolved claim globally and one submitted attempt per public host. Claims

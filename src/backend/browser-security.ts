@@ -53,6 +53,9 @@ export function validateBrowserSecurityPublication(value: unknown): BrowserSecur
 export interface BrowserSecurityRead { status: BrowserSecurityStatus; certificatePem: string | null }
 export function createBrowserSecurity(state: PrivateState, serverId: string, now = Date.now) {
   return {
+    viewerTrust(): string {
+      return validateBrowserSecurityPublication(state.get<unknown>(key)).certificatePem;
+    },
     publish(value: unknown): BrowserSecurityRead {
       const record = validateBrowserSecurityPublication(value);
       state.set(key, record);

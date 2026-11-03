@@ -26,6 +26,8 @@ let claimReviewInvalidated = false, uncertainClaimSource: string | undefined;
 let uncertainClaimPayout: string | undefined;
 let claimReviewTimer: ReturnType<typeof setTimeout> | undefined, claimPollTimer: ReturnType<typeof setTimeout> | undefined;
 let claimReadPending = false;
+let guardianPollTimer: ReturnType<typeof setTimeout> | undefined;
+let guardianRunning = false;
 let claimMutationRevision = 0;
 const claimOperations = new Map<string, TreasuryClaimOperation>();
 const views = ["wallet-secure", "wallet-unavailable", "wallet-owner-required", "wallet-recovery", "wallet-setup", "wallet-locked", "wallet-unlocked"];
@@ -59,19 +61,24 @@ function controls(): void {
     for (const control of form.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLButtonElement>("input, select, button")) control.disabled = busy;
   }
   const consumed = authorizationUncertain || configuration?.pilotConsumed === true;
+  const protectedSources = configuration?.guardian;
+  const protectionReady = !protectedSources || protectedSources.state === "ready";
+  element("owner-protection").hidden = !protectedSources || !unlockToken;
+  for (const id of ["guardian-enroll", "guardian-refresh", "guardian-confirm", "owner-admin", "viewer-invite"]) element<HTMLButtonElement>(id).disabled = busy;
+  element<HTMLButtonElement>("guardian-enroll").disabled = busy || guardianRunning || protectedSources?.state === "recovery-required";
   element("pilot-finished").hidden = !consumed;
-  element<HTMLButtonElement>("prepare-transfer").disabled = busy || consumed || !configuration?.hosts.length;
+  element<HTMLButtonElement>("prepare-transfer").disabled = busy || consumed || !configuration?.hosts.length || !protectionReady;
   element<HTMLSelectElement>("wallet-source").disabled = busy || consumed || !configuration?.hosts.length;
-  element<HTMLButtonElement>("confirm-transfer").disabled = busy || !review || reviewInvalidated || review.expiresAtMs <= Date.now() || consumed;
+  element<HTMLButtonElement>("confirm-transfer").disabled = busy || !review || reviewInvalidated || review.expiresAtMs <= Date.now() || consumed || !protectionReady;
   element<HTMLButtonElement>("cancel-transfer").disabled = busy;
   element<HTMLButtonElement>("refresh-activity").disabled = busy;
   const selectedClaimSource = element<HTMLSelectElement>("claim-source").value;
   const eligible = claimsStatus?.eligibleHosts.some(host => host.address === selectedClaimSource)
     && !claimsStatus.attemptedHosts.includes(selectedClaimSource);
   element<HTMLSelectElement>("claim-source").disabled = busy || claimsBlocked() || claimReview !== undefined;
-  element<HTMLButtonElement>("prepare-claim").disabled = busy || claimsBlocked() || claimReview !== undefined || !eligible;
+  element<HTMLButtonElement>("prepare-claim").disabled = busy || claimsBlocked() || claimReview !== undefined || !eligible || !protectionReady;
   element<HTMLButtonElement>("confirm-claim").disabled = busy || claimsBlocked() || !claimReview || claimReviewInvalidated
-    || claimReview.expiresAtMs <= Date.now() || !eligible;
+    || claimReview.expiresAtMs <= Date.now() || !eligible || !protectionReady;
   element<HTMLButtonElement>("cancel-claim").disabled = busy;
   element<HTMLButtonElement>("refresh-claims").disabled = busy || claimReadPending;
 }
@@ -165,6 +172,7 @@ function publicError(error: unknown, action: "transfer" | "claim" = "transfer"):
   return "Wallet could not complete this request. Check your connection and try again.";
 }
 function lock(reason: string, send = true): void {
+  clearTimeout(guardianPollTimer); guardianRunning = false; element("guardian-review").hidden = true;
   const oldToken = unlockToken;
   unlockToken = undefined; configuration = undefined; expiresAtMs = 0; generation++;
   controller.abort(); controller = new AbortController(); clearTimeout(pollTimer); clearTimeout(idleTimer);
@@ -220,6 +228,24 @@ async function unlocked(value: TreasuryUnlock): Promise<void> {
   try { await refreshOperations(); } catch (error) { if (expectedGeneration === generation && unlockToken) message(publicError(error), "failure"); }
   if (expectedGeneration !== generation) return;
   try { await refreshClaims(); } catch (error) { claimsReadFailed(error); }
+  if (configuration?.guardian && unlockToken) await refreshGuardian();
+}
+async function refreshGuardian(): Promise<void> {
+  clearTimeout(guardianPollTimer);
+  if (!unlockToken || !configuration?.guardian) return;
+  const value = await json("/guardians/status") as { version: number; state: string; job?: { state: string; total: number; completed: number } };
+  if (value.version !== 1 || !["ready", "not-enrolled", "recovery-required", "sync-required", "enrolling"].includes(value.state)) throw new Error("Invalid owner protection status.");
+  const running = value.job?.state === "running";
+  guardianRunning = running;
+  text("guardian-state", running ? `Protecting source PCs: ${value.job!.completed} of ${value.job!.total}. No funds are moved.`
+    : value.state === "ready" ? "Source protection is configured. Each financial action rechecks owner authorization."
+      : value.state === "recovery-required" ? "Owner authority needs recovery. Existing source protections and financial history remain locked."
+        : value.state === "sync-required" ? "Source policies need reconciliation. Review the receiving wallet, then resume with Protect sources."
+        : value.job?.state === "interrupted" ? "Source protection stopped before completion. Review access, then resume with Protect sources."
+          : "Protect the source PCs before sending NOS or claiming rewards.");
+  displayConfiguration(parseTreasuryConfiguration(await json("/configuration")));
+  element<HTMLButtonElement>("guardian-enroll").disabled = busy || running || value.state === "recovery-required";
+  if (running && unlockToken) guardianPollTimer = setTimeout(() => { void refreshGuardian().catch(error => { if (unlockToken) message(publicError(error), "failure"); }); }, 3000);
 }
 function operationLabel(operation: TreasuryOperation): string {
   return ({ authorized: "Transfer authorized", signed: "Transfer signed", "submission-started": "Checking transfer result",
@@ -587,6 +613,24 @@ element("refresh-activity").addEventListener("click", () => { void act(async () 
   displayConfiguration(parseTreasuryConfiguration(await json("/configuration"))); await refreshOperations(); message("Activity refreshed.");
 }); });
 element("wallet-lock").addEventListener("click", () => lock("Wallet locked."));
+element("guardian-enroll").addEventListener("click", () => { element("guardian-review").hidden = false; });
+element("guardian-cancel").addEventListener("click", () => { element("guardian-review").hidden = true; });
+element("guardian-confirm").addEventListener("click", () => { void act(async () => {
+  await json("/guardians/enroll", {}); element("guardian-review").hidden = true; await refreshGuardian();
+}); });
+element("guardian-refresh").addEventListener("click", () => { void act(refreshGuardian); });
+element("owner-admin").addEventListener("click", () => { void act(async () => {
+  await json("/owner-browser", {}); location.assign("/connect?manage=1");
+}); });
+element("viewer-invite").addEventListener("click", () => { void act(async () => {
+  const invitation = await json("/viewer-invite", {}) as { version?: unknown; kind?: unknown; expiresAtMs?: unknown };
+  if (invitation.version !== 1 || invitation.kind !== "gridlens-viewer-invite" || typeof invitation.expiresAtMs !== "number"
+    || invitation.expiresAtMs <= Date.now()) throw new Error("Invalid monitoring invitation.");
+  const url = URL.createObjectURL(new Blob([JSON.stringify(invitation, null, 2) + "\n"], { type: "application/json" }));
+  const link = document.createElement("a"); link.href = url; link.download = "gridlens-viewer-invite.json"; link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  message("Monitoring invitation downloaded. It expires in five minutes and grants view-only access to this fleet, including newly added hosts.", "success");
+}); });
 element("wallet-recheck").addEventListener("click", () => { show("wallet-unavailable"); void startup(); });
 for (const type of ["pointerdown", "keydown", "input"]) document.addEventListener(type, userInteraction, { passive: true });
 document.addEventListener("visibilitychange", () => {

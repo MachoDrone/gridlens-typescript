@@ -7,6 +7,8 @@ import { InstallerError } from "./release.ts";
 import type { ModernRelease } from "./release.ts";
 import { stopUpdater } from "../updater/deployment.ts";
 import { readVpnWebEndpoint } from "./vpn-web.ts";
+import { FINANCIAL_SECURITY_FLOOR, FINANCIAL_SECURITY_PROTOCOL_LABEL, GUARDIAN_PROTOCOL_LABEL } from "./financial-security.ts";
+import type { TreasuryProtocol } from "./financial-security.ts";
 
 export const UPDATER_PROTOCOL_LABEL = "io.gridlens.updater-protocol";
 export const BROWSER_SECURITY_PROTOCOL_LABEL = "io.gridlens.browser-security-protocol";
@@ -61,7 +63,7 @@ export class Coordinator {
     if (protocol !== undefined && protocol !== "1") throw new InstallerError("The selected image requires an unsupported browser security protocol.");
     return protocol === "1";
   }
-  supportsTreasury(selected: Pick<InstalledImage, "imageId" | "version">): boolean {
+  treasuryProtocol(selected: Pick<InstalledImage, "imageId" | "version">): TreasuryProtocol {
     let images: { Id?: string; Config?: { Labels?: Record<string, string> } }[];
     try { images = JSON.parse(checked(this.runner, ["image", "inspect", selected.imageId])); }
     catch { throw new InstallerError("The selected Wallet capability could not be verified."); }
@@ -70,8 +72,28 @@ export class Coordinator {
       || image.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT || image.Config.Labels["io.gridlens.version"] !== selected.version)
       throw new InstallerError("The Wallet image does not match its saved release.");
     const protocol = image.Config.Labels[TREASURY_PROTOCOL_LABEL];
-    if (protocol !== undefined && protocol !== "0" && protocol !== "1") throw new InstallerError("The selected image requires an unsupported Wallet protocol.");
+    if (protocol !== undefined && !["0", "1", "2"].includes(protocol)) throw new InstallerError("The selected image requires an unsupported Wallet protocol.");
+    if (protocol === "2" && (image.Config.Labels[FINANCIAL_SECURITY_PROTOCOL_LABEL] !== "1" || image.Config.Labels[GUARDIAN_PROTOCOL_LABEL] !== "1"))
+      throw new InstallerError("Protected Wallet requires verified security-floor and source guardian support.");
+    return protocol === "2" ? 2 : protocol === "1" ? 1 : 0;
+  }
+  supportsTreasury(selected: Pick<InstalledImage, "imageId" | "version">): boolean { return this.treasuryProtocol(selected) !== 0; }
+  supportsFinancialSecurity(selected: Pick<InstalledImage, "imageId" | "version">): boolean {
+    let values: { Id?: string; Config?: { Labels?: Record<string, string> } }[];
+    try { values = JSON.parse(checked(this.runner, ["image", "inspect", selected.imageId])); }
+    catch { throw new InstallerError("The financial security capability could not be verified."); }
+    const image = Array.isArray(values) && values.length === 1 ? values[0] : undefined;
+    if (image?.Id !== selected.imageId || image.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT || image.Config.Labels["io.gridlens.version"] !== selected.version)
+      throw new InstallerError("The financial security image does not match its saved release.");
+    const protocol = image.Config.Labels[FINANCIAL_SECURITY_PROTOCOL_LABEL];
+    if (protocol !== undefined && protocol !== "1") throw new InstallerError("Unsupported financial security protocol.");
     return protocol === "1";
+  }
+  financialRuntimeProtocol(config: InstallationConfig): TreasuryProtocol {
+    const protocol = this.treasuryProtocol(config.active);
+    if (!config.financialSecurity) return protocol;
+    if (!this.supportsFinancialSecurity(config.active)) throw new InstallerError("The retained financial security floor rejects this older runtime; the running installation was retained.");
+    return protocol === 2 ? 2 : 0;
   }
   /** Publish public trust metadata only after the saved services are running.
    * Older images remain usable without receiving an unsupported helper/control. */
@@ -131,13 +153,15 @@ export class Coordinator {
   }
   private runtimeArguments(config: InstallationConfig): { owner: string[]; gateway: string[] } {
     const { instance, active, origin } = config;
-    const treasury = this.supportsTreasury(active);
+    const protocol = this.financialRuntimeProtocol(config), treasury = protocol !== 0, security = this.supportsFinancialSecurity(active);
     const common = ["--detach", "--restart", "unless-stopped", ...restrictions, "--user", "1000:1000",
       ...labels(instance), "--network", resourceName(instance, "network")];
     const ownerArgs = ["run", ...common, "--name", resourceName(instance, "owner"),
       ...mount(active.stateVolume, "/state"), ...mount(resourceName(instance, "ledger"), "/ledger"),
       ...mount(resourceName(instance, "read-ipc"), "/ipc"), ...mount(resourceName(instance, "control-ipc"), "/control"),
       ...mount(resourceName(instance, "credentials"), "/credentials"),
+      ...(security ? ["--env", `GRIDLENS_TREASURY_PROTOCOL=${protocol}`, "--env", `GRIDLENS_FINANCIAL_SECURITY_FLOOR=${config.financialSecurity ? "2" : "0"}`] : []),
+      ...(protocol === 2 ? [...mount(resourceName(instance, "guardian-cache"), "/guardian-cache"), "--env", "GRIDLENS_GUARDIAN_CACHE_DIR=/guardian-cache"] : []),
       ...(treasury ? [...mount(resourceName(instance, "treasury-ipc"), "/treasury"), "--env", "GRIDLENS_TREASURY_SOCKET=/treasury/treasury.sock"] : []),
       ...(config.updater ? [...mount(resourceName(instance, "updates-ipc"), "/updates", true), "--env", "GRIDLENS_UPDATE_SOCKET=/updates/updater.sock"] : []),
       "--env", "GRIDLENS_STATE_DIR=/state", "--env", "GRIDLENS_LEDGER_DIR=/ledger", "--env", "GRIDLENS_SOCKET_DIR=/ipc",
@@ -158,6 +182,12 @@ export class Coordinator {
         if (existing.Image !== active.imageId) throw new InstallerError("A previous runtime is still present. Rerun upgrade recovery before continuing.");
         const host=existing.HostConfig as Record<string,unknown>|undefined;
         const cfg=existing.Config as Record<string,unknown>|undefined;
+        if (role === "owner" && this.supportsFinancialSecurity(active)) {
+          const environment = cfg?.Env;
+          if (!Array.isArray(environment) || !environment.includes(`GRIDLENS_TREASURY_PROTOCOL=${this.financialRuntimeProtocol(config)}`)
+            || !environment.includes(`GRIDLENS_FINANCIAL_SECURITY_FLOOR=${config.financialSecurity ? "2" : "0"}`))
+            throw new InstallerError("The owner runtime financial protection differs from its retained configuration.");
+        }
         const actualMounts=existing.Mounts as {Type?:string;Name?:string;Destination?:string;RW?:boolean}[]|undefined;
         const expectedMounts=args.flatMap((value,index)=>value==="--mount"?[args[index+1]!]:[]).map(spec=>{
           const parts=spec.split(",");return {name:parts.find(p=>p.startsWith("src="))!.slice(4),target:parts.find(p=>p.startsWith("dst="))!.slice(4),readonly:parts.includes("readonly")};
@@ -291,6 +321,8 @@ export class Coordinator {
     try { image = JSON.parse(imageResult)[0]; } catch { throw new InstallerError("The release image could not be verified."); }
     if (image?.Id !== release.imageId || image.Config?.Labels?.[PRODUCT_LABEL] !== PRODUCT
       || image.Config.Labels["io.gridlens.version"] !== release.version) throw new InstallerError("The release image does not match its signed identity and version.");
+    const requestedTreasury = this.treasuryProtocol(release);
+    if (requestedTreasury === 2 && release.minimumCoordinator < 3) throw new InstallerError("Protected Wallet requires a signed minimum coordinator version of 3.");
     for (const suffix of ["config", "tls", "ledger", "read-ipc", "control-ipc", "credentials"]) ensureVolume(this.runner, resourceName(instance,suffix),instance);
     const network = resourceName(instance,"network");
     if (!inspectOwned(this.runner,"network",network,instance)) checked(this.runner,["network","create",...labels(instance),network]);
@@ -299,6 +331,10 @@ export class Coordinator {
     if (config && config.instance !== instance) throw new InstallerError("The saved installation belongs to a different instance.");
     if (config && (options.bindAddress !== undefined && options.bindAddress !== config.bindAddress || options.port !== undefined && options.port !== config.port || options.certificate !== undefined)) {
       throw new InstallerError("Reruns preserve the saved address, port and TLS identity. Use the saved configuration.");
+    }
+    if (config?.financialSecurity) {
+      const selected = options.action === "rollback" ? config.previous : release.sequence > config.active.sequence && options.action === "upgrade" ? release : config.active;
+      if (selected && !this.supportsFinancialSecurity(selected)) throw new InstallerError("The retained financial security floor rejects this older runtime; telemetry remains on the saved installation.");
     }
     const retainedNewer = !!config && options.action !== "rollback" && release.sequence < config.active.sequence;
     if (retainedNewer && config!.phase === "ready") {
@@ -321,6 +357,7 @@ export class Coordinator {
       config = validateInstallation(JSON.parse(this.helper(instance,release.imageId,"initialize",{
         instance, bindAddress:options.bindAddress, port:options.port??8789, origin,
         active:{imageId:release.imageId,version:release.version,sequence:release.sequence,stateVolume},certificate:options.certificate,
+        ...(requestedTreasury === 2 ? { financialSecurity: FINANCIAL_SECURITY_FLOOR } : {}),
       }, [...mount(stateVolume,"/state"),...mount(resourceName(instance,"ledger"),"/ledger"),
         ...mount(resourceName(instance,"read-ipc"),"/ipc"),...mount(resourceName(instance,"control-ipc"),"/control"),...mount(resourceName(instance,"credentials"),"/credentials")])));
     } else if (config.phase === "applying") {
@@ -344,7 +381,8 @@ export class Coordinator {
       this.removeRuntime(instance);
       this.helper(instance,release.imageId,"copy-state",{},[...mount(previous.stateVolume,"/source",true),...mount(stateVolume,"/destination")]);
       const active: InstalledImage={imageId:release.imageId,version:release.version,sequence:release.sequence,stateVolume};
-      config=updaterConfiguration({...config,active,previous,phase:"applying"}, enabled);
+      config=updaterConfiguration({...config,active,previous,phase:"applying",
+        ...(requestedTreasury === 2 ? { schema: 2, financialSecurity: FINANCIAL_SECURITY_FLOOR } : {})}, enabled);
       this.save(config);
     } else if (release.sequence === config.active.sequence && release.imageId !== config.active.imageId) {
       throw new InstallerError("The same release sequence identifies a different image; setup stopped.");
@@ -364,11 +402,15 @@ export class Coordinator {
       this.save(config);
     }
     const target = this.targetConfiguration(config);
-    if (this.supportsTreasury(target.active)) {
+    if (this.financialRuntimeProtocol(target) !== 0) {
       ensureVolume(this.runner, resourceName(instance, "treasury-ipc"), instance);
       this.helper(instance, target.active.imageId, "treasury-initialize", {}, [
         ...mount(resourceName(instance, "treasury-ipc"), "/treasury"),
       ]);
+    }
+    if (this.financialRuntimeProtocol(target) === 2) {
+      ensureVolume(this.runner, resourceName(instance, "guardian-cache"), instance);
+      this.helper(instance, target.active.imageId, "guardian-cache-initialize", {}, [...mount(resourceName(instance, "guardian-cache"), "/guardian-cache")]);
     }
     this.startRuntime(target);
     config={...target,phase:"ready"}; this.save(config);
