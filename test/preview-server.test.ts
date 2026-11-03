@@ -22,7 +22,7 @@ const fixtureFiles = [
   "contracts/treasury.js", "contracts/treasury-claims.js", "preview/wallet.js", "wallet.css",
   "contracts/browser-security.js", "preview/secure-setup.js", "preview/secure-guides.js",
   "manifest.webmanifest", "icons/gridlens-192.png", "icons/gridlens-512.png", "icons/gridlens-maskable-512.png", "preview/webapp.js",
-  "contracts/fleet.js", "contracts/shared.js", "contracts/updates.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "preview/shared-telemetry.js", "preview/updates.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",
+  "contracts/fleet.js", "contracts/shared.js", "contracts/updates.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "fleet/pc-drivers.js", "preview/shared-telemetry.js", "preview/updates.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",
   "preview/evidence-clock.js", "preview/refresh-deadline.js", "preview/sidebar.js", "preview/viewport.js", "preview/table-scroll.js", "preview/connection.js",
   "index.html", "styles.css", "preview/main.js", "preview/fixtures.js", "fleet/freshness.js", "fleet/sort.js", "fleet/ip-display.js", "fleet/duration.js", "fleet/market-display.js", "fleet/hardware-display.js", "fleet/host-metadata.js",
   "fleet/node-info.js", "fleet/node-state.js", "fleet/node-api.js", "fleet/status-display.js", "fleet/country-display.js", "preview/state-refresh.js", "preview/info-content.js", "preview/column-help.js",
