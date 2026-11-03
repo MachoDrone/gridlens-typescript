@@ -101,8 +101,12 @@ function treeProof(root: string, path: string): FileProof[] {
 }
 function environmentFingerprint(): string {
   // Hash values, never serialize possible credentials. Changes to effective
-  // process/browser environment invalidate evidence; cwd and shell counters do not.
-  return jsonHash(Object.entries(process.env).filter(([key]) => !key.startsWith("npm_") && !["PWD", "OLDPWD", "SHLVL", "_", "INIT_CWD"].includes(key)).sort(([a], [b]) => a.localeCompare(b)));
+  // process/browser environment invalidate evidence. Invocation identifiers are
+  // provenance of the caller, not test inputs; they change between tool calls.
+  // Keep other CODEX_* configuration and tracing/export settings fingerprinted.
+  const invocationOnly = new Set(["PWD", "OLDPWD", "SHLVL", "_", "INIT_CWD", "CODEX_TOOL_CALL_ID", "CODEX_CALL_ID", "CODEX_TURN_ID",
+    "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_REQUEST_ID", "CODEX_TRACE_ID", "CODEX_SPAN_ID"]);
+  return jsonHash(Object.entries(process.env).filter(([key]) => !key.startsWith("npm_") && !invocationOnly.has(key)).sort(([a], [b]) => a.localeCompare(b)));
 }
 function toolchainFingerprint(root: string): string {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8")) as { engines?: { node?: string; npm?: string } };

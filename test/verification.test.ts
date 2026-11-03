@@ -151,6 +151,32 @@ test("source, selected tests, configuration and environment changes invalidate c
     assert.equal((await validateVerificationReceipt(configured, { root: f.root }, f.runtime)).valid, false);
   } finally { if (previous === undefined) delete process.env.GRIDLENS_VERIFICATION_TEST; else process.env.GRIDLENS_VERIFICATION_TEST = previous; f.clean(); }
 });
+test("new tool-call and turn trace identifiers reuse evidence while effective environment changes still invalidate it", async () => {
+  const f = fixture();
+  const traceKeys = ["CODEX_TOOL_CALL_ID", "CODEX_CALL_ID", "CODEX_TURN_ID", "CODEX_SESSION_ID", "CODEX_THREAD_ID", "CODEX_REQUEST_ID", "CODEX_TRACE_ID", "CODEX_SPAN_ID"];
+  const effective = { TZ: "Pacific/Auckland", NODE_OPTIONS: "--max-old-space-size=2048", PLAYWRIGHT_CHROMIUM_EXECUTABLE: "/generated/changed-browser", CODEX_CI: "generated-changed-configuration" };
+  const saved = new Map([...traceKeys, ...Object.keys(effective)].map(key => [key, process.env[key]]));
+  const restore = (key: string) => { const value = saved.get(key); if (value === undefined) delete process.env[key]; else process.env[key] = value; };
+  try {
+    for (const key of traceKeys) process.env[key] = `generated-first-${key}`;
+    f.write("src/backend/treasury.ts", "export const fixed = true;\n");
+    const plan = await planVerification(f, f.runtime), receipt = await runVerification(plan, f.runtime);
+    const original = JSON.stringify(receipt), executed = f.calls.length;
+    for (const key of traceKeys) process.env[key] = `generated-second-${key}`;
+    const resumed = await planVerification(f, f.runtime);
+    assert.equal(resumed.environmentFingerprint, plan.environmentFingerprint);
+    assert.equal(resumed.planHash, plan.planHash);
+    assert.equal((await validateVerificationReceipt(receipt, { root: f.root }, f.runtime)).valid, true);
+    assert.ok((await runVerification(resumed, f.runtime)).stages.every(stage => stage.reused));
+    assert.equal(f.calls.length, executed);
+    for (const [key, value] of Object.entries(effective)) {
+      process.env[key] = value;
+      assert.equal((await validateVerificationReceipt(receipt, { root: f.root }, f.runtime)).valid, false, key);
+      restore(key);
+    }
+    assert.equal(JSON.stringify(receipt), original, "existing receipt hashes and provenance are never rewritten");
+  } finally { for (const key of saved.keys()) restore(key); f.clean(); }
+});
 test("failed and interrupted stages are not reusable; mutation during execution invalidates the run", async () => {
   const f = fixture();
   try {
