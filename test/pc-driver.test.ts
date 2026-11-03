@@ -71,6 +71,8 @@ async function fixture() {
   const commands: { pcId: string; command: string; input: unknown }[] = []; let gpuReads = 0;
   let read: (pcId: string, command: string) => Promise<{ code: number; stdout: string }> = async () => ({ code: 0, stdout: output });
   function monitor() { return createPcMonitor({ state, vault, observations, contexts: () => contexts, now: () => at,
+    devicesReader: async () => ({ schema: 1, source: "pc-nvidia-smi", observedAtMs: at, bootId: null, status: "unavailable",
+      devices: [], allocations: [], journal: { status: "unavailable", events: [] } }),
     connect: async (computer, _credential, action) => action(async (command, options) => {
       commands.push({ pcId: computer.id, command, input: options?.input }); return read(computer.id, command);
     }), gpuReader: async (_run, association) => { gpuReads++; return { schema: 2, address: association.address, observedAtMs: null, status: "query-failed", gpuUuids: [],

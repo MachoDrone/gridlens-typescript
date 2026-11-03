@@ -159,7 +159,7 @@ test("selected Nosana fields follow compact reference formatting without inventi
         await expect(column.locator(".job-summary-link")).toHaveText("—");
         await expect(column.locator(".job-summary-link")).not.toHaveAttribute("href");
         await expect(column.locator(".job-summary-state")).toHaveCount(0);
-        await expect(column).toHaveAttribute("aria-label", "Jobs: unknown");
+        await expect(column).toHaveAttribute("aria-label", "Job Address: unknown");
         await expect(column.locator(".jobs-expand")).toHaveAttribute("aria-expanded", "false");
       }
       else if (key === "ip") { await expect(column).toHaveText("•"); await expect(column).toHaveClass(/unknown/); }

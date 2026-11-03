@@ -110,7 +110,7 @@ test("the default supplied file renders eight Explorer links and leaves every ot
     await expect(row.locator('.job-summary-link')).toHaveText("—");
     await expect(row.locator('.job-summary-link')).not.toHaveAttribute("href");
     await expect(row.locator('.job-summary-state')).toHaveCount(0);
-    await expect(row.locator('.jobs-cell')).toHaveAttribute("aria-label", "Jobs: unknown");
+    await expect(row.locator('.jobs-cell')).toHaveAttribute("aria-label", "Job Address: unknown");
     await expect(row.locator('.jobs-expand')).toHaveAttribute("aria-expanded", "false");
     await expect(row.locator('td[data-col="api"]')).toHaveText("Populating..");
     const state = row.locator('td[data-col="state"]');
@@ -192,7 +192,7 @@ test("supplied addresses stay separate from samples and refresh never reloads or
   await expect(page.locator('#fleet-rows td[data-col="ip"].unknown')).toHaveCount(8);
   await expect(page.locator('.job-summary-link')).toHaveText(Array(8).fill("—"));
   await expect(page.locator('.job-summary-state')).toHaveCount(0);
-  await expect(page.locator('.jobs-cell[aria-label="Jobs: unknown"]')).toHaveCount(8);
+  await expect(page.locator('.jobs-cell[aria-label="Job Address: unknown"]')).toHaveCount(8);
   const unknownStates = page.locator('#fleet-rows td[data-col="state"][data-state="unknown"][data-state-current="false"]');
   await expect(unknownStates.locator(".state-unknown .state-dots")).toHaveCount(8);
   await expect(unknownStates.getByRole("button", { name: /unknown/ })).toHaveCount(8);

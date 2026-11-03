@@ -47,6 +47,8 @@ export interface SortableFleetRow {
   readonly pc: string;
   /** Verified physical GPU index, not a container-visible index. */
   readonly gpuIndex: number | null;
+  /** Measured physical indices for a host assigned more than one GPU. */
+  readonly gpuIndices?: readonly number[] | null;
   readonly containerName: string;
   /** Exact SOL evidence when available; legacy numeric sample values stay separate. */
   readonly solLamports?: string | null;
@@ -69,6 +71,25 @@ function numberValue(value: unknown): number | null {
 
 function stringValue(value: unknown): string | null {
   return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+function gpuIndices(value: readonly number[] | null | undefined, fallback: unknown): readonly number[] | null {
+  if (value === undefined) {
+    const index = numberValue(fallback);
+    return index === null ? null : [index];
+  }
+  if (!value?.length || value.some(index => !Number.isSafeInteger(index) || index < 0)) return null;
+  return [...new Set(value)].sort((a, b) => a - b);
+}
+
+function compareGpuIndices(left: readonly number[] | null, right: readonly number[] | null, direction: FleetSort["direction"] = "asc"): number {
+  if (left === null) return right === null ? 0 : 1;
+  if (right === null) return -1;
+  for (let index = 0; index < Math.min(left.length, right.length); index++) {
+    const comparison = compareValues(left[index]!, right[index]!, direction);
+    if (comparison) return comparison;
+  }
+  return compareValues(left.length, right.length, direction);
 }
 
 /** Missing readings remain last even when the selected direction is descending. */
@@ -109,7 +130,9 @@ export function sortFleetRows<T extends SortableFleetRow>(
     const rightNos = isNosAmount(b.nosAmount) ? b.nosAmount : null;
     const leftStaked = isStakingAmount(a.stakedNosAmount) ? a.stakedNosAmount : null;
     const rightStaked = isStakingAmount(b.stakedNosAmount) ? b.stakedNosAmount : null;
-    const comparison = sort.column === "rewards" && (a.rewardAmount !== undefined || b.rewardAmount !== undefined)
+    const comparison = sort.column === "gpuID" && (a.gpuIndices !== undefined || b.gpuIndices !== undefined)
+      ? compareGpuIndices(gpuIndices(a.gpuIndices, a.values.gpuID), gpuIndices(b.gpuIndices, b.values.gpuID), sort.direction)
+      : sort.column === "rewards" && (a.rewardAmount !== undefined || b.rewardAmount !== undefined)
       ? compareNosAmounts(a.rewardAmount ?? null, b.rewardAmount ?? null) * (sort.direction === "desc" && a.rewardAmount != null && b.rewardAmount != null ? -1 : 1)
       : sort.column === "sol" && (a.solLamports !== undefined || b.solLamports !== undefined)
       ? compareSolLamports(leftSol, rightSol) * (sort.direction === "desc" && leftSol !== null && rightSol !== null ? -1 : 1)
@@ -120,7 +143,7 @@ export function sortFleetRows<T extends SortableFleetRow>(
       : compareValues(normalize(a.values[sort.column]), normalize(b.values[sort.column]), sort.direction);
     return comparison ||
       compareValues(stringValue(a.pc), stringValue(b.pc)) ||
-      compareValues(numberValue(a.gpuIndex), numberValue(b.gpuIndex)) ||
+      compareGpuIndices(gpuIndices(a.gpuIndices, a.gpuIndex), gpuIndices(b.gpuIndices, b.gpuIndex)) ||
       compareValues(stringValue(a.containerName), stringValue(b.containerName)) ||
       left.index - right.index;
   }).map(({ row }) => row);

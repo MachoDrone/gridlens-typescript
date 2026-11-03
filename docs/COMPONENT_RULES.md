@@ -527,10 +527,13 @@ graceful termination releases its single-writer lock.
   without a reported test provider or measurement timestamp. Do not substitute
   FAST/Libre/Ookla metrics or run a new test to fill missing readings.
 - Backburner: alternate network tests (FAST/Libre/Ookla), GPU model/VRAM/
-  verification/UUID/reported index, CPU core counts, model-specific throughput,
+  workload verification, CPU core counts, model-specific throughput,
   benchmark temperature/wattage, country, GPU runtime version and lastUpdatedAt
   display. Node run time and info.protocol also remain unconnected. Preserve their meaning and scope in docs/DEVELOPMENT.md. Do not populate
-  these fields or repurpose GPU ID from the node-visible index in this slice.
+  these deferred fields. The approved GPU ID implementation joins verified node
+  UUID allocation to the physical PC's measured inventory, including reboot and
+  allocation changes. Never substitute a node-visible index. GPU query failures
+  and dated kernel Xid evidence remain separate from NVIDIA/CUDA version readings.
 - Hosting remains unarranged. Use the supported Nosana interfaces documented at
   https://learn.nosana.com/. Select SDK/API methods or MCP tools per field by
   coverage, batching, efficiency and documented limits; a different transport
@@ -725,9 +728,10 @@ graceful termination releases its single-writer lock.
   Keep real node exports and identifying/contact values out of Git and synthetic
   fixtures. See the field backlog in `docs/DEVELOPMENT.md`.
 - Show red titles for current local observation/mapping
-  dependencies (PC, private PC IP, physical GPU ID). Explain them in Column info;
-  defer collection and transport to the
-  hosted app. Missing backend connectors alone do not imply local-only data.
+  dependencies (PC, private PC IP, physical GPU ID). Explain them in Column info.
+  The installed approved-PC monitor supplies these mappings; an unconnected
+  preview leaves them unknown. Missing backend connectors alone do not imply
+  local-only data.
 - IP display cycles through: hidden → full global/internal
   → global last octet → internal last octet. Keep the leading dot in compact
   IPv4 values. Use separate row-specific address sources; the viewing machine's

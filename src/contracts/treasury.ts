@@ -130,3 +130,32 @@ export function parseTreasuryUnlock(value: unknown): TreasuryUnlock {
     || !integer(value.expiresAtMs)) throw new Error("Invalid Wallet unlock.");
   return { version: 1, unlockToken: value.unlockToken, expiresAtMs: value.expiresAtMs, configuration: parseTreasuryConfiguration(value.configuration) };
 }
+
+/** Wording is editable; these examples never constrain an owner's answer. */
+export const TREASURY_RECOVERY_QUESTIONS = [
+  "What year did you get your first vehicle?",
+  "What make and model was your first vehicle?",
+  "What year did you first rent or own your own home or apartment?",
+  "What year did you get your first phone?",
+  "What model was your first phone?",
+  "What was your first paid job?",
+  "What did you buy with your first earnings?",
+  "What nickname did you give a childhood toy?",
+  "Where was a childhood hiding place you remember?",
+  "What private detail do you remember about a memorable event?",
+  "What detail do you remember about a special trip?",
+  "What unusual phrase did your family use?",
+] as const;
+export interface TreasuryRecoveryQuestions { version: 1; enrolled: boolean; questions: { id: string; question: string }[] }
+export function parseTreasuryRecoveryQuestions(value: unknown, count: 3 | 6): TreasuryRecoveryQuestions {
+  if (!object(value) || Object.keys(value).sort().join() !== "enrolled,questions,version" || value.version !== 1 || typeof value.enrolled !== "boolean"
+    || !Array.isArray(value.questions) || value.questions.length !== (value.enrolled ? count : 0)
+    || value.questions.some(q => !object(q) || Object.keys(q).sort().join() !== "id,question" || !text(q.id, 80) || !text(q.question, 200))
+    || new Set(value.questions.map(q => (q as { id: string }).id)).size !== value.questions.length) throw new Error("Invalid Wallet recovery questions.");
+  return { version: 1, enrolled: value.enrolled, questions: value.questions.map(q => ({ id: (q as { id: string }).id, question: (q as { question: string }).question })) };
+}
+export function parseTreasuryResetGrant(value: unknown): { version: 1; resetToken: string; expiresAtMs: number } {
+  if (!object(value) || Object.keys(value).sort().join() !== "expiresAtMs,resetToken,version" || value.version !== 1
+    || typeof value.resetToken !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value.resetToken) || !integer(value.expiresAtMs)) throw new Error("Invalid Wallet reset grant.");
+  return { version: 1, resetToken: value.resetToken, expiresAtMs: value.expiresAtMs };
+}

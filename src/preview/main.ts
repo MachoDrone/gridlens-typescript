@@ -104,7 +104,7 @@ const COLUMNS = [
   ["duration", "Duration", "Toggle between a compact elapsed/limit bar and time text. Supplied hosts use the assigned Nosana job’s reported start and timeout, with a local one-second clock. After failed or expired reads, the last verified start keeps counting as a darker estimate until superseded. Bounded bars keep their animation preference; elapsed more than five minutes above the last reported limit is red, dimmer when stale. This display grace does not extend the reported limit or change elapsed time. Amber Populating.. means no useful timing yet; a dash with No running assignment in details means current confirmed absence. Expired or failed absence, or newer running evidence, returns to Populating.. without restoring an old counter. When API Offline is currently confirmed and timing is unknown, a dash means timing unavailable; Offline alone does not establish that a job stopped. Known job timings refresh independently of State every 120 seconds while visible; pending discovery follows the permitted retry deadline. Local display validity is 180 seconds. The indexer supplies no indexing-freshness timestamp."],
   ["nodeRuntime", "Node run time", "Node process run time requires its own observation. It cannot be inferred from inventory freshness."],
   ["dailyUptime", "Daily uptime %", "The last completed provider day, with independently verified coverage. No uptime source is connected."],
-  ["latestJob", "Jobs", "The current verified assignment, otherwise the most recently observed job. Expand a host to read up to ten recent indexed jobs. Lifecycle and execution result are separate: Completed does not mean Succeeded. History is loaded on expansion when missing or over five minutes old, through shared request limits. Page and job check times describe our reads, not indexing freshness. History stays in memory and never establishes State or host health. Show all expands the selected roster; Hide all cancels unneeded history work. Explorer links are optional navigation. Online GPU Hosts reads cached history only."],
+  ["latestJob", "Job Address", "The current verified assignment, otherwise the most recently observed job. Toggle between the first five characters and the full address; sorting and Explorer links use the full address. Expand a host to read up to ten recent indexed jobs. Lifecycle and execution result are separate: Completed does not mean Succeeded. History is loaded on expansion when missing or over five minutes old, through shared request limits. Page and job check times describe our reads, not indexing freshness. History stays in memory and never establishes State or host health. Show all expands the selected roster; Hide all cancels unneeded history work. Explorer links are optional navigation. Online GPU Hosts reads cached history only."],
   ["ram", "RAM", "Reported RAM in GB from Nosana metrics. The compact cell rounds to a whole GB; sorting preserves the reported number. This is not current memory usage."],
   ["disk", "Disk", "Reported disk GB from Nosana metrics. This does not establish current free space or usage."],
   ["dl", "DL", "Reported download Mbps from Node Info info.network.download_mbps. This is saved network data, not a speed test triggered by this page. An all-zero default triplet is unknown."],
@@ -113,7 +113,7 @@ const COLUMNS = [
   ["rewards", "Rewards to claim", "The exact claimable host-uptime amount. No rewards source or wallet is connected; no estimate or other balance is substituted."],
   ["nos", "NOS", "Confirmed NOS in each host’s standard associated token account, checked best effort every two minutes while visible. Display rounds to whole NOS; exact six-decimal amounts drive sorting. Additional wallet token accounts, staking and claimable rewards are excluded. A freshly verified absent standard account means zero there; failures remain unknown or retain gray values. Readings expire after three minutes."],
   ["market", "Market", "Toggle between the full reported market label and its first two characters. Sorting uses the full label. Supplied hosts resolve their market address through Nosana’s market lookup, preferring its slug. Missing labels stay unknown. This association does not identify the physical GPU or establish current activity; recommendations are separate."],
-  ["gpuID", "GPU ID", "The current physical GPU index, resolved from measured UUID identity. No hardware observations are connected."],
+  ["gpuID", "GPU ID", "Physical GPU indices resolved from the host's measured UUID allocation and the PC's NVIDIA-SMI identity readings. Multiple allocations show each index. Retained indices stay dimmed with their original times. Warnings describe failed device readings or recorded kernel events; unmatched events remain PC-level evidence. Device responses do not establish GPU health, and job State and driver versions are separate."],
   ["currentNode", "Current Node", "The reported Nosana package version. This does not prove which process is currently running. Prerelease versions are pink; no comparison with the latest release is connected."],
   ["cuda", "CUDA", "Driver-supported CUDA version reported by Nosana. If unavailable, installed backends may use a verified PC NVIDIA-SMI reading; its source and time are in the PC details. This is not the installed toolkit version or proof of GPU health."],
   ["nvidia", "NVIDIA", "Toggle between the major NVIDIA driver version and the full reported version. Sorting uses the full version. If Nosana metadata is unavailable, installed backends may use a verified PC NVIDIA-SMI reading; its source and time are in the PC details. Retained readings stay dimmed. Version information does not establish GPU health; sample scenarios remain synthetic."],
@@ -144,7 +144,7 @@ function rowValue(cell: HTMLTableCellElement, className: string): HTMLButtonElem
 const LOCAL_SOURCE_NOTES: Readonly<Partial<Record<SortColumn, string>>> = {
   pc: "Local machine name or operator-defined PC grouping; its mapping to Nosana nodes is pending.",
   ip: "The internal/private PC address needs local mapping. A global address can come from that node’s Nosana observation and may be shared by several PCs; it must never be replaced with the viewing device’s IP.",
-  gpuID: "The physical GPU index on the PC. Nosana’s exported device index is not yet verified as that physical slot.",
+  gpuID: "Physical GPU indices on the PC, matched by measured UUID allocation; a container-visible device number is not a physical index.",
 };
 
 function columnDescription(key: SortColumn, description: string): string {
@@ -157,6 +157,7 @@ function columnDescription(key: SortColumn, description: string): string {
 const SORT_PREFERENCE_KEY = "gridlens.preview.sort.v1";
 const IP_MODE_PREFERENCE_KEY = "gridlens.preview.ip-mode.v1";
 const HOST_ADDRESS_MODE_PREFERENCE_KEY = "gridlens.preview.host-address-mode.v1";
+const JOB_ADDRESS_MODE_PREFERENCE_KEY = "gridlens.preview.job-address-mode.v1";
 const DURATION_MODE_PREFERENCE_KEY = "gridlens.preview.duration-mode.v1";
 const MARKET_MODE_PREFERENCE_KEY = "gridlens.preview.market-mode.v1";
 const COUNTRY_MODE_PREFERENCE_KEY = "gridlens.preview.country-mode.v1";
@@ -219,6 +220,12 @@ try {
   if (localStorage.getItem(HOST_ADDRESS_MODE_PREFERENCE_KEY) === "full") hostAddressMode = "full";
 } catch {
   // Keep five-character links as the default when storage is unavailable.
+}
+let jobAddressMode: "compact" | "full" = "compact";
+try {
+  if (localStorage.getItem(JOB_ADDRESS_MODE_PREFERENCE_KEY) === "full") jobAddressMode = "full";
+} catch {
+  // Keep the display control usable when storage is unavailable.
 }
 let durationMode: DurationDisplayMode = "bar";
 try {
@@ -498,7 +505,7 @@ for (const [key, label] of COLUMNS) {
   if (LOCAL_SOURCE_NOTES[key]) button.setAttribute("aria-describedby", "local-source-note");
   button.addEventListener("click", () => changeSort(nextFleetSort(activeSort, key)));
   heading.append(button);
-  if (key === "ip" || key === "hostAddress" || key === "duration" || key === "market" || key === "stakedNos" || key === "nvidia" || key === "cpu" || key === "system" || key === "country") {
+  if (key === "ip" || key === "hostAddress" || key === "latestJob" || key === "duration" || key === "market" || key === "stakedNos" || key === "nvidia" || key === "cpu" || key === "system" || key === "country") {
     heading.classList.add("has-display-toggle");
     const toggle = document.createElement("button");
     toggle.type = "button";
@@ -511,6 +518,7 @@ for (const [key, label] of COLUMNS) {
       event.stopPropagation();
       if (key === "ip") ipMode = nextIPMode(ipMode);
       else if (key === "hostAddress") hostAddressMode = hostAddressMode === "compact" ? "full" : "compact";
+      else if (key === "latestJob") jobAddressMode = jobAddressMode === "compact" ? "full" : "compact";
       else if (key === "duration") durationMode = nextDurationMode(durationMode);
       else if (key === "market") marketMode = nextMarketMode(marketMode);
       else if (key === "country") countryMode = countryMode === "compact" ? "full" : "compact";
@@ -519,6 +527,7 @@ for (const [key, label] of COLUMNS) {
       try {
         if (key === "ip") localStorage.setItem(IP_MODE_PREFERENCE_KEY, ipMode);
         else if (key === "hostAddress") localStorage.setItem(HOST_ADDRESS_MODE_PREFERENCE_KEY, hostAddressMode);
+        else if (key === "latestJob") localStorage.setItem(JOB_ADDRESS_MODE_PREFERENCE_KEY, jobAddressMode);
         else if (key === "duration") localStorage.setItem(DURATION_MODE_PREFERENCE_KEY, durationMode);
         else if (key === "market") localStorage.setItem(MARKET_MODE_PREFERENCE_KEY, marketMode);
         else if (key === "country") localStorage.setItem(COUNTRY_MODE_PREFERENCE_KEY, countryMode);
@@ -528,6 +537,7 @@ for (const [key, label] of COLUMNS) {
         // Display changes are still retained in memory for this page session.
       }
       if (key === "ip") renderIPDisplayOnly();
+      else if (key === "latestJob") renderJobAddressDisplayOnly();
       else render();
     });
     heading.append(toggle);
@@ -543,6 +553,7 @@ for (const [key, label] of COLUMNS) {
       action.setAttribute("aria-label", `${label} recent jobs`);
       action.onclick = () => id === "jobs-show-all" ? jobHistory.showAll() : jobHistory.hideAll();
       actions.append(action);
+      if (id === "jobs-show-all") actions.append(heading.querySelector(".column-display-toggle")!);
     }
     heading.append(actions);
   }
@@ -898,6 +909,7 @@ let freshnessRenderPending = false;
 const progressRows = new Map<string, Set<ReadKind>>();
 let pageHidden = false;
 const jobHistory = createJobHistoryView({
+  addressMode: () => jobAddressMode,
   expanded: address => sharedTelemetry.requestHistory(address),
   gpuConditions: (item, now, current) => sharedTelemetry.jobConditions(item, now, current),
   now: () => supplied ? liveNow() : sampleNow,
@@ -2112,6 +2124,25 @@ function renderIPDisplaySetting(): void {
   setText(element("ip-mode-status"), status);
 }
 
+function renderJobAddressDisplaySetting(): void {
+  const status = `Job Address display: ${jobAddressMode === "compact" ? "first five characters" : "full address"}; next: ${jobAddressMode === "compact" ? "full address" : "first five characters"}.`;
+  const toggle = element("latestJob-display-toggle");
+  toggle.title = status;
+  toggle.dataset.mode = jobAddressMode;
+  toggle.setAttribute("aria-pressed", String(jobAddressMode === "full"));
+  setText(element("latestJob-mode-status"), status);
+  document.querySelector<HTMLElement>(".fleet-table")!.dataset.jobAddressMode = jobAddressMode;
+}
+
+/** Address presentation never revisits history expansion, sorting or collection. */
+function renderJobAddressDisplayOnly(): void {
+  renderJobAddressDisplaySetting();
+  for (const row of element("fleet-rows").querySelectorAll<HTMLTableRowElement>(":scope > tr[data-host]")) {
+    const cell = row.querySelector<HTMLTableCellElement>('td[data-col="latestJob"]');
+    if (cell) jobHistory.renderCell(cell, row.dataset.host!, supplied ? undefined : sampleDuration(selected, row.dataset.host!)?.displayedJobId);
+  }
+}
+
 function renderDisplaySettings(): void {
   for (const heading of element("column-headings").querySelectorAll("th[data-col]")) {
     const direction = heading.getAttribute("data-col") === activeSort.column
@@ -2122,6 +2153,7 @@ function renderDisplaySettings(): void {
   const sortLabel = COLUMNS.find(([key]) => key === activeSort.column)?.[1] ?? "PC";
   setText(element("sort-status"), `${sortLabel} · ${activeSort.direction === "asc" ? "ascending" : "descending"}`);
   renderIPDisplaySetting();
+  renderJobAddressDisplaySetting();
   const hostAddressStatus = `Host Address display: ${hostAddressMode === "compact" ? "first five characters" : "full address"}; next: ${hostAddressMode === "compact" ? "full address" : "first five characters"}.`;
   element("hostAddress-display-toggle").title = hostAddressStatus;
   element("hostAddress-display-toggle").dataset.mode = hostAddressMode;
@@ -2508,27 +2540,30 @@ function renderSupplied(): void {
   const connectedRows = new Map([...tbody.querySelectorAll<HTMLTableRowElement>('tr[data-source="supplied"]')]
     .map(row => [row.dataset.host!, row]));
   const rows: HTMLTableRowElement[] = [];
-  const sortableRows = displayedAddresses.map((address) => ({
-    pc: sharedTelemetry.sort(address, nodeProjectionTime).pc, gpuIndex: null, containerName: "", solLamports: solRecords.get(address)?.lamports ?? null,
-    rewardAmount: sharedTelemetry.sort(address, nodeProjectionTime).rewards,
-    nosAmount: nosRecords.get(address)?.amount ?? null,
-    stakedNosAmount: stakingRecords.get(address)?.stake.amount ?? null, values: {
-      hostAddress: address,
-      pc: sharedTelemetry.sort(address, nodeProjectionTime).pc,
-      ip: sharedTelemetry.sort(address, nodeProjectionTime).ip,
-      latestJob: jobHistory.summary(address)?.job.address ?? null,
-      duration: liveDuration(address, nodeProjectionTime).elapsedSeconds,
-      queued: liveQueue(address, nodeProjectionTime).sortValue,
-      ...Object.fromEntries(METADATA_COLUMNS.map((key) => [key, key === "country"
-        ? formatCountry(metadataRecords.get(address)?.values?.country, "full").fullName
-        : metadataValue(metadataRecords.get(address)?.values, key, address)])),
-      state: liveActivity(address, nodeProjectionTime).state.reported,
-      api: liveApi(nodeInfoRecords.get(address), nodeProjectionTime).label,
-      dl: nodeInfoRecords.get(address)?.values?.dl ?? null,
-      ul: nodeInfoRecords.get(address)?.values?.ul ?? null,
-      ping: nodeInfoRecords.get(address)?.values?.ping ?? null,
-    }, address,
-  }));
+  const sortableRows = displayedAddresses.map((address) => {
+    const shared = sharedTelemetry.sort(address, nodeProjectionTime);
+    return {
+      pc: shared.pc, gpuIndex: shared.gpuIndices[0] ?? null, gpuIndices: shared.gpuIndices, containerName: "", solLamports: solRecords.get(address)?.lamports ?? null,
+      rewardAmount: shared.rewards,
+      nosAmount: nosRecords.get(address)?.amount ?? null,
+      stakedNosAmount: stakingRecords.get(address)?.stake.amount ?? null, values: {
+        hostAddress: address,
+        pc: shared.pc,
+        ip: shared.ip,
+        latestJob: jobHistory.summary(address)?.job.address ?? null,
+        duration: liveDuration(address, nodeProjectionTime).elapsedSeconds,
+        queued: liveQueue(address, nodeProjectionTime).sortValue,
+        ...Object.fromEntries(METADATA_COLUMNS.map((key) => [key, key === "country"
+          ? formatCountry(metadataRecords.get(address)?.values?.country, "full").fullName
+          : metadataValue(metadataRecords.get(address)?.values, key, address)])),
+        state: liveActivity(address, nodeProjectionTime).state.reported,
+        api: liveApi(nodeInfoRecords.get(address), nodeProjectionTime).label,
+        dl: nodeInfoRecords.get(address)?.values?.dl ?? null,
+        ul: nodeInfoRecords.get(address)?.values?.ul ?? null,
+        ping: nodeInfoRecords.get(address)?.values?.ping ?? null,
+      }, address,
+    };
+  });
   for (const { address } of sortFleetRows(sortableRows, activeSort)) {
     const row = connectedRows.get(address) ?? document.createElement("tr");
     row.dataset.host = address;

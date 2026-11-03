@@ -4,6 +4,8 @@ import { parseBinding, parseSavedObservation, parsePcNetworkRecord, normalizedIp
 import type { NodeBinding, PcObservation, PcNetworkRecord } from "../fleet/pc-observations.ts";
 import { parsePcDriverRecord } from "../fleet/pc-drivers.ts";
 import type { PcDriverRecord } from "../fleet/pc-drivers.ts";
+import { parsePcGpuRecord } from "../fleet/pc-gpu-devices.ts";
+import type { PcGpuRecord } from "../fleet/pc-gpu-devices.ts";
 
 export const SHARED_VERSION = 1;
 export const SHARED_CAPABILITIES = ["shared-cache-v1", "device-pairing-v1", "pc-associations-v1", "pc-network-v1",
@@ -16,6 +18,7 @@ export interface SharedObservations {
   version: 1; serverId: string; scopeId: string; rosterRevision: string;
   associations: PcAssociation[]; observations: PcObservation[]; networks: PcNetworkRecord[];
   drivers?: PcDriverRecord[];
+  pcGpuDevices?: PcGpuRecord[];
   gpuSummaries?: { address: string; sampleCount: number; fromAtMs: number; toAtMs: number; truncated: boolean }[];
 }
 export function validId(value: unknown): value is string {
@@ -49,6 +52,11 @@ export function parseSharedObservations(value: unknown, serverId: string, contex
   if (drivers && (new Set(drivers.map(row => row.pcId)).size !== drivers.length
     || drivers.some(row => !associations.some(association => association.binding.pcId === row.pcId && association.sshFingerprint === row.sshFingerprint))))
     throw new Error("Driver observation is outside the verified PC identity.");
+  if (input.pcGpuDevices !== undefined && (!Array.isArray(input.pcGpuDevices) || input.pcGpuDevices.length > pcs.size)) throw new Error("Invalid PC GPU inventory.");
+  const pcGpuDevices = input.pcGpuDevices?.map(parsePcGpuRecord);
+  if (pcGpuDevices && (new Set(pcGpuDevices.map(row => row.pcId)).size !== pcGpuDevices.length
+    || pcGpuDevices.some(row => !associations.some(association => association.binding.pcId === row.pcId && association.sshFingerprint === row.sshFingerprint))))
+    throw new Error("GPU observation is outside the verified PC identity.");
   if (new Set(observations.map(row => row.address)).size !== observations.length || new Set(networks.map(row => row.pcId)).size !== networks.length
     || observations.some(row => !bindings.has(row.address) || !sameBinding(row.binding, bindings.get(row.address)!))
     || networks.some(row => !pcs.has(row.pcId))) throw new Error("Observation is outside the verified fleet bindings.");
@@ -59,5 +67,6 @@ export function parseSharedObservations(value: unknown, serverId: string, contex
     throw new Error("Invalid GPU summary.");
   return { version: 1, serverId, scopeId: context.scopeId, rosterRevision: context.rosterRevision, associations, observations, networks,
     ...(drivers ? { drivers } : {}),
+    ...(pcGpuDevices ? { pcGpuDevices } : {}),
     ...(input.gpuSummaries ? { gpuSummaries: structuredClone(input.gpuSummaries) } : {}) };
 }

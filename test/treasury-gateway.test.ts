@@ -16,7 +16,7 @@ import { ownerCall, SharedHttpError, startOwnerSocket } from "../src/backend/ipc
 import { openTreasuryVault } from "../src/backend/treasury-vault.ts";
 import type { TreasuryDriver, TreasuryQuote } from "../src/backend/treasury.ts";
 import { TreasuryPreflightError } from "../src/backend/treasury-errors.ts";
-import { TREASURY_PREFLIGHT_CODES, parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryPreflightFailure, parseTreasuryStatus, parseTreasuryUnlock, treasuryPreflightStatus } from "../src/contracts/treasury.ts";
+import { TREASURY_RECOVERY_QUESTIONS, parseTreasuryRecoveryQuestions, parseTreasuryResetGrant, TREASURY_PREFLIGHT_CODES, parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryPreflightFailure, parseTreasuryStatus, parseTreasuryUnlock, treasuryPreflightStatus } from "../src/contracts/treasury.ts";
 import type { BrowserSecurityPublication } from "../src/contracts/browser-security.ts";
 import { startFleetServer } from "../src/server/application.ts";
 import { NOS_MINT } from "../src/fleet/nos.ts";
@@ -279,7 +279,7 @@ test("real HTTPS and dedicated IPC complete owner setup, bounded review, one sen
 test("HTTP, forged TLS fields, wrong origins and the ordinary read socket cannot acquire financial authority", async t => {
   const f = await fixture(t);
   const redirect = await f.call(false, "/wallet"); assert.equal(redirect.code, 303); assert.equal(redirect.headers.location, "/secure-setup#return=wallet");
-  for (const route of ["status", "setup", "unlock", "configuration", "prepare", "confirm", "operations"]) {
+  for (const route of ["status", "setup", "unlock", "configuration", "prepare", "confirm", "operations", "recovery/status", "recovery/enroll", "recovery/challenge", "recovery/verify", "recovery/reset"]) {
     const body = ["status", "operations"].includes(route) ? undefined : { version: 1, password: PASSWORD, https: true, secure: true };
     assert.equal((await f.call(false, `/api/shared/treasury/${route}`, body,
       { Authorization: `Bearer ${f.operator.token}`, "X-Forwarded-Proto": "https", Forwarded: "proto=https" })).code, 403);
@@ -415,4 +415,37 @@ test("claim host choices exclude failed retained readings and paused permissions
   f.state.set(`monitor:reward-denial:default:${"a".repeat(64)}:${address("9")}`, { approvedAtMs: permission.approvedAtMs });
   assert.deepEqual((await status()).eligibleHosts, []);
   assert.equal(f.claimCalls.prepare, 0); assert.equal(f.claimCalls.dispatch, 0); assert.equal(f.claimCalls.reconcile, 0);
+});
+
+test("HTTPS recovery routes preserve owner state and revoke Wallet and owner-admin sessions including terminal fallback", async t => {
+  const f = await fixture(t, false, false, true); let unlock = await f.setup();
+  const entries = TREASURY_RECOVERY_QUESTIONS.slice(0, 6).map((question, i) => ({ question, answer: `Synthetic recovery answer ${i}` }));
+  assert.equal((await f.treasury("recovery/status")).code, 401);
+  assert.equal((await f.treasury("recovery/enroll", { version: 1, currentPassword: PASSWORD, questions: entries })).code, 401);
+  const enrolled = await f.treasury("recovery/enroll", { version: 1, currentPassword: PASSWORD, questions: entries }, unlock.unlockToken);
+  assert.equal(enrolled.code, 200, enrolled.text);
+  unlock = parseTreasuryUnlock(JSON.parse((await f.treasury("unlock", { version: 1, password: PASSWORD })).text));
+  const admin = await f.treasury("owner-browser", { version: 1 }, unlock.unlockToken);
+  assert.equal(admin.code, 200, admin.text);
+  const owner = { Cookie: f.browser.Cookie + "; " + admin.headers["set-cookie"]![0]!.split(";", 1)[0]! };
+  assert.equal((await f.call(true, "/api/shared/setup", undefined, owner)).code, 200);
+  assert.equal((await f.treasury("recovery/challenge", { version: 1 }, undefined, { Origin: "https://wrong.invalid" })).code, 403);
+  assert.equal((await f.call(true, "/api/shared/treasury/recovery/challenge", { version: 1 }, {})).code, 401);
+  const response = await f.treasury("recovery/challenge", { version: 1 }); assert.equal(response.code, 200, response.text);
+  const challenge = parseTreasuryRecoveryQuestions(JSON.parse(response.text), 3);
+  const answers = challenge.questions.map(q => ({ id: q.id, answer: entries.find(entry => entry.question === q.question)!.answer }));
+  const verified = await f.treasury("recovery/verify", { version: 1, answers }); assert.equal(verified.code, 200, verified.text);
+  const grant = parseTreasuryResetGrant(JSON.parse(verified.text));
+  const reset = await f.treasury("recovery/reset", { version: 1, resetToken: grant.resetToken, newPassword: "new synthetic gateway password" });
+  assert.equal(reset.code, 200, reset.text);
+  assert.equal((await f.treasury("configuration", undefined, unlock.unlockToken)).code, 401);
+  assert.equal((await f.call(true, "/api/shared/setup", undefined, owner)).code, 401);
+  assert.equal((await f.treasury("recovery/reset", { version: 1, resetToken: grant.resetToken, newPassword: "new synthetic gateway password" })).code, 401);
+  unlock = parseTreasuryUnlock(JSON.parse((await f.treasury("unlock", { version: 1, password: "new synthetic gateway password" })).text));
+  assert.equal(unlock.configuration.destinationAddress, DESTINATION);
+  const latestAdmin = await f.treasury("owner-browser", { version: 1 }, unlock.unlockToken);
+  const latestOwner = { Cookie: f.browser.Cookie + "; " + latestAdmin.headers["set-cookie"]![0]!.split(";", 1)[0]! };
+  await ownerCall(f.controlSocket, { operation: "treasury-reset", scopeId: "default" });
+  assert.equal((await f.call(true, "/api/shared/setup", undefined, latestOwner)).code, 401);
+  assert.deepEqual(f.calls, { prepare: 0, sign: 0, submit: 0, reconcile: 0 });
 });

@@ -13,12 +13,14 @@ import { sameBinding } from "../fleet/pc-observations.ts";
 import { DRIVER_REFRESH_MS } from "../fleet/pc-drivers.ts";
 import type { PcDriverObservation } from "../fleet/pc-drivers.ts";
 import { readPcDriver } from "./pc-driver.ts";
+import { GPU_REFRESH_MS } from "../fleet/pc-gpu-devices.ts";
+import { readPcGpuDevices } from "./pc-gpu-devices.ts";
 
 export interface PcPermission {
   version: 1; computer: Computer; associations: PcAssociation[]; rosterRevision: string;
   automaticIp: boolean; rewards: boolean; gpu: boolean; approvedAtMs: number; revokedAtMs: number | null; paused: boolean;
 }
-interface Schedule { ipAt: number; nodeAt: number; rewardsAt: Record<string, number>; gpuAt: Record<string, number>; retryAt: number; driverAt?: number; driverFailures?: number }
+interface Schedule { ipAt: number; nodeAt: number; rewardsAt: Record<string, number>; gpuAt: Record<string, number>; retryAt: number; driverAt?: number; driverFailures?: number; devicesAt?: number }
 interface Target { context: FleetContext; permission: PcPermission; key: string; schedule: Schedule; associations: PcAssociation[] }
 export interface PcMonitorOptions {
   state: PrivateState; vault: CredentialVault; observations: ReturnType<typeof createObservationStore>;
@@ -28,13 +30,14 @@ export interface PcMonitorOptions {
   rewardsReader?: (run: SshRun, association: PcAssociation, now: () => number) => Promise<RewardObservation>;
   gpuReader?: (run: SshRun, association: PcAssociation, now: () => number) => Promise<NodeGpuObservation>;
   driverReader?: (run: SshRun, now: () => number) => Promise<PcDriverObservation>;
+  devicesReader?: typeof readPcGpuDevices;
 }
 
 /** One independent IP slot and three node slots, oldest-due first. Reservations,
  * provider waits and authorization denials are durable before delivery or another
  * command. Explicit setup owns credentials; browsers only receive observations. */
 export function createPcMonitor({ state, vault, observations, contexts, now = Date.now, connect = withSsh,
-  networkReader = readPcNetwork, rewardsReader = readRewards, gpuReader, driverReader = readPcDriver }: PcMonitorOptions) {
+  networkReader = readPcNetwork, rewardsReader = readRewards, gpuReader, driverReader = readPcDriver, devicesReader = readPcGpuDevices }: PcMonitorOptions) {
   const collectGpu = gpuReader ?? createGpuCollector({ state, now });
   const active = new Map<string, Promise<void>>();
   let stopped = false, timer: ReturnType<typeof setInterval> | undefined;
@@ -125,6 +128,20 @@ export function createPcMonitor({ state, vault, observations, contexts, now = Da
           }
           const privileged: SshRun = (command, options) => guarded(credential.sudoPassword === undefined ? command : `/usr/bin/sudo -S -p '' -- ${command}`,
             { ...options, ...(credential.sudoPassword === undefined ? {} : { input: credential.sudoPassword + "\n" }) });
+          if (driverPermission(target) && (schedule(target.key).devicesAt ?? 0) <= now()) {
+            saveSchedule(target, { devicesAt: now() + GPU_REFRESH_MS });
+            const deviceRun = (reader: SshRun): SshRun => (command, options) => {
+              if (!driverPermission(target)) return Promise.reject(new Error("GPU monitoring permission changed."));
+              return reader(command, options);
+            };
+            const associations = observations.read(target.context).associations.filter(row => row.binding.pcId === target.permission.computer.id
+              && row.sshFingerprint === target.permission.computer.fingerprint && target.permission.associations.some(approved => approved.address === row.address
+                && sameBinding(approved.binding, row.binding)));
+            const gpu = await devicesReader(deviceRun(guarded), deviceRun(privileged), associations, now);
+            const latest = driverPermission(target);
+            if (latest) observations.gpuDevices(target.context, { pcId: latest.computer.id, sshFingerprint: latest.computer.fingerprint,
+              approvalAtMs: latest.approvedAtMs, gpu });
+          }
           for (const association of target.permission.associations) {
             const permission = permitted(target, "node"); if (!permission) break;
             const known = observations.read(target.context).associations.find(row => row.address === association.address);
@@ -171,7 +188,7 @@ export function createPcMonitor({ state, vault, observations, contexts, now = Da
       const slots = (kind === "ip" ? 1 : 3) - [...active.keys()].filter(key => key.startsWith(`${kind}:`)).length;
       const due = current.filter(target => permitted(target, kind) && target.schedule.retryAt <= now()
         && (kind === "ip" ? Math.max(target.schedule.ipAt, waits().ip) <= now() : target.schedule.nodeAt <= now()
-          && ((target.schedule.driverAt ?? 0) <= now() && driverPermission(target, false) || target.permission.associations.some(association => target.permission.gpu && (target.schedule.gpuAt[association.address] ?? 0) <= now()
+          && (((target.schedule.driverAt ?? 0) <= now() || (target.schedule.devicesAt ?? 0) <= now()) && driverPermission(target, false) || target.permission.associations.some(association => target.permission.gpu && (target.schedule.gpuAt[association.address] ?? 0) <= now()
             || target.permission.rewards && !rewardDenied(target, association) && waits().rewards <= now() && (target.schedule.rewardsAt[association.address] ?? 0) <= now()))));
       due.sort((a, b) => (kind === "ip" ? a.schedule.ipAt - b.schedule.ipAt : a.schedule.nodeAt - b.schedule.nodeAt) || a.key.localeCompare(b.key));
       for (const target of due.slice(0, Math.max(0, slots))) pending.push(collect(target, kind));

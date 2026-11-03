@@ -48,16 +48,18 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
       if (request.method === "GET" && ["status", "configuration", "operations"].includes(route)) { operation = route; input = {}; }
       else if (request.method === "GET" && /^operations\/[a-zA-Z0-9-]{1,80}$/.test(route)) { operation = "operations"; input = { id: route.slice(11) }; }
       else if (request.method === "GET" && ["claims/status", "claims/operations"].includes(route)) { operation = route.replace("/", "-"); input = {}; }
+      else if (request.method === "GET" && route === "recovery/status") { operation = "recovery-status"; input = {}; }
       else if (request.method === "GET" && route === "guardians/status") { operation = "guardians-status"; input = {}; }
       else if (request.method === "GET" && /^claims\/operations\/[a-zA-Z0-9-]{1,80}$/.test(route)) { operation = "claims-operations"; input = { id: route.slice(18) }; }
       else {
         const allowed: Record<string, string[]> = { setup: ["ticket", "password", "destinationAddress"], unlock: ["password"], lock: [],
           configuration: ["currentPassword", "destinationAddress", "newPassword"], prepare: ["sourceAddress"], confirm: ["planId", "reviewDigest", "idempotencyKey"],
-          "claims/prepare": ["sourceAddress"], "claims/confirm": ["planId", "reviewDigest", "idempotencyKey"], "owner-browser": [], "viewer-invite": [], "guardians/enroll": [] };
+          "claims/prepare": ["sourceAddress"], "claims/confirm": ["planId", "reviewDigest", "idempotencyKey"], "owner-browser": [], "viewer-invite": [], "guardians/enroll": [], "recovery/enroll": ["currentPassword", "questions"], "recovery/challenge": [],
+          "recovery/verify": ["answers"], "recovery/reset": ["resetToken", "newPassword"] };
         if (request.method !== "POST" || !allowed[route]) throw new SharedHttpError(405);
         if (request.headers.origin !== security.httpsOrigin) throw new SharedHttpError(403);
         operation = route === "configuration" ? "configure" : route.replace("/", "-");
-        input = await readJson(request, 8192);
+        input = await readJson(request, route === "recovery/enroll" ? 16_384 : 8192);
         if (input.version !== 1) throw new SharedHttpError(400);
         delete input.version;
         if (Object.keys(input).some(key => !allowed[route]!.includes(key))) throw new SharedHttpError(400);
@@ -80,7 +82,7 @@ export function treasuryGateway(options: TreasuryGatewayOptions) {
           const failure = parseTreasuryPreflightFailure(result);
           sendJson(response, treasuryPreflightStatus(failure.code), failure);
         } else sendJson(response, 200, result);
-      } finally { delete input.password; delete input.currentPassword; delete input.newPassword; delete input.ticket; }
+      } finally { delete input.password; delete input.currentPassword; delete input.newPassword; delete input.ticket; delete input.questions; delete input.answers; delete input.resetToken; }
     } catch (error) {
       if ([`${prefix}prepare`, `${prefix}claims/prepare`].includes(url.pathname) && error instanceof SharedHttpError && error.status === 504)
         sendJson(response, 503, { version: 1, kind: "preflight-failure", code: "preflight-unavailable" });

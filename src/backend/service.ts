@@ -42,7 +42,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
   const source = createSnapshotSource(state.snapshots, { now });
   const guardians = treasuryOptions?.guardians?.(access, observations);
   const setup = createSetup(state, access, observations, now, { ...(vault ? { vault } : {}), ...(scan ? { scan } : {}), ...(inspect ? { inspect } : {}) });
-  const wallet = treasuryOptions ? createTreasury(state, { access, vault: treasuryOptions.vault, driver: treasuryOptions.driver(access, observations), now, protectedMode: access.protectedMode,
+  const wallet = treasuryOptions ? createTreasury(state, { access, vault: treasuryOptions.vault, driver: treasuryOptions.driver(access, observations), now, protectedMode: access.protectedMode, onAuthorityCleared: () => access.clearOwnerBrowsers(),
     ...(guardians ? { guardianStatus(context: FleetContext, destinationAddress: string) {
       const { required, authorityId, state } = guardians.summary(context, destinationAddress);
       return { required, authorityId, state };
@@ -80,7 +80,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
     } catch { /* Retained state recovery does not disable Fleet or the Wallet owner. */ }
   }
   const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : []),
-    ...(wallet ? ["treasury-v1"] : []), ...(claims ? ["treasury-claims-pilot-v1"] : [])];
+    ...(wallet ? ["treasury-v1", "treasury-recovery-questions-v1"] : []), ...(claims ? ["treasury-claims-pilot-v1"] : [])];
   function browserSecurityBinding() {
     const { status } = browserSecurity.read();
     if (!status.available || status.status !== "ready" || status.httpOrigin === null) throw new SharedHttpError(409);

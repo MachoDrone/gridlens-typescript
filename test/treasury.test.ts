@@ -3,6 +3,10 @@ import test from "node:test";
 import { mkdtempSync, rmSync, chmodSync, readFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { generateKeyPairSync } from "node:crypto";
+import { TREASURY_RECOVERY_KEY, normalizeRecoveryAnswer, recoveryDigest } from "../src/backend/treasury-recovery.ts";
+import type { RecoveryRecord } from "../src/backend/treasury-recovery.ts";
+import { parseTreasuryRecoveryQuestions, parseTreasuryResetGrant, TREASURY_RECOVERY_QUESTIONS } from "../src/contracts/treasury.ts";
 import { createAccess } from "../src/backend/access.ts";
 import type { PrivateState } from "../src/backend/access.ts";
 import { createTreasury, TREASURY_LEDGER_KEY } from "../src/backend/treasury.ts";
@@ -29,14 +33,18 @@ function fixture(options: { protectedMode?: boolean; onConfigure?: () => Promise
   const securityState = { ...security };
   let failWrite: ((value: unknown) => boolean) | undefined;
   const state: PrivateState = { get: <T>(key: string) => structuredClone(values.get(key)) as T | undefined,
-    set(key, value) { if (key === TREASURY_LEDGER_KEY && failWrite?.(value)) throw new Error("Synthetic durable failure"); values.set(key, structuredClone(value)); } };
+    set(key, value) { if (key === TREASURY_LEDGER_KEY && failWrite?.(value)) throw new Error("Synthetic durable failure"); values.set(key, structuredClone(value)); },
+    batch(entries) {
+      for (const [key, value] of entries) if (key === TREASURY_LEDGER_KEY && failWrite?.(value)) throw new Error("Synthetic durable failure");
+      for (const [key, value] of entries) values.set(key, structuredClone(value));
+    } };
   let access = createAccess(state, () => at); const context = access.setFleet("main", [source, address("5")]);
   const operator = access.pair(access.createCode("main", "operator").code, "Generated owner browser");
   const employee = access.pair(access.createCode("main", "operator").code, "Generated employee browser");
   const viewer = access.pair(access.createCode("main", "viewer").code, "Generated viewer");
   let vault = openTreasuryVault(root, { create: true });
   const calls = { prepare: 0, sign: 0, submit: 0, reconcile: 0 };
-  let keyReaderCalls = 0;
+  let keyReaderCalls = 0, authorityClears = 0;
   let quoteChange: ((quote: TreasuryQuote) => TreasuryQuote) | undefined;
   let prepareError: unknown, admissionError: unknown;
   let signWait: ReturnType<typeof deferred<void>> | undefined;
@@ -75,7 +83,7 @@ function fixture(options: { protectedMode?: boolean; onConfigure?: () => Promise
     async reconcile() { calls.reconcile++; return { status: receipt, observedAtMs: at, ...(receipt === "confirmed" ? { slot: 42 } : {}),
       ...(providerRetryAtMs === undefined ? {} : { retryAtMs: providerRetryAtMs }) }; },
   };
-  const make = () => createTreasury(state, { access, vault, driver, security: () => securityState, now: () => at,
+  const make = () => createTreasury(state, { access, vault, driver, onAuthorityCleared: () => { authorityClears++; access.clearOwnerBrowsers(); }, security: () => securityState, now: () => at,
     ...(options.onConfigure ? { onConfigure: options.onConfigure } : {}),
     ...(options.protectedMode ? { protectedMode: true, guardianStatus: () => ({ required: true as const, state: guardianState, authorityId: guardianState === "not-enrolled" ? null : "e".repeat(64) }) } : {}) });
   let treasury = make();
@@ -89,7 +97,7 @@ function fixture(options: { protectedMode?: boolean; onConfigure?: () => Promise
     unlockToken: unlock.unlockToken, planId: plan.planId, reviewDigest: plan.reviewDigest, idempotencyKey }) as { operation: TreasuryOperation };
   return { root, values, state, context, operator, employee, viewer, calls, setup, prepare, confirm, request, signature, transactionBase64,
     get treasury() { return treasury; }, get vault() { return vault; }, get access() { return access; },
-    get keyReaderCalls() { return keyReaderCalls; },
+    get keyReaderCalls() { return keyReaderCalls; }, get authorityClears() { return authorityClears; },
     advance(ms: number) { at += ms; }, setQuote(change: (quote: TreasuryQuote) => TreasuryQuote) { quoteChange = change; },
     prepareFailure(error: unknown) { prepareError = error; }, admissionFailure(error: unknown) { admissionError = error; },
     changeTlsIdentity() { securityState.serverCertificateSha256 = "a".repeat(64); },
@@ -514,4 +522,152 @@ test("claim owner bridge revalidates TLS identity, access, expiry and terminal r
       assert.equal(f.calls.sign, 0); assert.equal(f.calls.submit, 0);
     } finally { await f.close(); }
   }
+});
+
+const recoveryEntries = () => TREASURY_RECOVERY_QUESTIONS.slice(0, 6).map((question, i) => ({ question, answer: `Synthetic answer ${i}` }));
+async function recoveryEnroll(f: ReturnType<typeof fixture>) {
+  const unlocked = await f.setup();
+  await f.request("recovery-enroll", { unlockToken: unlocked.unlockToken, currentPassword: password, questions: recoveryEntries() });
+}
+async function recoveryAnswers(f: ReturnType<typeof fixture>) {
+  const challenge = parseTreasuryRecoveryQuestions(await f.request("recovery-challenge"), 3);
+  const entries = recoveryEntries();
+  return challenge.questions.map(q => ({ id: q.id, answer: entries.find(entry => entry.question === q.question)!.answer }));
+}
+async function recoveryGrant(f: ReturnType<typeof fixture>) {
+  return parseTreasuryResetGrant(await f.request("recovery-verify", { answers: await recoveryAnswers(f) }));
+}
+test("recovery selects three once across browsers and restart, normalizes answers, binds and consumes reset grants", async () => {
+  const f = fixture(); const newPassword = "new synthetic owner passphrase";
+  try {
+    await recoveryEnroll(f); const answers = await recoveryAnswers(f);
+    const original = parseTreasuryRecoveryQuestions(await f.request("recovery-challenge"), 3);
+    assert.equal(original.questions.length, 3); assert.equal(new Set(original.questions.map(q => q.id)).size, 3);
+    assert.deepEqual(await f.request("recovery-challenge", { token: f.employee.token }), original);
+    await f.restart(); assert.deepEqual(await f.request("recovery-challenge"), original);
+    const before = structuredClone(f.values.get(TREASURY_LEDGER_KEY)) as Record<string, unknown>;
+    const oldUnlock = await f.request("unlock", { password }) as TreasuryUnlock;
+    const grant = parseTreasuryResetGrant(await f.request("recovery-verify", { answers: answers.map(a => ({ ...a, answer: `  ${a.answer.toUpperCase().replaceAll(" ", "   ")}  ` })) }));
+    const stored = f.values.get(TREASURY_RECOVERY_KEY) as RecoveryRecord;
+    assert.ok(!JSON.stringify(stored).includes(grant.resetToken));
+    for (const answer of answers) assert.ok(!JSON.stringify(stored).includes(answer.answer));
+    await assert.rejects(f.request("recovery-reset", { token: f.employee.token, resetToken: grant.resetToken, newPassword }), denied(401));
+    const clears = f.authorityClears;
+    await f.request("recovery-reset", { resetToken: grant.resetToken, newPassword });
+    assert.equal(f.authorityClears, clears + 1);
+    await assert.rejects(f.request("configuration", { unlockToken: oldUnlock.unlockToken }), denied(401));
+    await assert.rejects(f.request("recovery-reset", { resetToken: grant.resetToken, newPassword }), denied(401));
+    const after = f.values.get(TREASURY_LEDGER_KEY) as Record<string, unknown>;
+    for (const field of ["serverId", "keyId", "scopeId", "configuration", "consumed", "operation"]) assert.deepEqual(after[field], before[field]);
+    assert.equal(Object.keys(after).length, 11);
+    const reopened = await f.request("unlock", { password: newPassword }) as TreasuryUnlock;
+    assert.equal(reopened.configuration.destinationAddress, destination);
+    assert.equal((f.values.get(TREASURY_RECOVERY_KEY) as RecoveryRecord).selectedIds, null);
+  } finally { await f.close(); }
+});
+test("recovery attempts are installation-wide, reserved before KDF, survive restart and do not lock normal passwords", async () => {
+  const f = fixture();
+  try {
+    await recoveryEnroll(f); const answers = await recoveryAnswers(f);
+    const wrong = answers.map(a => ({ ...a, answer: "not the saved answer" }));
+    const first = f.request("recovery-verify", { answers: wrong });
+    assert.equal((f.values.get(TREASURY_RECOVERY_KEY) as RecoveryRecord).attempts.length, 1);
+    await assert.rejects(f.request("recovery-verify", { token: f.employee.token, answers: wrong }), denied(429));
+    await assert.rejects(first, denied(401));
+    for (let i = 1; i < 5; i++) await assert.rejects(f.request("recovery-verify", { token: i % 2 ? f.employee.token : f.operator.token, answers: wrong }), denied(401));
+    await f.restart(); await assert.rejects(f.request("recovery-verify", { answers }), denied(429));
+    assert.ok((await f.request("unlock", { password }) as TreasuryUnlock).unlockToken);
+    f.advance(30 * 60_000 + 1); assert.ok((await f.request("recovery-verify", { answers }) as { resetToken: string }).resetToken);
+  } finally { await f.close(); }
+});
+test("recovery preserves spent history, cancels unsent work and never creates another financial attempt", async () => {
+  const f = fixture(); let release: (() => void) | undefined;
+  try {
+    await recoveryEnroll(f); const unlock = await f.request("unlock", { password }) as TreasuryUnlock;
+    const plan = await f.prepare(unlock); release = f.blockSign(); await f.confirm(unlock, plan);
+    const marker = { attemptedHosts: [source], unresolved: "retained-claim" }; f.values.set("test.claim-history", marker);
+    const grant = await recoveryGrant(f), keyId = f.vault.keyId;
+    await f.request("recovery-reset", { resetToken: grant.resetToken, newPassword: "another synthetic password" });
+    release(); await f.treasury.waitForIdle();
+    assert.equal(f.calls.submit, 0); assert.equal(f.vault.keyId, keyId);
+    const ledger = f.values.get(TREASURY_LEDGER_KEY) as { consumed: boolean; operation: string };
+    assert.equal(ledger.consumed, true); assert.deepEqual(f.values.get("test.claim-history"), marker);
+    const operation = f.vault.open<{ public: TreasuryOperation }>(ledger.operation, `${f.access.serverId}:operation`);
+    assert.equal(operation.public.phase, "cancelled");
+    assert.equal(operation.public.destinationAddress, destination);
+  } finally { release?.(); await f.close(); }
+});
+test("recovery record follows current-runtime password changes, rejects old-runtime changes, and clears on terminal reset", async () => {
+  const f = fixture();
+  try {
+    await recoveryEnroll(f); const original = structuredClone(f.values.get(TREASURY_RECOVERY_KEY));
+    const unlock = await f.request("unlock", { password }) as TreasuryUnlock;
+    await f.request("configure", { unlockToken: unlock.unlockToken, currentPassword: password, newPassword: "changed synthetic password" });
+    assert.equal(parseTreasuryRecoveryQuestions(await f.request("recovery-challenge"), 3).enrolled, true);
+    f.values.set(TREASURY_RECOVERY_KEY, original); await f.restart(); // Old runtime changed only the original eleven-field ledger.
+    assert.deepEqual(await f.request("recovery-challenge"), { version: 1, enrolled: false, questions: [] });
+    assert.deepEqual(f.values.get(TREASURY_RECOVERY_KEY), original, "a stale binding is not repaired");
+    f.treasury.control({ operation: "treasury-reset", scopeId: "main" }); assert.equal(f.values.get(TREASURY_RECOVERY_KEY), null);
+  } finally { await f.close(); }
+});
+test("recovery remains valid when the owner first protects sources but rejects corrupt retained authority", async () => {
+  const f = fixture();
+  try {
+    await recoveryEnroll(f); const expected = await f.request("recovery-challenge");
+    const { publicKey } = generateKeyPairSync("ed25519"), der = publicKey.export({ type: "spki", format: "der" });
+    // authorityDigest hashes DER bytes, while recoveryDigest hashes text: use the exported authority helper below.
+    const { authorityDigest } = await import("../src/backend/owner-authority.ts");
+    f.values.set("financial.owner-authority.v1", { version: 1, authorityId: authorityDigest(der), publicKeyDer: der.toString("base64") });
+    assert.deepEqual(await f.request("recovery-challenge"), expected);
+    f.values.set("financial.owner-authority.v1", { version: 1, authorityId: "corrupt" });
+    await assert.rejects(f.request("recovery-challenge"), denied(503));
+  } finally { await f.close(); }
+});
+test("recovery normalization uses NFKC, stable casing and whitespace, with bounded nonempty answers", () => {
+  assert.equal(normalizeRecoveryAnswer("  ＴＥＳＴ\t Answer  "), "test answer");
+  assert.equal(normalizeRecoveryAnswer("Cafe\u0301"), "café");
+  assert.throws(() => normalizeRecoveryAnswer("  "), denied(400));
+  assert.throws(() => normalizeRecoveryAnswer("x".repeat(257)), denied(400));
+  assert.equal(recoveryDigest("a").length, 64);
+});
+
+test("recovery grants expire, reject changed HTTPS identity and permit only one concurrent reset", async () => {
+  const f = fixture();
+  try {
+    await recoveryEnroll(f); let grant = await recoveryGrant(f);
+    f.advance(300_001);
+    await assert.rejects(f.request("recovery-reset", { resetToken: grant.resetToken, newPassword: "replacement synthetic password" }), denied(401));
+    grant = await recoveryGrant(f); f.changeTlsIdentity();
+    await assert.rejects(f.request("recovery-reset", { resetToken: grant.resetToken, newPassword: "replacement synthetic password" }), denied(401));
+    grant = await recoveryGrant(f);
+    const before = (f.values.get(TREASURY_LEDGER_KEY) as { revision: number }).revision;
+    const first = f.request("recovery-reset", { resetToken: grant.resetToken, newPassword: "replacement synthetic password" });
+    await assert.rejects(f.request("recovery-reset", { resetToken: grant.resetToken, newPassword: "competing synthetic password" }), denied(429));
+    await first;
+    assert.equal((f.values.get(TREASURY_LEDGER_KEY) as { revision: number }).revision, before + 1);
+    assert.equal((f.values.get(TREASURY_RECOVERY_KEY) as RecoveryRecord).grant, null);
+  } finally { await f.close(); }
+});
+test("recovery reset commits password and grant together or poisons admission without changing either", async () => {
+  const f = fixture();
+  try {
+    await recoveryEnroll(f); const grant = await recoveryGrant(f);
+    const before = structuredClone(f.values.get(TREASURY_LEDGER_KEY)), recovery = structuredClone(f.values.get(TREASURY_RECOVERY_KEY));
+    f.failWriteWhen(() => true);
+    await assert.rejects(f.request("recovery-reset", { resetToken: grant.resetToken, newPassword: "replacement synthetic password" }), denied(503));
+    assert.deepEqual(f.values.get(TREASURY_LEDGER_KEY), before); assert.deepEqual(f.values.get(TREASURY_RECOVERY_KEY), recovery);
+    await assert.rejects(f.request("unlock", { password }), denied(503));
+    f.failWriteWhen(() => false); await f.restart();
+    assert.ok((await f.request("unlock", { password }) as TreasuryUnlock).unlockToken);
+  } finally { await f.close(); }
+});
+test("recovery rechecks browser revocation after hashing and never returns a reset grant", async () => {
+  const f = fixture();
+  try {
+    await recoveryEnroll(f); const answers = await recoveryAnswers(f);
+    const pending = f.request("recovery-verify", { answers });
+    f.access.revoke(f.employee.token, f.operator.deviceId);
+    await assert.rejects(pending, denied(401));
+    assert.equal((f.values.get(TREASURY_RECOVERY_KEY) as RecoveryRecord).grant, null);
+  } finally { await f.close(); }
 });

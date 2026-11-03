@@ -11,7 +11,7 @@ import { chromium } from "@playwright/test";
 import type { Browser } from "@playwright/test";
 import { Coordinator } from "../src/installer/coordinator.ts";
 import { parseBrowserSecurityStatus } from "../src/contracts/browser-security.ts";
-import { parseTreasuryConfiguration, parseTreasuryStatus, parseTreasuryUnlock } from "../src/contracts/treasury.ts";
+import { parseTreasuryConfiguration, parseTreasuryRecoveryQuestions, parseTreasuryStatus, parseTreasuryUnlock } from "../src/contracts/treasury.ts";
 import { parseClaimsStatus } from "../src/contracts/treasury-claims.ts";
 import { verifyGateway } from "../src/installer/health.ts";
 import { privateAddress } from "../src/installer/config.ts";
@@ -430,6 +430,9 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const walletDestination = "1".repeat(31) + "9";
     const targetStatus = await call(web.origin, "/api/shared/status");
     const claimsSupported = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("treasury-claims-pilot-v1");
+    const recoverySupported = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("treasury-recovery-questions-v1");
+    const recoveryAnswers = Array.from({ length: 6 }, (_, index) => ({ question: `Generated private memory ${index + 1}?`, answer: `Fixture memory ${index + 1} ${randomBytes(8).toString("hex")}` }));
+    let retainedRecoveryQuestions: { id: string; question: string }[] | undefined;
     interface WalletStateProof { keyDigest: string; configurationDigest: string; verifierDigest: string; keyMatchesLedger: boolean; consumed: boolean; noOperation: boolean;
       claimLedgerDigest: string | null; claimMarkerDigest: string | null }
     const walletStateProof = (): WalletStateProof => {
@@ -457,8 +460,9 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         { cookie: browserCookie, ...(body === undefined ? {} : { body }), ...(unlockToken ? { unlockToken } : {}) });
     };
     const checkWalletHttpDenied = async (): Promise<void> => {
-      for (const path of ["status", "setup", "unlock", "prepare", "confirm", "operations", "claims/status", "claims/operations", "claims/prepare", "claims/confirm"]) {
-        const body = ["status", "operations", "claims/status", "claims/operations"].includes(path) ? undefined : JSON.stringify({ version: 1 });
+      for (const path of ["status", "setup", "unlock", "prepare", "confirm", "operations", "claims/status", "claims/operations", "claims/prepare", "claims/confirm",
+        "recovery/status", "recovery/enroll", "recovery/challenge", "recovery/verify", "recovery/reset"]) {
+        const body = ["status", "operations", "claims/status", "claims/operations", "recovery/status"].includes(path) ? undefined : JSON.stringify({ version: 1 });
         const response = await fetch(new URL(`/api/shared/treasury/${path}`, web.origin), { method: body === undefined ? "GET" : "POST",
           headers: { Origin: web.origin, "X-Forwarded-Proto": "https", ...(body ? { "Content-Type": "application/json" } : {}) },
           ...(body === undefined ? {} : { body }), signal: AbortSignal.timeout(8000) });
@@ -503,6 +507,45 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         ownerBrowserCookie = `${browserCookie}; ${grantedCookie.split(";")[0]}`;
         evidence.protectedOwnerAuthorization = { privateGatewayRole: "viewer", privateHttpAdministrationDenied: true, privateHttpDenialStatus: 401,
           viewerReadAccessPreserved: true, deniedRequestLeftOperationUnchanged: true, walletAuthorizedHttpsOwnerCookie: true, financialRequests: 0 };
+      }
+      if (recoverySupported) {
+        progress("verifying local recovery through the actual HTTPS gateway");
+        assert.equal((await walletCall("recovery/enroll", { version: 1, currentPassword: walletPassword, questions: recoveryAnswers }, walletUnlock)).status, 200);
+        const selected = await walletCall("recovery/challenge", { version: 1 }); assert.equal(selected.status, 200);
+        const questions = parseTreasuryRecoveryQuestions(selected.value, 3).questions;
+        assert.equal((await walletCall("lock", { version: 1 }, walletUnlock)).status, 200);
+        assert.deepEqual(parseTreasuryRecoveryQuestions((await walletCall("recovery/challenge", { version: 1 })).value, 3).questions, questions);
+        const answerSet = questions.map(({ id, question }) => ({ id, answer: recoveryAnswers.find(entry => entry.question === question)!.answer.toUpperCase().replaceAll(" ", "  ") }));
+        const verified = await walletCall("recovery/verify", { version: 1, answers: answerSet }); assert.equal(verified.status, 200);
+        assert.equal(typeof verified.value.resetToken, "string");
+        const priorPassword = walletPassword, recoveredPassword = randomBytes(32).toString("base64url");
+        const resetBody = { version: 1, resetToken: verified.value.resetToken, newPassword: recoveredPassword };
+        assert.equal((await walletCall("recovery/reset", resetBody)).status, 200);
+        assert.equal((await walletCall("recovery/reset", resetBody)).status, 401, "Recovery authorization was reused");
+        assert.equal((await walletCall("unlock", { version: 1, password: priorPassword })).status, 401);
+        assert.equal((await walletCall("configuration", undefined, walletUnlock)).status, 401);
+        if (ownerBrowserCookie) {
+          const before = await readStatus();
+          const denied = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie, body: {} });
+          const readable = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: ownerBrowserCookie });
+          assertViewerUpdateDenied(denied.status, readable.value.role, before, await readStatus());
+        }
+        walletPassword = recoveredPassword;
+        const reopened = await walletCall("unlock", { version: 1, password: walletPassword }); assert.equal(reopened.status, 200);
+        walletUnlock = parseTreasuryUnlock(reopened.value).unlockToken;
+        const afterRecovery = walletStateProof();
+        assert.notEqual(afterRecovery.verifierDigest, initialWalletProof!.verifierDigest);
+        for (const field of ["keyDigest", "configurationDigest", "claimLedgerDigest", "claimMarkerDigest", "consumed", "noOperation"] as const)
+          assert.equal(afterRecovery[field], initialWalletProof![field], `Password recovery changed ${field}`);
+        initialWalletProof = afterRecovery;
+        retainedRecoveryQuestions = parseTreasuryRecoveryQuestions((await walletCall("recovery/challenge", { version: 1 })).value, 3).questions;
+        if (base.treasuryProtocol === 2) {
+          const granted = await walletCall("owner-browser", { version: 1 }, walletUnlock);
+          assert.equal(granted.status, 200); assert.ok(granted.cookie?.startsWith("__Host-gridlens-owner="));
+          ownerBrowserCookie = `${browserCookie}; ${granted.cookie!.split(";")[0]}`;
+        }
+        evidence.walletRecovery = { sixQuestionsEnrolled: true, threeSelected: true, selectionStable: true, normalizationVerified: true,
+          singleUseReset: true, priorPasswordDenied: true, ownerSessionsRevoked: true, identityAndFinancialStatePreserved: true, financialRequests: 0 };
       }
       evidence.walletAfterUpgrade = { sourceCapability: (previous ?? base).treasuryProtocol, targetCapability: base.treasuryProtocol,
         minimumCoordinator: target.release.minimumCoordinator, socketIsolation: "owner and HTTPS gateway only; absent from HTTP gateway and updater",
@@ -559,6 +602,13 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       assert.ok(restoredConfiguration.destinationAddress === walletDestination && restoredConfiguration.hosts.length === 0 && !restoredConfiguration.pilotConsumed,
         "Fixture Wallet configuration was not retained through rollback");
       const activity = await walletCall("operations", undefined, walletUnlock); assert.equal(activity.status, 200); assert.deepEqual(activity.value.operations, []);
+      if (recoverySupported) {
+        assert.deepEqual(parseTreasuryRecoveryQuestions((await walletCall("recovery/challenge", { version: 1 })).value, 3).questions, retainedRecoveryQuestions,
+          "Owner restart or rollback replaced the retained recovery challenge");
+        const recovery = await walletCall("recovery/status", undefined, walletUnlock); assert.equal(recovery.status, 200);
+        assert.equal(parseTreasuryRecoveryQuestions(recovery.value, 6).questions.length, 6);
+        evidence.walletRecoveryAfterRollback = { enrollmentPreserved: true, selectedQuestionsPreserved: true, freshPasswordUnlockVerified: true };
+      }
       if (claimsSupported) {
         const status = await walletCall("claims/status", undefined, walletUnlock); assert.equal(status.status, 200); assert.equal(parseClaimsStatus(status.value).state, "ready");
         evidence.claimsAfterRollback = { ledgerAndMarkerPreserved: true, httpsOwnerStatusVerified: true, claimsRequested: 0 };

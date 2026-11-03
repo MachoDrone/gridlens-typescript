@@ -20,6 +20,7 @@ export const BROWSER_ASSETS = {
   "/preview/secure-guides.js": ["preview/secure-guides.js", "text/javascript; charset=utf-8"],
   "/fleet/pc-observations.js": ["fleet/pc-observations.js", "text/javascript; charset=utf-8"],
   "/fleet/pc-drivers.js": ["fleet/pc-drivers.js", "text/javascript; charset=utf-8"],
+  "/fleet/pc-gpu-devices.js": ["fleet/pc-gpu-devices.js", "text/javascript; charset=utf-8"],
   "/preview/shared-telemetry.js": ["preview/shared-telemetry.js", "text/javascript; charset=utf-8"],
   "/contracts/online-hosts.js": ["contracts/online-hosts.js", "text/javascript; charset=utf-8"],
   "/preview/fleet-config.js": ["preview/fleet-config.js", "text/javascript; charset=utf-8"],

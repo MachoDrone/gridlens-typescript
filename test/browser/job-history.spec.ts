@@ -198,6 +198,16 @@ test("synthetic expansions make no history requests and do not expose live cache
   await expect(page.locator("#fleet-rows > .job-history-row")).toHaveCount(8);
   await expect(page.locator(".job-history-notice").first()).toHaveText("Synthetic example only; live history is not requested.");
   await expect(page.locator(".job-history-table a")).toHaveCount(0);
+  await page.locator("#latestJob-display-toggle").click();
+  await expect(page.locator("#latestJob-display-toggle")).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator(".job-summary-link")).toHaveText(Array(8).fill("—"));
+  await page.locator("#scenario").selectOption("durations");
+  const sample = page.locator('#fleet-rows > tr[data-host="sample-host-1-1"] .job-summary-link');
+  await expect(sample).toHaveText("sample-job-1");
+  await expect(page.locator('#fleet-rows > tr[data-host="sample-host-7-1"] .job-summary-link')).toHaveText("—");
+  await page.locator("#latestJob-display-toggle").click();
+  await expect(sample).toHaveText("sampl");
+  await expect(page.locator(".job-summary-link[href]")).toHaveCount(0);
   expect(requests).toHaveLength(1);
 });
 
@@ -325,6 +335,86 @@ test("current assignment stays the compact summary and historical results do not
   expect(await disclosure!.evaluate(element => element.isConnected)).toBe(true);
   expect(await originalNode!.evaluate(element => element.isConnected)).toBe(true);
   expect(requests).toHaveLength(1);
+});
+
+const jobAddressPreference = "gridlens.preview.job-address-mode.v1";
+async function assignedJobFixture(page: Page) {
+  let offset = 500;
+  let reads = 0;
+  await page.route("**/preview/jobs.json*", route => {
+    reads++;
+    return route.fulfill({ json: {
+      hosts: addresses.map((address, index) => ({ address, job: index < 2 ? {
+        address: jobAddress(offset + 1 - index), node: address, state: "RUNNING", timeStart: Math.floor(checkedAt / 1000) - 30,
+        timeEnd: 0, timeout: 600,
+      } : null, checkedAtMs: checkedAt, validUntilMs: checkedAt + 180_000, failedAtMs: null,
+      retained: false, pending: false, retryAtMs: null, error: null })), serverTimeMs: Date.now(),
+    } });
+  });
+  return { address: (index = 0) => jobAddress(offset + 1 - index), reads: () => reads, change: () => { offset += 10; } };
+}
+
+for (const width of [1440, 390]) test(`Job Address toggles complete links without changing history, sorting or row identity at ${width}px`, async ({ page }) => {
+  await page.setViewportSize({ width, height: 844 });
+  await page.clock.install({ time: checkedAt });
+  const fixture = await assignedJobFixture(page);
+  await page.goto("/");
+  const summary = hostRow(page).locator(".job-summary-link"), toggle = page.locator("#latestJob-display-toggle");
+  await expect(page.getByRole("button", { name: "Sort by Job Address", exact: true })).toBeVisible();
+  await expect(summary).toHaveText(fixture.address().slice(0, 5));
+  const compactWidth = await hostRow(page).locator(".jobs-cell").evaluate(cell => cell.getBoundingClientRect().width);
+  await page.getByRole("button", { name: "Sort by Job Address", exact: true }).click();
+  await expect(page.locator('#fleet-rows > tr[data-host]').first()).toHaveAttribute("data-host", addresses[1]!);
+  await open(page);
+  await source(page).locator("summary").click();
+  const expanded = await panel(page).elementHandle(), sourceNode = await source(page).elementHandle();
+  const priorRequests = requests.length, jobReads = fixture.reads();
+  const comparison = await page.evaluate(() => {
+    const rows = [...document.querySelectorAll('#fleet-rows > tr[data-host]')];
+    const links = rows.map(row => row.querySelector(".job-summary-link"));
+    const button = document.getElementById("latestJob-display-toggle")!;
+    button.focus(); button.click();
+    return { rows: rows.every((row, index) => row === document.querySelectorAll('#fleet-rows > tr[data-host]')[index]),
+      links: rows.every((row, index) => row.querySelector(".job-summary-link") === links[index]), focused: document.activeElement === button };
+  });
+  expect(comparison).toEqual({ rows: true, links: true, focused: true });
+  await expect(summary).toHaveText(fixture.address());
+  await expect(summary).toHaveAttribute("href", `https://explore.nosana.com/jobs/${fixture.address()}`);
+  await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  await expect(source(page)).toHaveAttribute("open", "");
+  expect(await expanded!.evaluate(node => node.isConnected)).toBe(true);
+  expect(await sourceNode!.evaluate(node => node.isConnected)).toBe(true);
+  expect(requests).toHaveLength(priorRequests); expect(fixture.reads()).toBe(jobReads);
+  expect(await page.evaluate(key => localStorage.getItem(key), jobAddressPreference)).toBe("full");
+  const layout = await page.locator('th[data-col="latestJob"]').evaluate(heading => {
+    const controls = [...heading.querySelectorAll(".job-history-actions > button")].map(button => button.getBoundingClientRect());
+    const label = heading.querySelector(".column-label")!.getBoundingClientRect();
+    return { separated: controls.every((rect, index) => index === 0 || controls[index - 1]!.right <= rect.left),
+      above: controls.every(rect => rect.bottom <= label.top), targets: controls.every(rect => rect.width >= 24 && rect.height >= 24) };
+  });
+  expect(layout).toEqual({ separated: true, above: true, targets: true });
+  expect(await summary.evaluate(link => link.getBoundingClientRect().right <= link.closest("td")!.getBoundingClientRect().right)).toBe(true);
+  expect(await hostRow(page).evaluate(row => row.getBoundingClientRect().height)).toBe(34);
+  await toggle.click(); await expect(summary).toHaveText(fixture.address().slice(0, 5));
+  expect(await hostRow(page).locator(".jobs-cell").evaluate(cell => cell.getBoundingClientRect().width)).toBe(compactWidth);
+  await toggle.click();
+  await page.reload(); await expect(summary).toHaveText(fixture.address()); await expect(toggle).toHaveAttribute("aria-pressed", "true");
+  fixture.change();
+  await page.clock.fastForward(121_000);
+  await expect(summary).toHaveText(fixture.address());
+  await expect(hostRow(page, 2).locator(".job-summary-link")).toHaveText("—");
+  expect(requests).toHaveLength(priorRequests);
+});
+
+test("Job Address storage failures keep compact defaults and an in-memory toggle", async ({ page }) => {
+  await page.addInitScript(key => { try { localStorage.setItem(key, "not-a-mode"); } catch {} }, jobAddressPreference);
+  const fixture = await assignedJobFixture(page); await page.goto("/");
+  await expect(hostRow(page).locator(".job-summary-link")).toHaveText(fixture.address().slice(0, 5));
+  await page.addInitScript(() => Object.defineProperty(window, "localStorage", { get() { throw new DOMException("Storage unavailable", "SecurityError"); } }));
+  await page.reload(); await expect(page.locator("#latestJob-display-toggle")).toHaveAttribute("aria-pressed", "false");
+  await page.locator("#latestJob-display-toggle").click();
+  await expect(hostRow(page).locator(".job-summary-link")).toHaveText(fixture.address());
+  expect(requests).toHaveLength(0);
 });
 
 test("historical running and unknown results stay explicit without inventing current activity or success", async ({ page }) => {

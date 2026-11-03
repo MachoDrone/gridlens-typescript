@@ -1,6 +1,9 @@
 import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "node:crypto";
 import type { FleetContext } from "../contracts/fleet.ts";
 import type { DeviceAccess, PrivateState } from "./access.ts";
+import { createTreasuryRecovery, recoveryDigest, TREASURY_RECOVERY_KEY } from "./treasury-recovery.ts";
+import type { RecoveryRecord } from "./treasury-recovery.ts";
+import { parseOwnerAuthority } from "./owner-authority.ts";
 import type { TreasuryVault } from "./treasury-vault.ts";
 import { SharedHttpError } from "./ipc.ts";
 import { TreasuryPreflightError, treasuryPreflightFailure } from "./treasury-errors.ts";
@@ -113,12 +116,13 @@ export function createTreasury(state: PrivateState, options: {
   access: TreasuryAccess; vault: TreasuryVault; driver: TreasuryDriver; security: () => TreasurySecurity;
   now?: () => number; hosts?: (context: FleetContext) => { address: string; label: string }[];
   protectedMode?: boolean;
+  onAuthorityCleared?: () => void;
   guardianStatus?: (context: FleetContext, destinationAddress: string) => TreasuryGuardianStatus;
   onConfigure?: (change: { context: FleetContext; destinationAddress: string }, authorize: () => void) => Promise<void>;
 }) {
   const { access, vault, driver, security } = options, now = options.now ?? Date.now;
   const sessions = new Map<string, Unlock>(), plans = new Map<string, Prepared>(), pending = new Set<Promise<void>>();
-  let ledger: Ledger | undefined, broken = false, closed = false, hashing = false, preparing = false, reconciling = false;
+  let ledger: Ledger | undefined, broken = false, closed = false, hashing = false, preparing = false, reconciling = false, recoveryBusy = false;
   const purpose = (kind: "configuration" | "operation") => `${access.serverId}:${kind}`;
   const initial: Ledger = { version: 1, serverId: access.serverId, keyId: vault.keyId, revision: 0, scopeId: null,
     owner: null, configuration: null, ticket: null, attempts: [], consumed: false, operation: null };
@@ -128,6 +132,36 @@ export function createTreasury(state: PrivateState, options: {
     available();
     try { state.set(TREASURY_LEDGER_KEY, next); ledger = next; }
     catch { broken = true; sessions.clear(); plans.clear(); fail(503); }
+  }
+  function persistRecovery(next: Ledger, record: RecoveryRecord | null): void {
+    available(); if (!state.batch) fail(503);
+    try { state.batch([[TREASURY_LEDGER_KEY, next], [TREASURY_RECOVERY_KEY, record]]); ledger = next; }
+    catch { broken = true; clearAuthority(); fail(503); }
+  }
+  function recoveryBinding(saved = available()): string {
+    if (!saved.owner || !saved.scopeId) fail(401);
+    const retained = state.get<unknown>("financial.owner-authority.v1");
+    try { if (retained !== undefined) parseOwnerAuthority(retained); } catch { return fail(503); }
+    if (options.protectedMode && options.guardianStatus?.(access.fleet(saved.scopeId), destination()).state === "recovery-required") fail(503);
+    return recoveryDigest(JSON.stringify([saved.serverId, saved.keyId, saved.scopeId, saved.owner.salt, saved.owner.hash]));
+  }
+  const recovery = createTreasuryRecovery(state, { now, binding: () => recoveryBinding(), derive });
+  async function recoveryWork<T>(work: () => Promise<T>): Promise<T> {
+    if (recoveryBusy || hashing) fail(429);
+    recoveryBusy = true; try { return await work(); } finally { recoveryBusy = false; }
+  }
+  function preserveRecovery(next: Ledger): void {
+    const profile = recovery.current();
+    if (profile) persistRecovery(next, { ...profile, binding: recoveryBinding(next), grant: null });
+    else persist(next); // A stale old-runtime profile is never automatically rebound.
+  }
+  function cancelUnsent(next: Ledger, reason: string): Ledger {
+    const current = operation();
+    if (current && ["authorized", "signed"].includes(current.public.phase)) {
+      current.public = { ...current.public, phase: "cancelled", error: reason, updatedAtMs: Math.max(now(), current.public.updatedAtMs) };
+      return { ...next, operation: vault.seal(current, purpose("operation")) };
+    }
+    return next;
   }
   function operation(): StoredOperation | null {
     const saved = available(); if (saved.operation === null) return null;
@@ -237,7 +271,7 @@ export function createTreasury(state: PrivateState, options: {
   }
   function reserveAttempt(): void {
     const saved = available(), at = now(), recent = saved.attempts.filter(value => value > at - 60_000);
-    if (!time(at) || saved.attempts.some(value => value > at) || recent.length >= 5 || hashing) fail(429);
+    if (!time(at) || saved.attempts.some(value => value > at) || recent.length >= 5 || hashing || recoveryBusy) fail(429);
     persist({ ...saved, attempts: [...recent, at] });
   }
   async function passwordHash(password: unknown, prior?: PasswordVerifier): Promise<PasswordVerifier> {
@@ -252,7 +286,7 @@ export function createTreasury(state: PrivateState, options: {
       } finally { derived.fill(0); }
     } finally { hashing = false; }
   }
-  function clearAuthority(): void { sessions.clear(); plans.clear(); }
+  function clearAuthority(): void { sessions.clear(); plans.clear(); options.onAuthorityCleared?.(); }
   function transition(id: string, phase: TreasuryOperation["phase"], error: string | null): void {
     const current = operation(); if (!current || current.public.id !== id) fail(503);
     saveOperation({ ...current, public: { ...current.public, phase, error, updatedAtMs: Math.max(now(), current.public.updatedAtMs) } });
@@ -323,7 +357,9 @@ export function createTreasury(state: PrivateState, options: {
   const common = ["operation", "token", "unlockToken", "httpsOrigin", "serverCertificateSha256"];
   const fields: Record<string, string[]> = { status: [], setup: ["ticket", "password", "destinationAddress"], unlock: ["password"], lock: [],
     configuration: [], configure: ["currentPassword", "destinationAddress", "newPassword"], prepare: ["sourceAddress"],
-    confirm: ["planId", "reviewDigest", "idempotencyKey"], operations: ["id"] };
+    confirm: ["planId", "reviewDigest", "idempotencyKey"], operations: ["id"],
+    "recovery-status": [], "recovery-enroll": ["currentPassword", "questions"], "recovery-challenge": [],
+    "recovery-verify": ["answers"], "recovery-reset": ["resetToken", "newPassword"] };
   async function dispatch(body: Record<string, unknown>): Promise<unknown> {
     const name = String(body.operation), allowed = Object.hasOwn(fields, name) ? fields[name] : undefined;
     if (!allowed || Object.keys(body).some(key => !common.includes(key) && !allowed.includes(key))) fail(400);
@@ -361,8 +397,47 @@ export function createTreasury(state: PrivateState, options: {
         || device(body.token).context.rosterRevision !== principal.context.rosterRevision) fail(409);
       return issueUnlock(principal);
     }
+    if (["recovery-challenge", "recovery-verify", "recovery-reset"].includes(name)) {
+      recoveryBinding();
+      const revision = available().revision;
+      const identity = { deviceId: principal.deviceId, securityBinding: securityBinding.hash, revision };
+      const guard = () => {
+        const latest = device(body.token); sameScope(latest);
+        if (available().revision !== revision || latest.deviceId !== principal.deviceId || latest.context.rosterRevision !== principal.context.rosterRevision
+          || binding().hash !== securityBinding.hash) fail(409);
+        recoveryBinding();
+      };
+      if (name === "recovery-challenge") return recovery.challenge();
+      if (name === "recovery-verify") return recoveryWork(() => recovery.verify(body.answers, identity, guard));
+      const profile = recovery.authorizeReset(body.resetToken, identity);
+      if (!validPassword(body.newPassword)) fail(400);
+      const newPassword = body.newPassword;
+      return recoveryWork(async () => {
+        const salt = randomBytes(32).toString("hex"), derived = await derive(newPassword, salt);
+        try {
+          guard(); const latest = recovery.authorizeReset(body.resetToken, identity);
+          if (latest.generation !== profile.generation) fail(409);
+          const next = cancelUnsent({ ...available(), revision: revision + 1, owner: { salt, hash: derived.toString("hex") }, ticket: null },
+            "Password recovery cancelled this unsent operation. The pilot remains consumed.");
+          persistRecovery(next, { ...latest, binding: recoveryBinding(next), selectedIds: null, grant: null });
+          clearAuthority(); return { version: 1, locked: true };
+        } finally { derived.fill(0); }
+      });
+    }
     const authorization = requireUnlock(body);
     if (name === "configuration") return configuration(authorization.principal);
+    if (name === "recovery-status") return recovery.status();
+    if (name === "recovery-enroll") {
+      const revision = available().revision;
+      await passwordHash(body.currentPassword, available().owner!);
+      const guard = () => { requireUnlock(body); if (available().revision !== revision || binding().hash !== securityBinding.hash) fail(409); };
+      guard();
+      return recoveryWork(async () => {
+        const profile = await recovery.enroll(body.questions, guard); guard();
+        persistRecovery({ ...available(), revision: revision + 1 }, profile);
+        clearAuthority(); return { version: 1, locked: true };
+      });
+    }
     if (name === "configure") {
       const saved = available(), revision = saved.revision;
       if (body.destinationAddress === undefined && body.newPassword === undefined || body.destinationAddress !== undefined && !isMetadataAddress(body.destinationAddress)
@@ -379,7 +454,7 @@ export function createTreasury(state: PrivateState, options: {
         });
         requireUnlock(body); if (available().revision !== revision || binding().hash !== securityBinding.hash) fail(409);
       }
-      persist({ ...available(), revision: revision + 1, owner, ticket: null, configuration: vault.seal({ destinationAddress: recipient }, purpose("configuration")) });
+      preserveRecovery({ ...available(), revision: revision + 1, owner, ticket: null, configuration: vault.seal({ destinationAddress: recipient }, purpose("configuration")) });
       clearAuthority(); return { version: 1, locked: true };
     }
     if (name === "prepare") {
@@ -464,7 +539,9 @@ export function createTreasury(state: PrivateState, options: {
         next.operation = vault.seal(current, purpose("operation"));
       }
     }
-    persist(next); clearAuthority();
+    if (body.operation === "treasury-reset" && state.get(TREASURY_RECOVERY_KEY) !== undefined) persistRecovery(next, null);
+    else persist(next);
+    clearAuthority();
     return { version: 1, ticket, expiresAtMs, httpsOrigin: securityBinding.value.httpsOrigin,
       setupUrl: `${securityBinding.value.httpsOrigin}/wallet#ticket=${ticket}` };
   }

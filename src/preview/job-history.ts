@@ -4,6 +4,7 @@ import { JOB_DISPLAY_VALIDITY_MS } from "../fleet/jobs.ts";
 import type { JobRecord } from "../fleet/jobs.ts";
 
 interface Options {
+  addressMode?: () => "compact" | "full";
   now: () => number;
   trusted: () => boolean;
   visible: () => boolean;
@@ -280,7 +281,7 @@ export function createJobHistoryView(options: Options) {
     const link = cell.querySelector<HTMLAnchorElement>(".job-summary-link")!;
     const reading = options.live() ? summary(address) : null;
     const id = reading?.job.address ?? sampleId ?? null;
-    setText(link, id ? id.slice(0, 5) : "—");
+    setText(link, id ? options.addressMode?.() === "full" ? id : id.slice(0, 5) : "—");
     if (reading) {
       link.href = `https://explore.nosana.com/jobs/${encodeURIComponent(reading.job.address)}`;
       link.setAttribute("aria-label", `Open job ${reading.job.address} in Nosana Explorer (new tab)`);
@@ -293,7 +294,7 @@ export function createJobHistoryView(options: Options) {
       ? "Current verified assignment" : "Last observed job; current activity is not confirmed";
     cell.setAttribute("aria-label", reading
       ? `Job ${reading.job.address}. Lifecycle: ${stateLabel(reading.job.state)}. ${evidence}. Checked ${utc(reading.job.checkedAtMs)}.`
-      : sampleId ? `Synthetic job ${sampleId}` : "Jobs: unknown");
+      : sampleId ? `Synthetic job ${sampleId}` : "Job Address: unknown");
     const row = rows.get(address);
     if (row) toggleButton.setAttribute("aria-controls", row.id);
     else toggleButton.removeAttribute("aria-controls");

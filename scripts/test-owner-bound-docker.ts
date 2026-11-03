@@ -193,12 +193,24 @@ export async function runOwnerBoundDocker(options: OwnerBoundDockerOptions, runn
         guardianStatus: () => ({ required: true, state: "ready", authorityId: authorities[index]!.descriptor.authorityId }) });
       owners.push({ treasury, state, vault });
       const request = (operation: string, input: Record<string, unknown> = {}) => treasury.dispatch({ operation, token: browser.token, ...security, ...input });
-      const password = `Generated independent owner ${index} ${randomBytes(16).toString("hex")}`;
+      let password = `Generated independent owner ${index} ${randomBytes(16).toString("hex")}`;
       const ticket = treasury.control({ operation: "treasury-setup", scopeId: context.scopeId }) as { ticket: string };
       let unlock = await request("setup", { ticket: ticket.ticket, password, destinationAddress: source.destinationAddress }) as TreasuryUnlock;
-      return { context, request, treasury, password, get unlock() { return unlock; }, async reset() {
+      return { context, request, treasury, get password() { return password; }, get unlock() { return unlock; }, async reset() {
         const ticket = treasury.control({ operation: "treasury-reset", scopeId: context.scopeId }) as { ticket: string };
         unlock = await request("setup", { ticket: ticket.ticket, password, destinationAddress: source.destinationAddress }) as TreasuryUnlock;
+      }, async recover() {
+        const questions = Array.from({ length: 6 }, (_, n) => ({ question: `Generated recovery memory ${n + 1}?`, answer: `Synthetic answer ${n + 1} ${randomBytes(8).toString("hex")}` }));
+        await request("recovery-enroll", { unlockToken: unlock.unlockToken, currentPassword: password, questions });
+        const challenge = await request("recovery-challenge") as { questions: { id: string; question: string }[] };
+        assert.equal(challenge.questions.length, 3);
+        const proof = await request("recovery-verify", { answers: challenge.questions.map(({ id, question }) => ({ id, answer: questions.find(q => q.question === question)!.answer })) }) as { resetToken: string };
+        const nextPassword = `Recovered fixture owner ${randomBytes(24).toString("hex")}`;
+        await request("recovery-reset", { resetToken: proof.resetToken, newPassword: nextPassword });
+        await assert.rejects(request("configuration", { unlockToken: unlock.unlockToken }));
+        await assert.rejects(request("unlock", { password }));
+        password = nextPassword;
+        unlock = await request("unlock", { password }) as TreasuryUnlock;
       } };
     }
     const ownerA = await owner(0), ownerB = await owner(1);
@@ -228,6 +240,11 @@ export async function runOwnerBoundDocker(options: OwnerBoundDockerOptions, runn
     await ownerA.reset(); await assert.rejects(ownerA.request("prepare", { unlockToken: ownerA.unlock.unlockToken, sourceAddress: source.sourceAddress }));
     const resetHistory = await ownerA.request("operations", { unlockToken: ownerA.unlock.unlockToken, id: accepted.operation.id }) as { operation: TreasuryOperation };
     assert.equal(resetHistory.operation.signature, signature); assert.equal(resetHistory.operation.id, accepted.operation.id);
+    await ownerA.recover();
+    await assert.rejects(ownerA.request("prepare", { unlockToken: ownerA.unlock.unlockToken, sourceAddress: source.sourceAddress }));
+    const recoveredHistory = await ownerA.request("operations", { unlockToken: ownerA.unlock.unlockToken, id: accepted.operation.id }) as { operation: TreasuryOperation };
+    assert.deepEqual(recoveredHistory.operation, resetHistory.operation);
+    assert.equal(pinHash(), originalPin); assert.equal(simulatedSubmissions, 1);
     inspect("container", guardianName, "financial-guardian"); checked(runner, ["stop", "--time", "90", guardianName]); checked(runner, ["start", guardianName]);
     await ready(guardianName, "financial-guardian", "/tmp/guardian.sock"); assert.equal(pinHash(), originalPin);
     const status = await transports[0]!.status(target); assert.equal(status.transferConsumed, true);
@@ -235,7 +252,8 @@ export async function runOwnerBoundDocker(options: OwnerBoundDockerOptions, runn
     assert.notEqual(deniedReset.status, 0); assert.equal(pinHash(), originalPin); assert.equal(simulatedSubmissions, 1);
     (evidence.stages as unknown[]).push({ scope: "production-guardian-serve-and-transport", independentOwnerSetups: 2, foreignOwnerRejected: true,
       wrongDestinationRejected: true, exactOneNosSignatureVerified: true, replayUsedSavedResponse: true, newOperationAfterSpentRejected: true,
-      ownerPasswordResetPreservedSpent: true, guardianRestartPreservedPinAndSpent: true, guardianReinitializationRejected: true, simulatedSubmissions });
+      ownerPasswordResetPreservedSpent: true, questionRecoveryPreservedIdentityHistoryAndSpent: true,
+      guardianRestartPreservedPinAndSpent: true, guardianReinitializationRejected: true, simulatedSubmissions });
 
     // Separate labeled injected-executor container: real crypto, journal and IPC;
     // no production runtime-inspector bypass or spoofed Cmd metadata.

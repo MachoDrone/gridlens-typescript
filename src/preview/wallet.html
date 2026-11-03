@@ -26,12 +26,24 @@
       <p id="destination-help" class="muted small">Enter the public Solana wallet address where you want to receive NOS.</p>
       <label for="setup-password">Owner password</label><div class="password-field"><input id="setup-password" name="new-password" type="password" minlength="12" maxlength="1024" required autocomplete="new-password"><button type="button" data-password="setup-password" aria-controls="setup-password" aria-pressed="false">Show</button></div>
       <label for="setup-password-confirm">Confirm password</label><input id="setup-password-confirm" type="password" minlength="12" maxlength="1024" required autocomplete="new-password">
-      <p class="muted small">Use at least 12 characters. Recovery is available only from the installation PC.</p><button class="primary" type="submit">Save Wallet</button>
+      <p class="muted small">Use at least 12 characters. After saving, set up recovery questions in Wallet to recover a forgotten password here.</p><button class="primary" type="submit">Save Wallet</button>
     </form>
   </section>
   <section id="wallet-locked" hidden aria-labelledby="locked-heading"><h2 id="locked-heading">Unlock Wallet</h2><p>Enter the owner's password to review rewards claims and NOS transfers.</p>
     <form id="wallet-unlock-form"><label for="unlock-password">Owner password</label><div class="password-field"><input id="unlock-password" name="password" type="password" maxlength="1024" required autocomplete="current-password"><button type="button" data-password="unlock-password" aria-controls="unlock-password" aria-pressed="false">Show</button></div><button class="primary" type="submit">Unlock Wallet</button></form>
-    <details><summary>Forgot your password?</summary><p>Use Wallet recovery from the installer on the GridLens installation PC. Recovery locks existing sessions and keeps transaction history.</p></details>
+    <p><button id="wallet-forgot-open" type="button">Forgot password?</button></p>
+  </section>
+  <section id="wallet-forgot" hidden aria-labelledby="forgot-heading"><h2 id="forgot-heading">Recover your Wallet password</h2>
+    <p id="recovery-instructions">Answer all three questions. GridLens keeps these questions until recovery succeeds or the owner changes them.</p>
+    <form id="wallet-recovery-answers-form" hidden><div id="recovery-answers"></div><button class="primary" type="submit">Check answers</button></form>
+    <p><button id="recovery-back" type="button">Back to password</button></p>
+    <details><summary>Need another way?</summary><p>If questions were not configured or you cannot answer them, use Wallet recovery from the installer on the GridLens installation PC. Questions recover a password only while this installation's original owner data is intact.</p></details>
+  </section>
+  <section id="wallet-reset" hidden aria-labelledby="reset-heading"><h2 id="reset-heading">Choose a new password</h2><p id="recovery-reset-expiry"></p>
+    <form id="wallet-recovery-reset-form"><label for="recovery-new-password">New owner password</label><input id="recovery-new-password" type="password" minlength="12" maxlength="1024" required autocomplete="new-password">
+      <label for="recovery-confirm-password">Confirm new owner password</label><input id="recovery-confirm-password" type="password" minlength="12" maxlength="1024" required autocomplete="new-password">
+      <p class="muted small">This locks owner sessions and preserves your receiving wallet, financial history and existing limits.</p><button class="primary" type="submit">Reset password</button></form>
+    <p><button id="recovery-reset-back" type="button">Back to password</button></p>
   </section>
   <div id="wallet-unlocked" hidden>
     <section id="owner-protection" hidden aria-labelledby="owner-protection-heading"><h2 id="owner-protection-heading">Owner protection</h2>
@@ -48,6 +60,13 @@
         <label for="change-confirm-password">Confirm new password</label><input id="change-confirm-password" type="password" maxlength="1024" autocomplete="new-password">
         <p class="muted small">Saving locks Wallet on every device and cancels unsubmitted reviews.</p><button type="submit">Save changes and lock</button>
       </form></details>
+    </section>
+    <section aria-labelledby="recovery-settings-heading"><h2 id="recovery-settings-heading">Password recovery</h2>
+      <p>Save six questions. If you forget your password, GridLens asks three of them. Choose answers staff and other people do not know.</p>
+      <button id="recovery-settings-open" type="button">Set or change recovery questions</button>
+      <form id="wallet-recovery-enroll-form" hidden><p id="recovery-settings-status"></p><p class="muted small">Choose examples, edit their wording, or write your own. Capitalization and extra spaces do not affect answers. Answers are another way to gain owner access.</p><div id="recovery-editor"></div>
+        <label for="recovery-current-password">Current password to save questions</label><input id="recovery-current-password" type="password" maxlength="1024" required autocomplete="current-password">
+        <button class="primary" type="submit">Save six questions and lock</button></form>
     </section>
     <section id="wallet-claims" aria-labelledby="claims-heading">
       <div class="section-heading"><h2 id="claims-heading">Claim Rewards</h2><button id="refresh-claims" type="button">Refresh claim activity</button></div>

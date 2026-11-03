@@ -1,4 +1,4 @@
-import { parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryPreflightFailure, parseTreasuryStatus, parseTreasuryUnlock, treasuryPreflightStatus } from "../contracts/treasury.ts";
+import { TREASURY_RECOVERY_QUESTIONS, parseTreasuryRecoveryQuestions, parseTreasuryResetGrant, parseTreasuryConfiguration, parseTreasuryOperation, parseTreasuryPlan, parseTreasuryPreflightFailure, parseTreasuryStatus, parseTreasuryUnlock, treasuryPreflightStatus } from "../contracts/treasury.ts";
 import type { TreasuryConfiguration, TreasuryOperation, TreasuryPlan, TreasuryPreflightFailure, TreasuryUnlock } from "../contracts/treasury.ts";
 import { claimUnresolved, parseClaimsOperation, parseClaimsPlan, parseClaimsStatus } from "../contracts/treasury-claims.ts";
 import type { TreasuryClaimOperation, TreasuryClaimPlan, TreasuryClaimsStatus } from "../contracts/treasury-claims.ts";
@@ -30,7 +30,9 @@ let guardianPollTimer: ReturnType<typeof setTimeout> | undefined;
 let guardianRunning = false;
 let claimMutationRevision = 0;
 const claimOperations = new Map<string, TreasuryClaimOperation>();
-const views = ["wallet-secure", "wallet-unavailable", "wallet-owner-required", "wallet-recovery", "wallet-setup", "wallet-locked", "wallet-unlocked"];
+let resetGrant: { resetToken: string; expiresAtMs: number } | undefined;
+let recoveryQuestions: { id: string; question: string }[] = [];
+const views = ["wallet-forgot", "wallet-reset","wallet-secure", "wallet-unavailable", "wallet-owner-required", "wallet-recovery", "wallet-setup", "wallet-locked", "wallet-unlocked"];
 
 function message(value: string, kind: "" | "failure" | "success" | "pending" = ""): void {
   const target = element("wallet-message"); target.textContent = value; target.className = kind;
@@ -64,7 +66,7 @@ function controls(): void {
   const protectedSources = configuration?.guardian;
   const protectionReady = !protectedSources || protectedSources.state === "ready";
   element("owner-protection").hidden = !protectedSources || !unlockToken;
-  for (const id of ["guardian-enroll", "guardian-refresh", "guardian-confirm", "owner-admin", "viewer-invite"]) element<HTMLButtonElement>(id).disabled = busy;
+  for (const id of ["guardian-enroll", "guardian-refresh", "guardian-confirm", "owner-admin", "viewer-invite", "wallet-forgot-open", "recovery-settings-open"]) element<HTMLButtonElement>(id).disabled = busy;
   element<HTMLButtonElement>("guardian-enroll").disabled = busy || guardianRunning || protectedSources?.state === "recovery-required";
   element("pilot-finished").hidden = !consumed;
   element<HTMLButtonElement>("prepare-transfer").disabled = busy || consumed || !configuration?.hosts.length || !protectionReady;
@@ -138,8 +140,14 @@ async function json(path: string, body?: Record<string, unknown>, token = unlock
     throw error;
   } finally { clearTimeout(timer); }
 }
-function publicError(error: unknown, action: "transfer" | "claim" = "transfer"): string {
+function publicError(error: unknown, action: "transfer" | "claim" | "recovery" = "transfer"): string {
   if (error instanceof WalletHttpError) {
+    if (action === "recovery") {
+      if (error.status === 429) return "Recovery checks are limited. Wait up to 30 minutes before trying again. Your normal password still works.";
+      if (error.status === 401) return "The answers or recovery authorization were not accepted. Answer all three questions again.";
+      if (error.status === 400) return "Complete all questions and check the password requirements.";
+      if (error.status === 409) return "Wallet changed. Open password recovery again.";
+    }
     if (error.preflight) {
       const failure = error.preflight;
       const retry = failure.retryAtMs !== undefined && failure.retryAtMs > Date.now()
@@ -173,6 +181,9 @@ function publicError(error: unknown, action: "transfer" | "claim" = "transfer"):
 }
 function lock(reason: string, send = true): void {
   clearTimeout(guardianPollTimer); guardianRunning = false; element("guardian-review").hidden = true;
+  resetGrant = undefined; recoveryQuestions = [];
+  element("recovery-answers").replaceChildren(); element("recovery-editor").replaceChildren();
+  element("wallet-recovery-enroll-form").hidden = true;
   const oldToken = unlockToken;
   unlockToken = undefined; configuration = undefined; expiresAtMs = 0; generation++;
   controller.abort(); controller = new AbortController(); clearTimeout(pollTimer); clearTimeout(idleTimer);
@@ -431,7 +442,7 @@ async function refreshOperations(): Promise<void> {
   if (values.length && configuration) { configuration = { ...configuration, pilotConsumed: true }; authorizationUncertain = false; cancelReview(); }
   renderOperations(); controls(); schedulePoll();
 }
-async function act(work: () => Promise<void>, action: "transfer" | "claim" = "transfer"): Promise<void> {
+async function act(work: () => Promise<void>, action: "transfer" | "claim" | "recovery" = "transfer"): Promise<void> {
   if (busy) return;
   const startedGeneration = generation; busy = true; controls(); message("");
   try { await work(); }
@@ -499,6 +510,67 @@ element("wallet-unlock-form").addEventListener("submit", event => {
   event.preventDefault(); const password = element<HTMLInputElement>("unlock-password").value;
   void act(async () => { try { await unlocked(parseTreasuryUnlock(await json("/unlock", { password }, undefined))); } finally { passwordsClear(); } });
 });
+function recoveryInput(parent: HTMLElement, id: string, labelText: string, type: "text" | "password", maximum: number): HTMLInputElement {
+  const label = document.createElement("label"); label.htmlFor = id; label.textContent = labelText;
+  const input = document.createElement("input"); input.id = id; input.type = type; input.maxLength = maximum; input.required = true;
+  input.autocomplete = "off"; input.autocapitalize = "none"; input.spellcheck = false; parent.append(label, input); return input;
+}
+element("recovery-settings-open").addEventListener("click", () => { void act(async () => {
+  const saved = parseTreasuryRecoveryQuestions(await json("/recovery/status"), 6), editor = element("recovery-editor"); editor.replaceChildren();
+  text("recovery-settings-status", saved.enrolled ? "Questions are configured. Enter all six answers to replace them." : "Recovery questions are not configured for this owner password.");
+  for (let i = 0; i < 6; i++) {
+    const field = document.createElement("fieldset"), legend = document.createElement("legend"); legend.textContent = `Question ${i + 1}`; field.append(legend);
+    const label = document.createElement("label"), select = document.createElement("select"); select.id = `recovery-preset-${i}`; label.htmlFor = select.id; label.textContent = "Choose an example or write your own";
+    for (const [index, question] of TREASURY_RECOVERY_QUESTIONS.entries()) { const option = document.createElement("option"); option.value = String(index); option.textContent = question; select.append(option); }
+    const custom = document.createElement("option"); custom.value = "custom"; custom.textContent = "Write my own question"; select.append(custom);
+    field.append(label, select);
+    const question = recoveryInput(field, `recovery-question-${i}`, `Question ${i + 1} wording`, "text", 200);
+    question.minLength = 8; question.value = saved.questions[i]?.question ?? TREASURY_RECOVERY_QUESTIONS[i]!;
+    const preset = TREASURY_RECOVERY_QUESTIONS.findIndex(q => q === question.value); select.value = preset < 0 ? "custom" : String(preset);
+    select.addEventListener("change", () => { question.value = select.value === "custom" ? "" : TREASURY_RECOVERY_QUESTIONS[Number(select.value)]!; question.focus(); });
+    question.addEventListener("input", () => { select.value = "custom"; });
+    recoveryInput(field, `recovery-answer-${i}`, `Answer ${i + 1}`, "password", 256); editor.append(field);
+  }
+  element("wallet-recovery-enroll-form").hidden = false;
+}); });
+element("wallet-recovery-enroll-form").addEventListener("submit", event => {
+  event.preventDefault(); const currentPassword = element<HTMLInputElement>("recovery-current-password").value;
+  const questions = Array.from({ length: 6 }, (_, i) => ({ question: element<HTMLInputElement>(`recovery-question-${i}`).value, answer: element<HTMLInputElement>(`recovery-answer-${i}`).value }));
+  void act(async () => { try { await json("/recovery/enroll", { currentPassword, questions }); lock("Recovery questions saved. Enter your password to open Wallet again.", false); } finally { passwordsClear(); } }, "recovery");
+});
+element("wallet-forgot-open").addEventListener("click", () => { void act(async () => {
+  passwordsClear(); resetGrant = undefined;
+  const challenge = parseTreasuryRecoveryQuestions(await json("/recovery/challenge", {}, undefined), 3);
+  recoveryQuestions = challenge.questions; const target = element("recovery-answers"); target.replaceChildren();
+  text("recovery-instructions", challenge.enrolled ? "Answer all three questions. These stay the same until recovery succeeds or the owner changes them."
+    : "Recovery questions are not available for this owner password. Use the installation PC fallback below.");
+  for (const [i, question] of challenge.questions.entries()) recoveryInput(target, `recovery-response-${i}`, question.question, "password", 256);
+  element("wallet-recovery-answers-form").hidden = !challenge.enrolled; show("wallet-forgot");
+}, "recovery"); });
+element("wallet-recovery-answers-form").addEventListener("submit", event => {
+  event.preventDefault(); const answers = recoveryQuestions.map((q, i) => ({ id: q.id, answer: element<HTMLInputElement>(`recovery-response-${i}`).value }));
+  void act(async () => { try {
+    const grant = parseTreasuryResetGrant(await json("/recovery/verify", { answers }, undefined));
+    if (grant.expiresAtMs <= Date.now()) throw new Error("Expired recovery authorization."); resetGrant = grant;
+    text("recovery-reset-expiry", `Set your new password before ${new Date(grant.expiresAtMs).toLocaleTimeString()}.`); show("wallet-reset");
+  } finally { passwordsClear(); } }, "recovery");
+});
+element("wallet-recovery-reset-form").addEventListener("submit", event => {
+  event.preventDefault(); const newPassword = element<HTMLInputElement>("recovery-new-password").value;
+  if (newPassword !== element<HTMLInputElement>("recovery-confirm-password").value) { message("The new passwords do not match.", "failure"); return; }
+  if (!resetGrant || resetGrant.expiresAtMs <= Date.now()) { lock("Recovery authorization expired. Choose Forgot password to try again.", false); return; }
+  const resetToken = resetGrant.resetToken;
+  void act(async () => { try {
+    await json("/recovery/reset", { resetToken, newPassword }, undefined);
+    lock("Password reset. Enter your new password to open Wallet.", false);
+  } catch (error) {
+    if (!(error instanceof WalletHttpError) && !(error instanceof WalletSuperseded)) {
+      lock("The reset response was lost. Try your new password; if it does not work, start password recovery again.", false); return;
+    }
+    throw error;
+  } finally { passwordsClear(); } }, "recovery");
+});
+for (const id of ["recovery-back", "recovery-reset-back"]) element(id).addEventListener("click", () => lock("", false));
 element("wallet-configuration-form").addEventListener("submit", event => {
   event.preventDefault(); const currentPassword = element<HTMLInputElement>("change-current-password").value;
   const newPassword = element<HTMLInputElement>("change-new-password").value;

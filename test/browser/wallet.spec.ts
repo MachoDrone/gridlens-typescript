@@ -14,6 +14,7 @@ const PASSWORD = "isolated-wallet-owner-password";
 const SIGNATURE = "1".repeat(88);
 interface RequestRecord { path: string; method: string; body: Record<string, unknown> | undefined; token: string | undefined }
 interface Fixture {
+  password: string; recoveryQuestions: { id: string; question: string; answer: string }[]; recoveryLimited: boolean; loseResetReply: boolean;
   configured: boolean; consumed: boolean; destination: string; requests: RequestRecord[]; operations: TreasuryOperation[];
   confirmCalls: number; lockCalls: number; loseConfirmReply: boolean; rejectUnlock: boolean;
   quoteDestination: string | undefined; amount: string; lastPlan: TreasuryPlan | undefined; clockOffsetMs: number;
@@ -21,7 +22,7 @@ interface Fixture {
   prepareFailure: { status: number; value: unknown } | undefined; confirmFailure: { status: number; value: unknown } | undefined;
 }
 async function fixture(page: Page): Promise<Fixture> {
-  const state: Fixture = { configured: true, consumed: false, destination: DESTINATION, requests: [], operations: [], confirmCalls: 0,
+  const state: Fixture = { password: PASSWORD, recoveryQuestions: [], recoveryLimited: false, loseResetReply: false, configured: true, consumed: false, destination: DESTINATION, requests: [], operations: [], confirmCalls: 0,
     lockCalls: 0, loseConfirmReply: false, rejectUnlock: false, quoteDestination: undefined, amount: "1000000", lastPlan: undefined, clockOffsetMs: 0,
     prepareWait: undefined, unlockWait: undefined, prepareFailure: undefined, confirmFailure: undefined };
   const configuration = (): TreasuryConfiguration => ({ version: 1, revision: 1, destinationAddress: state.destination,
@@ -46,11 +47,36 @@ async function fixture(page: Page): Promise<Fixture> {
     if (path === "/status") { await send({ version: 1, supported: true, state: state.configured ? "locked" : "setup-required", pilotConsumed: state.consumed, serverId: "synthetic-server", scopeId: "synthetic-fleet", revision: 1 }); return; }
     if (path === "/unlock" || path === "/setup") {
       if (state.unlockWait) await state.unlockWait;
-      if (state.rejectUnlock || body?.password !== PASSWORD || path === "/setup" && body?.ticket !== TICKET) { await send({ version: 1, error: "denied" }, 403); return; }
+      if (state.rejectUnlock || body?.password !== state.password || path === "/setup" && body?.ticket !== TICKET) { await send({ version: 1, error: "denied" }, 403); return; }
       if (path === "/setup") { state.configured = true; state.destination = String(body?.destinationAddress); }
       await send({ version: 1, unlockToken: TOKEN, expiresAtMs: Date.now() + 300_000, configuration: configuration() }); return;
     }
+    if (path === "/recovery/challenge") {
+      await send({ version: 1, enrolled: state.recoveryQuestions.length === 6, questions: [4, 0, 2].flatMap(i => {
+        const q = state.recoveryQuestions[i]; return q ? [{ id: q.id, question: q.question }] : [];
+      }) }); return;
+    }
+    if (path === "/recovery/verify") {
+      if (state.recoveryLimited) { await send({ version: 1, error: "limited" }, 429); return; }
+      const answers = body?.answers as { id: string; answer: string }[];
+      if (!answers || answers.length !== 3 || answers.some(a => state.recoveryQuestions.find(q => q.id === a.id)?.answer !== a.answer)) { await send({ version: 1, error: "denied" }, 401); return; }
+      await send({ version: 1, resetToken: "synthetic-reset-grant".padEnd(43, "r"), expiresAtMs: Date.now() + 300_000 }); return;
+    }
+    if (path === "/recovery/reset") {
+      if (body?.resetToken !== "synthetic-reset-grant".padEnd(43, "r")) { await send({ version: 1, error: "denied" }, 401); return; }
+      state.password = String(body.newPassword);
+      if (state.loseResetReply) { await route.abort("failed"); return; }
+      await send({ version: 1, locked: true }); return;
+    }
     if (token !== TOKEN) { await send({ version: 1, error: "denied" }, 403); return; }
+    if (path === "/recovery/status") {
+      await send({ version: 1, enrolled: state.recoveryQuestions.length === 6, questions: state.recoveryQuestions.map(({ id, question }) => ({ id, question })) }); return;
+    }
+    if (path === "/recovery/enroll") {
+      const questions = body?.questions as { question: string; answer: string }[];
+      if (body?.currentPassword !== state.password || questions.length !== 6) { await send({ version: 1, error: "denied" }, 401); return; }
+      state.recoveryQuestions = questions.map((q, i) => ({ ...q, id: `saved-question-${i}` })); await send({ version: 1, locked: true }); return;
+    }
     if (path === "/claims/status") { await send({ version: 1, supported: true, state: "ready", unresolvedOperationId: null, attemptedHosts: [], eligibleHosts: [] }); return; }
     if (path === "/claims/operations") { await send({ version: 1, operations: [], total: 0 }); return; }
     if (path === "/lock") { state.lockCalls++; await send({ version: 1, locked: true }); return; }
@@ -353,4 +379,67 @@ test("Wallet sidebar item is installed-only and keeps the existing expanded and 
   await expect(wallet.locator(".sidebar-label")).toBeHidden(); await expect(wallet.locator("svg")).toBeVisible();
   await expect.poll(async () => (await page.locator("#sidebar").boundingBox())!.width).toBeLessThanOrEqual(56.1);
   await wallet.focus(); await expect(wallet).toBeFocused();
+});
+
+test("Wallet enrolls six editable recovery questions and recovers through three prompts without changing the destination", async ({ page }) => {
+  const state = await fixture(page); await unlock(page);
+  await page.getByRole("button", { name: "Set or change recovery questions" }).click();
+  await expect(page.locator("#recovery-editor fieldset")).toHaveCount(6);
+  await expect(page.locator("#recovery-preset-0 option")).toHaveCount(13);
+  await page.locator("#recovery-preset-0").selectOption("custom");
+  await page.getByLabel("Question 1 wording", { exact: true }).fill("What detail do I remember about our first event?");
+  for (let i = 0; i < 6; i++) await page.getByLabel(`Answer ${i + 1}`, { exact: true }).fill(`Private answer ${i}`);
+  await page.getByLabel("Current password to save questions").fill(PASSWORD);
+  await page.getByRole("button", { name: "Save six questions and lock" }).click();
+  await expect(page.locator("#wallet-locked")).toBeVisible();
+  expect(state.recoveryQuestions).toHaveLength(6);
+  expect(state.recoveryQuestions[0]?.question).toBe("What detail do I remember about our first event?");
+  await page.getByRole("button", { name: "Forgot password?", exact: true }).click();
+  await expect(page.locator("#recovery-answers input")).toHaveCount(3);
+  const firstPrompts = await page.locator("#recovery-answers label").allTextContents();
+  await page.reload(); await page.getByRole("button", { name: "Forgot password?", exact: true }).click();
+  await expect(page.locator("#recovery-answers label")).toHaveText(firstPrompts);
+  for (const i of [4, 0, 2]) await page.getByLabel(state.recoveryQuestions[i]!.question, { exact: true }).fill(`Private answer ${i}`);
+  await page.getByRole("button", { name: "Check answers", exact: true }).click();
+  await expect(page.locator("#wallet-reset")).toBeVisible();
+  expect(await page.locator("#recovery-answers input").evaluateAll(nodes => nodes.every(node => (node as HTMLInputElement).value === ""))).toBe(true);
+  await page.getByLabel("New owner password", { exact: true }).fill("a changed synthetic password");
+  await page.getByLabel("Confirm new owner password", { exact: true }).fill("a changed synthetic password");
+  await page.getByRole("button", { name: "Reset password", exact: true }).click();
+  await expect(page.locator("#wallet-locked")).toBeVisible();
+  await page.getByLabel("Owner password", { exact: true }).filter({ visible: true }).fill(state.password);
+  await page.getByRole("button", { name: "Unlock Wallet", exact: true }).click();
+  await expect(page.locator("#receiving-address")).toHaveText(DESTINATION);
+  expect(state.requests.filter(r => r.path === "/configuration" && r.method === "POST")).toHaveLength(0);
+  expect(await page.evaluate(() => ({ local: Object.keys(localStorage), session: Object.keys(sessionStorage), url: location.href }))).toEqual({ local: [], session: [], url: `${ORIGIN}/wallet` });
+  expect(state.confirmCalls).toBe(0);
+});
+test("Wallet recovery explains unavailable questions and recovery-only pacing without partial answer feedback", async ({ page }) => {
+  const state = await fixture(page); await page.goto(`${ORIGIN}/wallet`);
+  await page.getByRole("button", { name: "Forgot password?", exact: true }).click();
+  await expect(page.locator("#recovery-instructions")).toContainText("not available");
+  await expect(page.getByRole("button", { name: "Check answers", exact: true })).toBeHidden();
+  state.recoveryQuestions = Array.from({ length: 6 }, (_, i) => ({ id: `saved-question-${i}`, question: `Synthetic private question ${i}?`, answer: `Private answer ${i}` }));
+  await page.getByRole("button", { name: "Back to password", exact: true }).filter({ visible: true }).click();
+  await page.getByRole("button", { name: "Forgot password?", exact: true }).click();
+  for (const i of [4, 0, 2]) await page.getByLabel(`Synthetic private question ${i}?`, { exact: true }).fill(i === 0 ? "wrong answer" : `Private answer ${i}`);
+  await page.getByRole("button", { name: "Check answers", exact: true }).click();
+  await expect(page.locator("#wallet-message")).toHaveText("The answers or recovery authorization were not accepted. Answer all three questions again.");
+  state.recoveryLimited = true;
+  for (const i of [4, 0, 2]) await page.getByLabel(`Synthetic private question ${i}?`, { exact: true }).fill(`Private answer ${i}`);
+  await page.getByRole("button", { name: "Check answers", exact: true }).click();
+  await expect(page.locator("#wallet-message")).toContainText("30 minutes");
+  await expect(page.locator("#wallet-message")).toContainText("normal password still works");
+});
+test("Wallet recovery gives a safe next step if the reset response is lost", async ({ page }) => {
+  const state = await fixture(page); state.loseResetReply = true;
+  state.recoveryQuestions = Array.from({ length: 6 }, (_, i) => ({ id: `saved-question-${i}`, question: `Synthetic private question ${i}?`, answer: `Private answer ${i}` }));
+  await page.goto(`${ORIGIN}/wallet`); await page.getByRole("button", { name: "Forgot password?", exact: true }).click();
+  for (const i of [4, 0, 2]) await page.getByLabel(`Synthetic private question ${i}?`, { exact: true }).fill(`Private answer ${i}`);
+  await page.getByRole("button", { name: "Check answers", exact: true }).click();
+  await page.getByLabel("New owner password", { exact: true }).fill("another synthetic password");
+  await page.getByLabel("Confirm new owner password", { exact: true }).fill("another synthetic password");
+  await page.getByRole("button", { name: "Reset password", exact: true }).click();
+  await expect(page.locator("#wallet-message")).toContainText("Try your new password");
+  expect(state.requests.filter(r => r.path === "/recovery/reset")).toHaveLength(1);
 });

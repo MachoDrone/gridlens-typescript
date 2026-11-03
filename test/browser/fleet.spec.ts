@@ -5,7 +5,7 @@ import { SYNTHETIC_HOST_ADDRESSES } from "../fixtures/host-addresses.ts";
 
 const labels = [
   "Staked NOS", "Status", "PC", "IP", "Host Address", "SOL", "API", "State", "Queued", "Duration",
-  "Node run time", "Daily uptime %", "Jobs", "RAM",
+  "Node run time", "Daily uptime %", "Job Address", "RAM",
   "Disk", "DL", "UL", "Ping", "Rewards to claim", "NOS", "Market",
   "GPU ID", "Current Node", "CUDA", "NVIDIA", "CPU", "System", "Country",
 ];

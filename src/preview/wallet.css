@@ -50,3 +50,6 @@ dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 :focus-visible { outline: 3px solid #75bbff; outline-offset: 3px; }
 [hidden] { display: none !important; }
 @media (max-width: 440px) { body { padding: 12px; } section { padding: 14px; } h1 { font-size: 24px; } header nav { gap: 8px; } .actions > * { flex: 1; } }
+
+#recovery-editor fieldset { min-width: 0; margin: 20px 0; padding: 12px; border: 1px solid #354357; border-radius: 6px; }
+#recovery-editor legend { color: #44dd83; padding: 0 6px; }

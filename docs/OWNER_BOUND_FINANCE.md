@@ -71,6 +71,20 @@ from its guardian operation and checked by the existing strict finalized-receipt
 validator. Missing keys, pins or journals require recovery, never automatic
 reinitialization.
 
+Wallet password recovery can use six owner-configured questions, with three
+persistently selected for each recovery. Their salted answer verifiers and the
+single-use reset grant live in a separate retained owner-ledger namespace. The
+recovery binding uses the stable server, fleet scope, vault-key identity and
+salted password verifier; a legitimate first source enrollment does not invalidate
+it. Existing Ed25519 authority descriptors and guardian recovery status are
+independently checked. Recovery never creates or replaces that signing identity,
+source pins or financial history, and missing/corrupt retained owner state stays
+closed. Browser reset preserves the destination and spent records, invalidates
+owner sessions and cancels only eligible unsent work. This is local password
+recovery, not a full installation backup or a total-PC-loss restore mechanism.
+See [Wallet recovery](WALLET_PILOT.md) for attempts, question normalization and
+older-runtime behavior.
+
 Changing the receiving wallet saves the new configuration and blocks finance.
 Unlock and use **Protect sources** to synchronize the policy through the
 resumable batch. A lost response retains the pending synchronization record;

@@ -7,6 +7,7 @@ import type { JobHistoryItem } from "../fleet/job-history.ts";
 import { formatIPDisplay } from "../fleet/ip-display.ts";
 import type { IPDisplayMode } from "../fleet/ip-display.ts";
 import { DRIVER_FRESH_MS, pcDriverView } from "../fleet/pc-drivers.ts";
+import { GPU_FRESH_MS, pcGpuView } from "../fleet/pc-gpu-devices.ts";
 
 /** Optional installed-backend data adapter. Never enabled by the development preview. */
 export function createSharedTelemetry(changed: () => void, now = Date.now) {
@@ -20,6 +21,11 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     if (!enabled || document.hidden) return;
     const at = now(), deadlines = (data?.drivers ?? []).flatMap(row => row.driver.status === "ok" && row.driver.observedAtMs + DRIVER_FRESH_MS > at
       ? [row.driver.observedAtMs + DRIVER_FRESH_MS] : []);
+    for (const row of data?.pcGpuDevices ?? []) {
+      for (const observed of [row.gpu.observedAtMs, ...row.gpu.devices.map(device => device.observedAtMs), ...row.gpu.allocations.map(allocation => allocation.observedAtMs)]) {
+        if (observed + GPU_FRESH_MS > at) deadlines.push(observed + GPU_FRESH_MS);
+      }
+    }
     if (deadlines.length) driverExpiryTimer = setTimeout(() => { changed(); scheduleDriverExpiry(); }, Math.max(1, Math.min(...deadlines) - at));
   }
   function driver(address: string, at: number) {
@@ -27,6 +33,51 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     const association = data?.associations.find(row => row.address === address);
     const record = data?.drivers?.find(row => row.pcId === association?.binding.pcId && row.sshFingerprint === association?.sshFingerprint);
     return record && association ? { ...pcDriverView(record, at, failed), pcName: association.name } : undefined;
+  }
+  function gpu(address: string, at: number) {
+    const association = data?.associations.find(row => row.address === address);
+    const record = data?.pcGpuDevices?.find(row => row.pcId === association?.binding.pcId && row.sshFingerprint === association?.sshFingerprint);
+    if (!enabled || !record || !association) return undefined;
+    const view = pcGpuView(record, association, at, failed);
+    const utc = (time: number | null) => time === null ? "unknown" : new Date(time).toISOString();
+    const identity = view.current ? `Measured physical GPU indices: ${view.indices.join(", ")}.`
+      : view.indices.length ? `Partially measured physical GPU indices: ${view.indices.join(", ")}; complete allocation is unconfirmed.`
+        : "Current physical GPU identity is unknown.";
+    const retained = view.retainedIndices.length ? ` Last measured indices: ${view.retainedIndices.join(", ")}; retained, not confirmed current.` : "";
+    const retainedEvidence = view.retainedDevices.map(device => `Retained physical GPU ${device.index}: ${device.uuid}, measured ${utc(device.observedAtMs)}${device.pciBusId ? `; PCI ${device.pciBusId}` : ""}.`).join(" ");
+    const devices = view.devices.map(device => `${device.uuid}: ${device.status === "responds" ? `responded as physical GPU ${device.index}` : device.status.replaceAll("-", " ")}; checked ${utc(device.observedAtMs)}${device.pciBusId ? `; PCI ${device.pciBusId}` : ""}.`).join(" ");
+    const events = view.events.map(event => `Recorded Xid ${event.xid} for ${event.gpuUuid} at ${utc(event.atMs)}; PCI ${event.pciBusId}; boot ${event.bootId}.`).join(" ");
+    const pcEvents = view.pcEvents.map(event => `PC-level Xid ${event.xid} at ${utc(event.atMs)}; PCI ${event.pciBusId}; boot ${event.bootId}; device identity is unmatched, so this event is not assigned to this host.`).join(" ");
+    const warning = view.partial || view.devices.some(device => device.status !== "responds") || view.events.length > 0 || view.pcEvents.length > 0
+      || view.allocationStatus !== "ok" || view.journalStatus !== "ok" || record.gpu.status !== "ok" && (record.gpu.status !== "partial" || !view.current);
+    const description = `${identity}${retained} Identity observed ${utc(view.observedAtMs)}; latest query ${utc(view.attemptedAtMs)} (${record.gpu.status}). Allocation: ${view.allocationStatus}. ${devices} ${retainedEvidence} ${events} ${pcEvents} Kernel event coverage: ${view.journalStatus}. A device response does not establish GPU health; recorded Xid events do not establish a current fault. Job State and driver versions are separate.`;
+    return { ...view, warning, description };
+  }
+
+  function renderGpu(cell: HTMLTableCellElement, address: string, at: number): void {
+    const view = gpu(address, at);
+    const currentIndices = view?.indices ?? [], retainedIndices = view?.retainedIndices ?? [];
+    let current = cell.querySelector<HTMLElement>(".gpu-id-current");
+    if (!current) {
+      current = document.createElement("span"); current.className = "gpu-id-current";
+      const retained = document.createElement("span"); retained.className = "gpu-id-retained";
+      const warning = document.createElement("span"); warning.className = "gpu-id-warning"; warning.setAttribute("aria-hidden", "true");
+      cell.replaceChildren(current, retained, warning);
+    }
+    const currentText = currentIndices.join(", ") || (retainedIndices.length ? "" : "—");
+    if (current.textContent !== currentText) current.textContent = currentText;
+    const retained = cell.querySelector<HTMLElement>(".gpu-id-retained")!;
+    const retainedText = `${currentIndices.length && retainedIndices.length ? ", " : ""}${retainedIndices.join(", ")}`;
+    if (retained.textContent !== retainedText) retained.textContent = retainedText;
+    const warning = cell.querySelector<HTMLElement>(".gpu-id-warning")!;
+    const warningText = view?.warning ? " ⚠" : "";
+    if (warning.textContent !== warningText) warning.textContent = warningText;
+    warning.hidden = !view?.warning;
+    cell.className = currentIndices.length || retainedIndices.length ? "gpu-id-cell" : "gpu-id-cell unknown";
+    cell.dataset.gpuState = view?.current ? "current" : currentIndices.length ? "partial" : retainedIndices.length ? "retained" : "unknown";
+    cell.dataset.gpuWarning = String(!!view?.warning);
+    cell.setAttribute("aria-label", view?.description ?? "GPU ID: unknown; no measured PC GPU mapping is available.");
+    cell.removeAttribute("title");
   }
   const gpuHistory = new Map<string, { gpu: NodeGpuObservation; receivedAtMs: number }>();
   const historyQueue = new Set<string>(); let historyActive = 0;
@@ -98,10 +149,13 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     sort(address: string, now: number) {
       const association = data?.associations.find(row => row.address === address), observation = data?.observations.find(row => row.address === address);
       const network = networkView(data?.networks.find(row => row.pcId === association?.binding.pcId) ?? observation, now);
-      return { pc: association?.name ?? "", ip: network.privateIp ?? network.publicIp, rewards: rewardAtoms(rewardView(observation, now).amount) };
+      const physical = gpu(address, now);
+      return { pc: association?.name ?? "", ip: network.privateIp ?? network.publicIp, rewards: rewardAtoms(rewardView(observation, now).amount),
+        gpuIndices: [...new Set([...(physical?.indices ?? []), ...(physical?.retainedIndices ?? [])])].sort((a, b) => a - b) };
     },
     render(cell: HTMLTableCellElement, key: string, address: string, now: number, ipMode: IPDisplayMode): boolean {
-      if (!enabled || !["pc", "ip", "rewards"].includes(key)) return false;
+      if (!enabled || !["pc", "ip", "rewards", "gpuID"].includes(key)) return false;
+      if (key === "gpuID") { renderGpu(cell, address, now); return true; }
       const association = data?.associations.find(row => row.address === address), observation = data?.observations.find(row => row.address === address);
       const network = networkView(data?.networks.find(row => row.pcId === association?.binding.pcId) ?? observation, now);
       const reward = rewardView(observation, now);
@@ -118,7 +172,8 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
       if (key === "pc" || key === "ip") {
         const version = driver(address, now);
         const versionDescription = version?.driverVersion ? ` ${version.current ? "PC" : "Retained PC"} NVIDIA driver ${version.driverVersion}; driver-supported CUDA ${version.cudaDriverVersion}, read via NVIDIA-SMI at ${new Date(version.observedAtMs!).toISOString()}. Version information does not establish GPU health.` : "";
-        const description = key === "pc" ? `${value}; verified computer association at ${association ? new Date(association.verifiedAtMs).toISOString() : "unknown"}.${versionDescription}`
+        const gpuDescription = key === "pc" ? gpu(address, now)?.description : undefined;
+        const description = key === "pc" ? `${value}; verified computer association at ${association ? new Date(association.verifiedAtMs).toISOString() : "unknown"}.${versionDescription}${gpuDescription ? ` ${gpuDescription}` : ""}`
           : `${formatIPDisplay({ internal: network.privateIp, global: network.publicIp }, ipMode).description} Public checked ${network.publicObservedAtMs ? new Date(network.publicObservedAtMs).toISOString() : "unknown"}; private checked ${network.privateObservedAtMs ? new Date(network.privateObservedAtMs).toISOString() : "unknown"}.`;
         cell.setAttribute("aria-label", description); cell.title = description;
       }

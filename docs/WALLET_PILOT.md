@@ -22,9 +22,40 @@ Secure setup do not establish financial ownership.
 Wallet requires the password on each entry/reload and locks after five minutes
 without activity. Status polling does not extend authorization. Changing the
 destination/password requires the current password, locks prior authorizations
-and invalidates reviews. Installation-PC recovery uses `--treasury-reset` with an
-explicit terminal confirmation. Recovery preserves transaction history and the
-consumed allowance and requires destination confirmation again.
+and invalidates reviews.
+
+**Password recovery** in Wallet lets the owner save six questions after entering
+the current password. Twelve suggested questions have editable wording; custom
+questions are supported. Choose answers staff and other people do not know:
+answers are a weaker, guessable alternative route to owner authority.
+**Forgot password?** asks three questions selected randomly by the server. That
+selection persists across browsers and restarts until recovery succeeds or the
+owner replaces the questions. All three answers must match; there is no feedback
+about individual answers. Answers use Unicode NFKC normalization, lowercase and
+trimmed/collapsed whitespace, and individual salted scrypt verifiers.
+
+Five verification attempts per installation are reserved durably before hashing
+in each rolling 30-minute window. Recovery pacing does not consume normal login
+attempts. Correct answers issue a five-minute, browser-bound, single-use reset
+grant; only its digest is stored. Reset atomically changes the password, consumes
+the grant, updates the recovery binding and cancels eligible unsent work. It locks
+Wallet and owner-administration sessions while preserving the receiving address,
+financial identity, transaction/claim history and consumed allowances. Dispatched
+operations retain their outcomes and reconciliation; no financial action is retried.
+
+Questions remain after browser recovery and current-runtime password changes.
+The separate recovery namespace leaves the original eleven-field Wallet ledger
+compatible. It binds to the original server, scope, vault key and complete salted
+password verifier; retained signing authority is independently validated. A
+password change or reset by an older runtime invalidates that binding and requires
+fresh password-authorized question enrollment; stale records are never repaired
+automatically. Supported rollback retains the live owner ledger.
+
+Installation-PC fallback uses `--treasury-reset` with explicit terminal
+confirmation. It clears the questions, locks owner sessions, retains financial
+history and consumed allowances, and requires destination confirmation again.
+Question recovery requires intact original owner/vault/financial state. It is
+password recovery for this installation, not restoration after total PC loss.
 
 Select one host and review its full address, the full receiving address,
 **exactly 1 NOS**, network fee and receiving token-account creation cost. The

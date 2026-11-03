@@ -38,6 +38,16 @@ test("every numeric column sorts finite values numerically and retains a measure
   }
 });
 
+test("physical GPU index sets sort numerically and keep unknown mappings last in either direction", () => {
+  const rows = [row("ten", {}, { gpuIndices: [10] }), row("two-ten", {}, { gpuIndices: [10, 2] }),
+    row("zero", {}, { gpuIndices: [0] }), row("two", {}, { gpuIndices: [2] }),
+    row("unknown", {}, { gpuIndices: [] }), row("invalid", {}, { gpuIndices: [1, NaN] })];
+  assert.deepEqual(sortedIDs(rows, "gpuID"), ["zero", "two", "two-ten", "ten", "unknown", "invalid"]);
+  assert.deepEqual(sortedIDs(rows, "gpuID", "desc"), ["ten", "two-ten", "two", "zero", "unknown", "invalid"]);
+  assert.deepEqual(sortedIDs(rows, "pc"), ["zero", "two", "two-ten", "ten", "unknown", "invalid"]);
+  assert.deepEqual(rows[1]!.gpuIndices, [10, 2], "sorting leaves measured input order untouched");
+});
+
 test("numeric missing, null, blank, non-finite and unparsed values remain unknown last in both directions", () => {
   const rows = [
     row("missing"), row("null", { sol: null }), row("blank", { sol: "  " }),

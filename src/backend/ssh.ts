@@ -8,7 +8,7 @@ import type { PcAssociation } from "../contracts/shared.ts";
 
 export interface Computer { id: string; host: string; port: number; name: string; fingerprint: string; hostKey: string }
 export interface SshCredential { username: string; password?: string; privateKey?: string; passphrase?: string; sudoPassword?: string }
-export type SshResult = { code: number; stdout: string };
+export type SshResult = { code: number; stdout: string; stderrPresent?: boolean };
 export type SshRun = (command: string, options?: { input?: string | Uint8Array; maximum?: number; timeoutMs?: number }) => Promise<SshResult>;
 export class SshAccessError extends Error {
   readonly kind: "credential-rejected" | "identity-changed" | "connection";
@@ -95,13 +95,14 @@ export async function withSsh<T>(computer: Computer, credential: SshCredential, 
   const run: SshRun = (command, { input, maximum = 64 * 1024, timeoutMs = 8000 } = {}) => new Promise((resolve, reject) => {
     client.exec(command, { pty: false }, (error, stream) => {
       if (error) { reject(new Error("Approved SSH read failed.")); return; }
-      const chunks: Buffer[] = []; let size = 0;
+      const chunks: Buffer[] = []; let size = 0, stderrPresent = false;
       const timeout = setTimeout(() => { stream.destroy(); reject(new Error("Approved SSH read timed out.")); }, timeoutMs);
       stream.on("data", (chunk: Buffer) => { size += chunk.length; if (size > maximum) { stream.destroy(); reject(new Error("SSH response exceeded its bound.")); } else chunks.push(Buffer.from(chunk)); });
-      // Arbitrary remote stderr may contain secrets; never forward it to the gateway/logs.
-      stream.stderr.on("data", () => {});
+      // Arbitrary remote stderr may contain secrets. Retain only its presence:
+      // NVIDIA can exit successfully with partial stdout and a device diagnostic.
+      stream.stderr.on("data", (chunk: Buffer) => { if (chunk.length) stderrPresent = true; });
       stream.on("error", () => { clearTimeout(timeout); reject(new Error("Approved SSH read failed.")); });
-      stream.on("close", (code: number | undefined) => { clearTimeout(timeout); resolve({ code: code ?? -1, stdout: Buffer.concat(chunks).toString("utf8") }); });
+      stream.on("close", (code: number | undefined) => { clearTimeout(timeout); resolve({ code: code ?? -1, stdout: Buffer.concat(chunks).toString("utf8"), stderrPresent }); });
       stream.end(input);
     });
   });

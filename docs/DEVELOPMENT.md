@@ -97,6 +97,16 @@ Readings retain SSH identity, approval epoch and observation time; one PC record
 serves its associated host rows. Valid Nosana metadata remains preferred.
 Driver-supported CUDA is not an installed toolkit or a GPU-health result.
 
+The separate PC GPU lane measures host-side UUID/index/PCI identity and current
+boot identity through the existing approved connection. It serves all associated
+hosts with one scheduled PC observation. Host allocation is reverified separately;
+container-local indices never populate GPU ID. Partial failures retain usable
+device results and original dated evidence without presenting old boot indices as
+current. Bounded current-boot kernel reads report exact Xid events independently
+from query responses. UUID preambles establish event attribution; otherwise the
+event remains PC-level. Unavailable or truncated logs do not prove absence of
+faults. This collection never resets GPUs, installs drivers or changes host access.
+
 ## Toolchain and commands
 
 Use Node **24.14.1**, npm **11.11.0**, TypeScript **7.0.2**, Node declarations
@@ -641,15 +651,19 @@ vertically with the fleet; horizontal overflow supports the full table.
 
 Sorting uses exact amounts/full identities and stable ties, with unknown values
 last in either direction. Clear sort restores supplied order or synthetic PC
-order. The nine independent saved display controls are IP, Host Address,
-Duration, Staked NOS, Market, NVIDIA, CPU, System and Country. Full values remain
+order. The ten independent saved display controls are IP, Host Address,
+Job Address, Duration, Staked NOS, Market, NVIDIA, CPU, System and Country. Full values remain
 in the model even in compact display. Combined Queued / Duration retains both readings,
 freshness, sort controls and source details; changing layout does not change data.
 
 All column headers retain sorting, information and display controls. Left-side
 body controls open concise details with full provenance in a closed Source details
 disclosure. Body values right of the divider are plain, nonfocusable text without
-hover or row popups, except the requested Jobs expansion and job links.
+hover or row popups, except the requested Job Address expansion and job links.
+Job Address defaults to five characters and widens for the saved full-address
+mode. Its toggle preserves expanded history and connected controls without
+starting reads. GPU ID lists physical indices numerically and uses accessible
+warning text, with the same dated evidence in the existing PC details.
 Keep controls connected through refresh, sorting and layout
 changes to preserve keyboard focus and animation timelines. Unchanged status
 messages must not repeatedly announce loading or rebuild stable text.
@@ -750,7 +764,7 @@ Current feature priorities and source gaps:
 | Exact claimable uptime rewards | Verify the supported source, amount/units, identity permissions and observation times; no estimate, manual entry or user-managed credential substitute. |
 | Daily uptime/history | Verify day/timezone boundaries, coverage, partial/empty history and completeness. |
 | Node run time | Connect a verified source with independent evidence and correct host association. |
-| PC/private IP/physical GPU identity | Define authoritative grouping and physical-device mapping, including replacement/reordering; reported device index alone is insufficient. |
+| PC/private IP/physical GPU identity | Approved-PC associations supply grouping and private IP; UUID-to-physical-index observations supply GPU ID with boot/allocation freshness checks. Missing or ambiguous mappings remain unknown. Physical recovery and workload health remain separate. |
 | 200+ host overview | Design a separate overview that exposes every host without shrinking the detailed table further. |
 | Alerts | Define live alert behavior and delivery; the current sidebar entry is disabled. |
 | Hosted capacity and bulk data | Verify pagination, batching, source timestamps, shared quota ownership and failure/recovery with the actual platform. |

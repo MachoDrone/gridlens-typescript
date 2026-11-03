@@ -6,6 +6,8 @@ import type { PcNetworkObservation, NodeGpuObservation } from "../fleet/pc-obser
 import type { PrivateState } from "./access.ts";
 import { parsePcDriverUpdate, parsePcDriverRecord } from "../fleet/pc-drivers.ts";
 import type { PcDriverRecord, PcDriverUpdate } from "../fleet/pc-drivers.ts";
+import { parsePcGpuRecord, parsePcGpuUpdate } from "../fleet/pc-gpu-devices.ts";
+import type { PcGpuRecord } from "../fleet/pc-gpu-devices.ts";
 import type { PcPermission } from "./pc-monitor.ts";
 
 /** Public normalized observations. Authorization remains in the private owner ledger. */
@@ -23,7 +25,8 @@ export function createObservationStore(state: PrivateState, serverId: string, no
   // Kept outside the original observation object so an older reader/writer
   // cannot erase driver evidence during an application rollback.
   const driverKey = (context: FleetContext): string => `pc-drivers:${context.scopeId}:${context.rosterRevision}`;
-  function driverGranted(context: FleetContext, row: PcDriverUpdate, associations: PcAssociation[]): boolean {
+  const devicesKey = (context: FleetContext): string => `pc-gpu-devices:${context.scopeId}:${context.rosterRevision}`;
+  function driverGranted(context: FleetContext, row: Pick<PcDriverUpdate, "pcId" | "sshFingerprint" | "approvalAtMs">, associations: PcAssociation[]): boolean {
     const permission = state.get<PcPermission>(`permission:${context.scopeId}:${row.pcId}`);
     return !!permission && permission.version === 1 && permission.rosterRevision === context.rosterRevision && permission.gpu
       && !permission.paused && permission.revokedAtMs === null && permission.approvedAtMs === row.approvalAtMs
@@ -50,6 +53,7 @@ export function createObservationStore(state: PrivateState, serverId: string, no
   function read(context: FleetContext, includeHistory = false): SharedObservations {
     const saved = state.get<SharedObservations>(key(context));
     const drivers = state.get<PcDriverRecord[]>(driverKey(context));
+    const devices = state.get<PcGpuRecord[]>(devicesKey(context));
     const data = parseSharedObservations(saved ?? { version: 1, serverId, scopeId: context.scopeId, rosterRevision: context.rosterRevision,
       associations: [], observations: [], networks: [] }, serverId, context);
     if (drivers !== undefined) {
@@ -59,6 +63,12 @@ export function createObservationStore(state: PrivateState, serverId: string, no
       const parsed = drivers.map(parsePcDriverRecord);
       if (new Set(parsed.map(row => row.pcId)).size !== parsed.length) throw new Error("Duplicate saved PC driver identity.");
       data.drivers = parsed.filter(row => driverGranted(context, row, data.associations));
+    }
+    if (devices !== undefined) {
+      if (!Array.isArray(devices) || devices.length > 10_000) throw new Error("Invalid saved PC GPU inventory.");
+      const parsed = devices.map(parsePcGpuRecord);
+      if (new Set(parsed.map(row => row.pcId)).size !== parsed.length) throw new Error("Duplicate saved PC GPU identity.");
+      data.pcGpuDevices = parsed.filter(row => driverGranted(context, row, data.associations));
     }
     if (includeHistory) data.observations = data.observations.map(row => row.gpu ? { ...row,
       gpu: loadGpu(context, row.address, row.gpu, data.gpuSummaries?.find(summary => summary.address === row.address))! } : row);
@@ -75,9 +85,10 @@ export function createObservationStore(state: PrivateState, serverId: string, no
     const normalized = parseSharedObservations({ ...data, gpuSummaries: [...summaries.values()],
       observations: data.observations.map(row => row.gpu ? { ...row, gpu: { ...row.gpu, samples: [] } } : row) }, serverId, context);
     const entries: (readonly [string, unknown])[] = [...histories].map(([address, gpu]) => [gpuKey(context, address), parseNodeGpu(gpu, address)] as const);
-    const { drivers, ...original } = normalized;
+    const { drivers, pcGpuDevices, ...original } = normalized;
     entries.push([key(context), original]);
     if (drivers !== undefined) entries.push([driverKey(context), drivers]);
+    if (pcGpuDevices !== undefined) entries.push([devicesKey(context), pcGpuDevices]);
     state.batch(entries);
   }
   return {
@@ -94,6 +105,8 @@ export function createObservationStore(state: PrivateState, serverId: string, no
         networks: previous.networks.filter(row => data.associations.some(association => association.binding.pcId === row.pcId)),
         ...(previous.drivers ? { drivers: previous.drivers.filter(row => data.associations.some(association => association.binding.pcId === row.pcId
           && association.sshFingerprint === row.sshFingerprint)) } : {}),
+        ...(previous.pcGpuDevices ? { pcGpuDevices: previous.pcGpuDevices.filter(row => data.associations.some(association => association.binding.pcId === row.pcId
+          && association.sshFingerprint === row.sshFingerprint)) } : {}),
         gpuSummaries: previous.gpuSummaries?.filter(row => bindings.has(row.address)) ?? [],
       }, new Map(previous.observations.filter(row => row.gpu && bindings.has(row.address) && sameBinding(row.binding, bindings.get(row.address)!))
         .map(row => [row.address, loadGpu(previous, row.address, row.gpu, previous.gpuSummaries?.find(summary => summary.address === row.address))!])));
@@ -104,6 +117,8 @@ export function createObservationStore(state: PrivateState, serverId: string, no
         observations: previous.observations.filter(row => current.has(row.address) && sameBinding(row.binding, current.get(row.address)!)),
         networks: previous.networks.filter(row => associations.some(association => association.binding.pcId === row.pcId)),
         ...(previous.drivers ? { drivers: previous.drivers.filter(row => associations.some(association => association.binding.pcId === row.pcId
+          && association.sshFingerprint === row.sshFingerprint)) } : {}),
+        ...(previous.pcGpuDevices ? { pcGpuDevices: previous.pcGpuDevices.filter(row => associations.some(association => association.binding.pcId === row.pcId
           && association.sshFingerprint === row.sshFingerprint)) } : {}),
       });
     },
@@ -145,6 +160,37 @@ export function createObservationStore(state: PrivateState, serverId: string, no
         || update.driver.observedAtMs === prior?.driver.observedAtMs && JSON.stringify(update.driver) !== JSON.stringify(prior.driver)) throw new Error("Invalid PC driver source time.");
       const next: PcDriverRecord = { ...prior, ...update, receivedAtMs: now(), ...(update.driver.status === "ok" ? { lastGoodDriver: update.driver } : {}) };
       data.drivers = [...(data.drivers ?? []).filter(row => row.pcId !== update.pcId), next];
+      save(context, data);
+    },
+    gpuDevices(context: FleetContext, value: unknown): void {
+      const update = parsePcGpuUpdate(value), data = read(context);
+      if (!driverGranted(context, update, data.associations)) throw new Error("Unapproved PC GPU source.");
+      const permission = state.get<PcPermission>(`permission:${context.scopeId}:${update.pcId}`)!;
+      if (update.gpu.allocations.some(allocation => !data.associations.some(row => row.address === allocation.address && sameBinding(row.binding, allocation.binding)
+        && row.sshFingerprint === update.sshFingerprint && permission.associations.some(approved => approved.address === row.address && sameBinding(approved.binding, row.binding)))))
+        throw new Error("Unapproved GPU allocation source.");
+      const prior = data.pcGpuDevices?.find(row => row.pcId === update.pcId && row.sshFingerprint === update.sshFingerprint && row.approvalAtMs === update.approvalAtMs);
+      if (update.gpu.observedAtMs > now() + 5000 || update.gpu.observedAtMs < (prior?.gpu.observedAtMs ?? 0)
+        || update.gpu.observedAtMs === prior?.gpu.observedAtMs && JSON.stringify(update.gpu) !== JSON.stringify(prior.gpu)) throw new Error("Invalid PC GPU source time.");
+      const eventKey = (event: PcGpuRecord["gpu"]["journal"]["events"][number]) => `${event.bootId}:${event.pciBusId}:${event.xid}:${event.atMs}`;
+      const eventMap = new Map((prior?.retainedEvents ?? prior?.gpu.journal.events ?? []).map(event => [eventKey(event), event]));
+      for (const event of update.gpu.journal.events) {
+        const previous = eventMap.get(eventKey(event));
+        // A later bounded log window may omit a UUID preamble. Preserve its
+        // earlier proof; conflicting positive UUID evidence remains unassigned.
+        eventMap.set(eventKey(event), previous?.gpuUuid && !event.gpuUuid ? previous
+          : previous?.gpuUuid && event.gpuUuid && previous.gpuUuid !== event.gpuUuid ? { ...event, gpuUuid: null } : event);
+      }
+      const retainedEvents = [...eventMap.values()].sort((a, b) => a.atMs - b.atMs).slice(-128);
+      const mappingMap = new Map((prior?.retainedMappings ?? []).map(mapping => [mapping.device.uuid, mapping]));
+      if (update.gpu.bootId) for (const device of update.gpu.devices) if (device.status === "responds") mappingMap.set(device.uuid, { bootId: update.gpu.bootId, device });
+      const retainedMappings = [...mappingMap.values()].sort((a, b) => b.device.observedAtMs - a.device.observedAtMs).slice(0, 64);
+      const allocationMap = new Map((prior?.retainedAllocations ?? []).map(allocation => [allocation.address, allocation]));
+      for (const allocation of update.gpu.allocations) if (allocation.status === "ok") allocationMap.set(allocation.address, allocation);
+      const retainedAllocations = [...allocationMap.values()].sort((a, b) => b.observedAtMs - a.observedAtMs).slice(0, 64);
+      const next: PcGpuRecord = { ...prior, ...update, receivedAtMs: now(), retainedEvents, retainedMappings, retainedAllocations,
+        ...(update.gpu.status === "ok" ? { lastGood: update.gpu } : {}) };
+      data.pcGpuDevices = [...(data.pcGpuDevices ?? []).filter(row => row.pcId !== update.pcId), next];
       save(context, data);
     },
     network(context: FleetContext, value: unknown): void {

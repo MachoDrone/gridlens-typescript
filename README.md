@@ -19,6 +19,12 @@ claim blocks further claims; after confirmation a different host can be tested.
 Compatibility-first installer/updater rollout is required; source
 implementation does not establish publication, live enablement or a transfer.
 
+Wallet also offers local **Forgot password?** recovery after the owner saves six
+questions. Choose from twelve editable prompts or write custom questions; recovery
+requires three selected questions, with persistent guessing limits. This needs no
+email service or recovery file. It preserves the original owner identity and
+financial history, and requires that installation's saved data to remain intact.
+
 A separate [shared backend candidate](docs/SHARED_BACKEND.md) adds durable SQLite
 collection, authenticated HTTPS, browser PC management and optional Android pairing.
 Its [modern Docker installer](docs/MODERN_INSTALL.md) is separate from the legacy
@@ -102,7 +108,9 @@ reported in existing Nosana metrics, with a saved header toggle between compact
 codes and full English names. Missing values remain unknown; this is reported
 country, not verified physical location. It adds no API requests or location service.
 
-**Jobs** keeps each Fleet row compact. Expand one host with its arrow, or use the
+**Job Address** defaults to a five-character link. Its saved header toggle shows
+the full address without changing history, sorting or requests. Expand one host
+with its arrow, or use the
 column's Show all / Hide all controls, to inspect up to ten recent jobs in an
 Explorer-style table: Address, Host, Started, Duration, Price, GPU and Status.
 Starts use relative time; duration includes the reported maximum. Status badges
@@ -126,6 +134,12 @@ Protected-runtime candidates add [owner-bound finance and staff viewers](docs/OW
 Wallet enrollment pins the owner's authority on each source PC; another
 installation's password grants no access to enrolled sources. Staff viewers get
 read-only fleet data and no source credentials. Source administrators remain trusted.
+
+**GPU ID** joins each host's verified GPU UUIDs to physical PC indices. Multiple
+GPUs are listed together; unavailable or stale mappings remain explicit. A compact
+warning separates failed GPU reads from recorded kernel faults. An Xid 79 warning
+requires matching kernel evidence and retains its event time; a successful driver
+version read is not evidence that a GPU recovered.
 
 For approved PCs, CUDA/NVIDIA can use dated `nvidia-smi --version` readings when
 Nosana reports an unavailable value. One PC read serves its associated hosts;
