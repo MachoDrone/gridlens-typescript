@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
+import { isDeepStrictEqual } from "node:util";
 import { InstallerError } from "../src/installer/release.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
 
@@ -92,10 +93,29 @@ export function archiveImageIdentity(input: Uint8Array, expected: { imageId: str
     if (expandedLayerBytes > maximumExpandedLayerBytes || digest(expanded) !== settings.rootfs.diff_ids[index]) fail();
   }
   const referenced = new Set([root.digest, config.digest, ...layers.map(layer => layer.digest)]);
+  let compatibilityCount = 0, compatibilityBytes = 0;
   for (const [name, body] of entries) {
     if (name.startsWith("blobs/")) {
       const id = `sha256:${name.slice("blobs/sha256/".length)}`;
-      if (!/^blobs\/sha256\/[a-f0-9]{64}$/.test(name) || !referenced.has(id) || digest(body) !== id) fail();
+      if (!/^blobs\/sha256\/[a-f0-9]{64}$/.test(name) || digest(body) !== id) fail();
+      if (!referenced.has(id)) {
+        // Docker's classic save exporter also emits content-addressed v1
+        // compatibility JSON, one per layer. It is not an OCI manifest input.
+        // Bound and validate that metadata without letting it select an image,
+        // configuration or layer; those identities were independently proven.
+        compatibilityCount++; compatibilityBytes += body.length;
+        if (compatibilityCount > layers.length || body.length > 1024 ** 2 || compatibilityBytes > 16 * 1024 ** 2) fail();
+        const legacy = json(name, 1024 ** 2);
+        const allowed = new Set(["id", "parent", "created", "container", "container_config", "config", "architecture", "os"]);
+        const legacyId = (value: unknown): boolean => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+        if (Object.keys(legacy).some(key => !allowed.has(key)) || !legacyId(legacy.id)
+          || legacy.parent !== undefined && !legacyId(legacy.parent)
+          || typeof legacy.created !== "string" || legacy.created.length > 100 || !Number.isFinite(Date.parse(legacy.created))
+          || !object(legacy.container_config) || legacy.os !== "linux"
+          || legacy.container !== undefined && !legacyId(legacy.container)
+          || legacy.architecture !== undefined && legacy.architecture !== settings.architecture
+          || legacy.config !== undefined && !isDeepStrictEqual(legacy.config, settings.config)) fail();
+      }
     }
   }
   const dockerBytes = entries.get("manifest.json"); if (!dockerBytes || dockerBytes.length > 64 * 1024) fail();

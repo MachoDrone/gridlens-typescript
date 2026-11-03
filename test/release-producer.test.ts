@@ -50,6 +50,33 @@ test("producer accepts independently inspected classic or OCI identity only afte
   }
   assert.throws(() => archiveImageIdentity(tar([...f.entries, [`blobs/sha256/${digest(Buffer.from("orphan"))}`, Buffer.from("orphan")]]), f.expected));
 });
+test("Docker classic save compatibility JSON is verified without changing the primary OCI/config identity", () => {
+  const f = fixture();
+  // Independently observed Docker 29 save shape: legacy v1 JSON blobs accompany
+  // the OCI blobs, but are not referenced by the OCI manifest. Values below are
+  // generated; the retained real-export replay lives outside the repository.
+  const legacy = { id: digest(Buffer.from("generated legacy layer")), created: "1970-01-01T00:00:00Z",
+    container_config: { Hostname: "", Domainname: "", User: "", AttachStdin: false, AttachStdout: false, AttachStderr: false,
+      Tty: false, OpenStdin: false, StdinOnce: false, Env: null, Cmd: null, Image: "", Volumes: null, WorkingDir: "", Entrypoint: null, Labels: null }, os: "linux" };
+  const packed = (body: Buffer): Buffer => tar([...f.entries, [`blobs/sha256/${digest(body)}`, body]]);
+  const expected = { ...f.expected, imageId: f.configId };
+  assert.deepEqual(archiveImageIdentity(packed(json(legacy)), expected), { imageId: f.rootId, configImageId: f.configId });
+  const primaryConfig = JSON.parse(f.entries.find(([name]) => name === `blobs/sha256/${f.configId.slice(7)}`)![1].toString());
+  const last = { ...legacy, parent: digest(Buffer.from("generated parent")), container: digest(Buffer.from("generated build container")),
+    config: primaryConfig.config, architecture: "amd64" };
+  assert.deepEqual(archiveImageIdentity(packed(json(last)), expected), { imageId: f.rootId, configImageId: f.configId });
+  for (const patch of [{ id: "invalid" }, { parent: "invalid" }, { created: "invalid" }, { container_config: null }, { os: "windows" },
+    { architecture: "arm64" }, { config: { Labels: { changed: true } } }, { schemaVersion: 2 }, { unknown: true }]) {
+    assert.throws(() => archiveImageIdentity(packed(json({ ...legacy, ...patch })), expected));
+  }
+  for (const body of [Buffer.from('{"id":'), Buffer.from("nonmetadata blob"), json({ ...legacy, container_config: { padding: "x".repeat(1024 ** 2) } })]) {
+    assert.throws(() => archiveImageIdentity(packed(body), expected));
+  }
+  const original = json(legacy), changed = json({ ...legacy, id: digest(Buffer.from("changed generated layer")) });
+  assert.throws(() => archiveImageIdentity(tar([...f.entries, [`blobs/sha256/${digest(original)}`, changed]]), expected));
+  assert.throws(() => archiveImageIdentity(tar([...f.entries, [`blobs/sha256/${digest(original)}`, original], [`blobs/sha256/${digest(changed)}`, changed]]), expected),
+    "compatibility metadata count cannot exceed the proven layer count");
+});
 test("classic config identity binds the ordered expanded layer content, including gzip", () => {
   const original = Buffer.alloc(4096, 7), replacement = Buffer.alloc(4096, 9), base = fixture({ layers: [original] });
   // Every stored blob and the replacement OCI root are internally consistent,
