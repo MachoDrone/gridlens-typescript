@@ -36,14 +36,14 @@ export function createAccess(state: PrivateState, now = Date.now, options: { pro
   const ownerSessions = new Map<string, { id: string; parentToken: string; parentId: string; scopeId: string; expiresAtMs: number }>();
   const key = "access.v1";
   const saved = state.get<AccessState>(key);
-  if (saved && (saved.version !== 1 || typeof saved.serverId !== "string" || !Array.isArray(saved.fleets)
+  if (saved !== undefined && (!saved || saved.version !== 1 || typeof saved.serverId !== "string" || !Array.isArray(saved.fleets)
     || !Array.isArray(saved.devices) || !Array.isArray(saved.codes) || !Array.isArray(saved.attempts))) throw new Error("Invalid access ledger.");
   saved?.fleets.forEach(validateFleetContext);
   let ledger: AccessState = saved ?? { version: 1, serverId: randomUUID(), fleets: [], devices: [], codes: [], attempts: [] };
   if (!saved) state.set(key, ledger);
   const gatewayKey = protectedMode ? "gateway-access.owner-bound.v1" : "gateway-access.v1";
-  const savedGateways = state.get<GatewayState>(gatewayKey)
-    ?? (protectedMode && protection === undefined ? state.get<GatewayState>("gateway-access.v1") : undefined);
+  let savedGateways = state.get<GatewayState>(gatewayKey);
+  if (savedGateways === undefined && protectedMode && protection === undefined) savedGateways = state.get<GatewayState>("gateway-access.v1");
   if (protection && savedGateways === undefined) throw new Error("Protected gateway state requires recovery.");
   let gateways: GatewayState = savedGateways === undefined ? { version: 1, grants: [] } : savedGateways;
   if (!gateways || gateways.version !== 1 || !Array.isArray(gateways.grants) || gateways.grants.length > 32
@@ -57,8 +57,8 @@ export function createAccess(state: PrivateState, now = Date.now, options: { pro
   // Older runtimes must reject these credentials by not knowing this namespace;
   // placing them in access.v1.devices would silently remove their parent constraint.
   const secureBrowserKey = protectedMode ? "secure-browser-access.owner-bound.v1" : "secure-browser-access.v1";
-  const savedSecureBrowser = state.get<SecureBrowserState>(secureBrowserKey)
-    ?? (protectedMode && protection === undefined ? state.get<SecureBrowserState>("secure-browser-access.v1") : undefined);
+  let savedSecureBrowser = state.get<SecureBrowserState>(secureBrowserKey);
+  if (savedSecureBrowser === undefined && protectedMode && protection === undefined) savedSecureBrowser = state.get<SecureBrowserState>("secure-browser-access.v1");
   if (protection && savedSecureBrowser === undefined) throw new Error("Protected browser state requires recovery.");
   let secureBrowser: SecureBrowserState = savedSecureBrowser === undefined
     ? { version: 1, tickets: [], sessions: [], issuanceAttempts: [], redemptionAttempts: [] } : savedSecureBrowser;

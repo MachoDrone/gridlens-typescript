@@ -66,3 +66,12 @@ test("missing protected state fails closed instead of restoring old private-netw
     assert.throws(() => createAccess(state), /requires recovery/);
   } finally { await state.close(); await rm(directory, { recursive: true }); }
 });
+test("null access records are corruption in both legacy and protected namespaces, never fresh state", () => {
+  for (const key of ["access.v1", "gateway-access.v1", "secure-browser-access.v1", "gateway-access.owner-bound.v1", "secure-browser-access.owner-bound.v1"]) {
+    const values = new Map<string, unknown>([[key, null]]);
+    const state = { get: <T>(name: string) => values.get(name) as T | undefined, set: (name: string, value: unknown) => { values.set(name, value); },
+      batch: () => { throw new Error("Corrupt state must never enter migration"); } };
+    assert.throws(() => createAccess(state, Date.now, { protectedMode: key.includes("owner-bound") }), /access ledger|gateway ledger/);
+    assert.equal(values.get(key), null);
+  }
+});
