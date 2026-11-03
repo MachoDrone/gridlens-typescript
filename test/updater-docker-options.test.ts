@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { updaterAcceptanceOptions, updaterAcceptanceSource, verifyUpdaterTreasuryBindings } from "../scripts/test-updater-docker.ts";
+import { captureUpdaterFailure, updaterAcceptanceOptions, updaterAcceptanceSource, verifyUpdaterTreasuryBindings } from "../scripts/test-updater-docker.ts";
 import type { DockerRunner } from "../src/installer/docker.ts";
 
 const args = ["--instance", "fixture-123456789abc", "--address", "10.71.0.8", "--https-port", "19790", "--web-port", "19789", "--base-image", "gridlens-source:current"];
@@ -14,6 +14,27 @@ function runner(value: unknown): DockerRunner {
   return { run(command) { assert.deepEqual(command, ["image", "inspect", "gridlens-source:fixture"]);
     return { status: 0, stdout: JSON.stringify(value), stderr: "" }; } };
 }
+test("failed updater capture preserves stopped-worker identity and uses only readonly state volumes", () => {
+  const instance = "fixture-123456789abc", imageId = `sha256:${"a".repeat(64)}`, calls: readonly string[][] = [];
+  const recorded = calls as string[][];
+  const diagnostics = captureUpdaterFailure({ run(args) {
+    recorded.push([...args]);
+    if (args[1] === "inspect") {
+      const labels = { "io.gridlens.product": "shared-backend", "io.gridlens.instance": instance };
+      return { status: 0, stderr: "", stdout: JSON.stringify([{ Id: "generated", Image: imageId, Labels: labels,
+        Config: { Labels: labels, Env: ["GRIDLENS_TREASURY_PROTOCOL=1", "GENERATED_SECRET=must-not-escape"] }, State: { Running: false, ExitCode: 0 } }]) };
+    }
+    assert.equal(args[0], "run"); assert.equal(args[args.indexOf("--network") + 1], "none");
+    const mounts = args.flatMap((value, index) => value === "--mount" ? [args[index + 1]!] : []);
+    assert.equal(mounts.length, 2); assert.ok(mounts.every(value => value.endsWith(",readonly")));
+    assert.ok(mounts.some(value => value.includes("dst=/config"))); assert.ok(mounts.some(value => value.includes("dst=/update-state")));
+    assert.equal(mounts.some(value => /credentials|tls|ledger/.test(value)), false);
+    return { status: 0, stderr: "", stdout: JSON.stringify({ journal: { status: { operation: { phase: "failed", error: "Generated original failure" } } } }) };
+  } }, instance, imageId);
+  assert.ok(JSON.stringify(diagnostics).includes("Generated original failure"));
+  assert.equal(JSON.stringify(diagnostics).includes("GENERATED_SECRET"), false);
+  assert.equal(recorded.some(args => ["stop", "rm", "start"].includes(args[0]!)), false);
+});
 
 test("updater acceptance keeps same-source default and accepts a separate tagged older source", () => {
   assert.equal(updaterAcceptanceOptions(args).previousImage, undefined);

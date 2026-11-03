@@ -94,6 +94,36 @@ export function verifyUpdaterTreasuryBindings(instance: string, role: string, va
 }
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+/** Read-only, fixed-file diagnostics before fixture cleanup. No credentials,
+ * certificate keys or complete environment values leave the owned containers. */
+export function captureUpdaterFailure(runner: DockerRunner, instance: string, imageId: string): Record<string, unknown> {
+  if (!/^fixture-[a-f0-9]{12}$/.test(instance) || !/^sha256:[a-f0-9]{64}$/.test(imageId)) throw new Error("Invalid updater diagnostic fixture identity.");
+  const containers: Record<string, unknown> = {};
+  for (const role of ["owner", "gateway", "vpn-web", "updater", "updater-replacement"]) {
+    try {
+      const value = inspectOwned(runner, "container", resourceName(instance, role), instance);
+      if (!value) { containers[role] = { present: false }; continue; }
+      const config = value.Config as { Env?: unknown[] };
+      containers[role] = { present: true, id: value.Id, image: value.Image, state: value.State, restartCount: value.RestartCount,
+        financialEnvironment: (config.Env ?? []).filter((entry): entry is string => typeof entry === "string"
+          && /^GRIDLENS_(?:TREASURY_PROTOCOL|FINANCIAL_SECURITY_FLOOR)=[012]$/.test(entry)) };
+    } catch { containers[role] = { inspectionUnavailable: true }; }
+  }
+  for (const suffix of ["config", "update-state"]) if (!inspectOwned(runner, "volume", resourceName(instance, suffix), instance)) return { containers, retainedState: "unavailable" };
+  const program = String.raw`
+const fs=require('node:fs'),{DatabaseSync}=require('node:sqlite');
+const read=path=>{try{const stat=fs.lstatSync(path);if(!stat.isFile()||stat.isSymbolicLink()||stat.size>131072)throw Error();return JSON.parse(fs.readFileSync(path,'utf8'));}catch{return null;}};
+const config=read('/config/installation.json'),transaction=read('/update-state/runtime-transaction.json');let journal=null;
+if(fs.existsSync('/update-state/updates.sqlite')){const db=new DatabaseSync('/update-state/updates.sqlite',{readOnly:true});try{const row=db.prepare('SELECT value FROM journal WHERE id=1').get();if(typeof row?.value==='string'&&row.value.length<=131072){const value=JSON.parse(row.value);journal={status:value.status,highestSequence:value.highestSequence,retryAtMs:value.retryAtMs,attemptedAtMs:value.attemptedAtMs};}}finally{db.close();}}
+process.stdout.write(JSON.stringify({configuration:config?{schema:config.schema,phase:config.phase,active:config.active,previous:config.previous,financialSecurity:config.financialSecurity,origin:config.origin}:null,
+transaction:transaction?{operationId:transaction.operationId,rollback:transaction.rollback,failure:transaction.failure,targetImageId:transaction.targetImageId,previousWorkerImage:transaction.previousWorkerImage,previousActive:transaction.previous?.active,previousSchema:transaction.previous?.schema,previousFinancialSecurity:transaction.previous?.financialSecurity}:null,journal}));`;
+  try {
+    const state = checked(runner, ["run", "--rm", ...labels(instance), ...restrictions, "--network", "none", "--user", "0:0",
+      ...mount(resourceName(instance, "config"), "/config", true), ...mount(resourceName(instance, "update-state"), "/update-state", true), imageId, "node", "-e", program]);
+    if (Buffer.byteLength(state) > 256 * 1024) throw new Error();
+    return { containers, retainedState: JSON.parse(state) };
+  } catch { return { containers, retainedState: "read-only capture failed" }; }
+}
 const fixtureFetch = `import { readFileSync, createReadStream, appendFileSync } from "node:fs";
 import { Readable } from "node:stream";
 globalThis.fetch = async function fixtureFetch(input, options = {}) {
@@ -558,6 +588,10 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.passed = true; progress("real worker upgrade, self-replacement, browser return and rollback passed");
   } catch (error) {
     failure = error; evidence.passed = false; evidence.failure = error instanceof Error ? error.message : "Updater acceptance failed.";
+    if (typeof evidence.baseImageId === "string") {
+      try { evidence.failureState = captureUpdaterFailure(runner, instance, evidence.baseImageId); }
+      catch { evidence.failureState = { unavailable: true }; }
+    }
     const logs: Record<string, string> = {};
     for (const role of ["owner", "gateway", "vpn-web", "updater", "updater-replacement"]) {
       try { const name = resourceName(instance, role); if (inspectOwned(runner, "container", name, instance)) { const result = runner.run(["logs", "--tail", "60", name]); logs[role] = `${result.stdout}\n${result.stderr}`.slice(-20_000); } } catch { /* Preserve original failure. */ }

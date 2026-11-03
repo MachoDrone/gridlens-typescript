@@ -117,6 +117,8 @@ test("viewer runtime reads only an ordinary private backend configuration file",
 });
 test("viewer entry requires explicit financial protocol zero and keeps every other authority override forbidden", () => {
   validateViewerEnvironment({ GRIDLENS_TREASURY_PROTOCOL: "0", PATH: "/usr/local/bin:/usr/bin:/bin" });
+  validateViewerEnvironment({ GRIDLENS_TREASURY_PROTOCOL: "0", GRIDLENS_FINANCIAL_SECURITY_FLOOR: "0" });
+  for (const floor of ["", "1", "2", "unknown", "00"]) assert.throws(() => validateViewerEnvironment({ GRIDLENS_TREASURY_PROTOCOL: "0", GRIDLENS_FINANCIAL_SECURITY_FLOOR: floor }));
   for (const value of [undefined, "", "1", "2", "00", " 0"]) assert.throws(() => validateViewerEnvironment({ GRIDLENS_TREASURY_PROTOCOL: value }));
   for (const name of ["GRIDLENS_TREASURY_SOCKET", "GRIDLENS_OWNER_AUTHORITY", "GRIDLENS_SOCKET", "GRIDLENS_UPDATES", "GRIDLENS_VPN_AUTH_FILE", "NODE_EXTRA_CA_CERTS"])
     assert.throws(() => validateViewerEnvironment({ GRIDLENS_TREASURY_PROTOCOL: "0", [name]: "generated" }));

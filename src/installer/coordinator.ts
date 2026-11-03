@@ -246,11 +246,15 @@ export class Coordinator {
     validateInstallation(current); validateInstallation(previous);
     if (current.instance !== previous.instance || current.origin !== previous.origin || current.certificateSha256 !== previous.certificateSha256)
       throw new InstallerError("Recovery cannot change the saved installation identity or endpoint.");
+    const floor = current.financialSecurity ?? previous.financialSecurity;
+    if (floor && !this.supportsFinancialSecurity(previous.active))
+      throw new InstallerError("The retained financial security floor rejects this older recovery runtime; saved resources were retained.");
+    const restored: InstallationConfig = floor ? { ...previous, schema: 2, financialSecurity: floor } : previous;
     this.validateManagedRuntime(current);
     this.removeRuntime(current.instance);
-    this.save({ ...previous, phase: "applying" });
-    this.startRuntime(previous);
-    const config = { ...previous, phase: "ready" as const }; this.save(config);
+    this.save({ ...restored, phase: "applying" });
+    this.startRuntime(restored);
+    const config = { ...restored, phase: "ready" as const }; this.save(config);
     return { config, retainedNewer: false, certificate: this.helper(config.instance, config.active.imageId, "certificate") };
   }
   private removeGateway(config: InstallationConfig, gateway: Record<string, unknown>): void {

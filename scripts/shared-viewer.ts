@@ -16,8 +16,9 @@ export function readViewerConfiguration(path = "/viewer/client.json") {
 /** The shared image's financial role is explicitly disabled for this runtime.
  * No other owner, socket or trust-override environment is admitted. */
 export function validateViewerEnvironment(environment: NodeJS.ProcessEnv): void {
-  if (environment.GRIDLENS_TREASURY_PROTOCOL !== "0" || Object.keys(environment).some(name => name !== "GRIDLENS_TREASURY_PROTOCOL"
-    && /^(?:GRIDLENS_(?:SOCKET|TREASURY|OWNER|UPDATES|VPN_AUTH)|NODE_EXTRA_CA_CERTS)/.test(name))) throw new Error("Viewer financial authority must remain disabled.");
+  if (environment.GRIDLENS_TREASURY_PROTOCOL !== "0" || ![undefined, "0"].includes(environment.GRIDLENS_FINANCIAL_SECURITY_FLOOR)
+    || Object.keys(environment).some(name => !["GRIDLENS_TREASURY_PROTOCOL", "GRIDLENS_FINANCIAL_SECURITY_FLOOR"].includes(name)
+      && /^(?:GRIDLENS_(?:SOCKET|TREASURY|FINANCIAL_SECURITY_FLOOR|OWNER|UPDATES|VPN_AUTH)|NODE_EXTRA_CA_CERTS)/.test(name))) throw new Error("Viewer financial authority must remain disabled.");
 }
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {

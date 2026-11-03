@@ -83,8 +83,8 @@ export function readViewerInstallation(runner: DockerRunner, instance: string): 
   const overrideKeys = new Set(overrides.map(value => value.split("=", 1)[0]));
   const expectedEnvironment = [...((imageConfig.Env ?? []) as string[]).filter(value => !overrideKeys.has(value.split("=", 1)[0])), ...overrides].sort();
   if (!same([...cfg.Env].sort(), expectedEnvironment)) throw new Error("Viewer environment changed.");
-  if (cfg.Env.some(entry => typeof entry !== "string" || entry !== "GRIDLENS_TREASURY_PROTOCOL=0"
-    && /^(?:GRIDLENS_(?:SOCKET|TREASURY|OWNER|UPDATES|VPN_AUTH)|NODE_EXTRA_CA_CERTS)/.test(entry))) throw new Error("Viewer has unexpected authority configuration.");
+  if (cfg.Env.some(entry => typeof entry !== "string" || !["GRIDLENS_TREASURY_PROTOCOL=0", "GRIDLENS_FINANCIAL_SECURITY_FLOOR=0"].includes(entry)
+    && /^(?:GRIDLENS_(?:SOCKET|TREASURY|FINANCIAL_SECURITY_FLOOR|OWNER|UPDATES|VPN_AUTH)|NODE_EXTRA_CA_CERTS)/.test(entry))) throw new Error("Viewer has unexpected authority configuration.");
   const ready = object(container.State).Running === true;
   if (ready) {
     const settings = object(container.NetworkSettings), attached = object(settings.Networks), actualPorts = object(settings.Ports), actual = actualPorts["8080/tcp"];

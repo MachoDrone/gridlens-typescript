@@ -20,7 +20,7 @@ function fixture() {
   const image: ModernRelease = { format: "gridlens-modern-release-v1", version: "0.1.0-viewer-fixture", sequence: 23, platform: "linux-x64", minimumCoordinator: 3,
     imageId: "sha256:" + "1".repeat(64), runtime: { name: "gridlens-runtime-fixture.tar", bytes: 1, sha256: "1".repeat(64) } };
   const objects = new Map<string, any>(), calls: { args: string[]; input?: string | Uint8Array }[] = []; let failCreation = false;
-  const imageEnvironment = ["PATH=/usr/local/bin:/usr/bin:/bin", "GRIDLENS_TREASURY_PROTOCOL=2"];
+  const imageEnvironment = ["PATH=/usr/local/bin:/usr/bin:/bin", "GRIDLENS_TREASURY_PROTOCOL=2", "GRIDLENS_FINANCIAL_SECURITY_FLOOR=0"];
   const values = (args: readonly string[], flag: string) => args.flatMap((value, index) => value === flag ? [args[index + 1]!] : []);
   const labels = (args: readonly string[]) => Object.fromEntries(values(args, "--label").map(value => { const at = value.indexOf("="); return [value.slice(0, at), value.slice(at + 1)]; }));
   const success = (value: unknown = "") => ({ status: 0, stdout: typeof value === "string" ? value : JSON.stringify(value), stderr: "" });
@@ -80,6 +80,7 @@ test("viewer install runs only a distinct gateway with one readonly credential v
     assert.ok(gateway.args.includes("GRIDLENS_TREASURY_PROTOCOL=0"));
     const environment = f.objects.get(`container:${result.containerName}`).Config.Env as string[];
     assert.ok(environment.includes("GRIDLENS_TREASURY_PROTOCOL=0")); assert.ok(!environment.includes("GRIDLENS_TREASURY_PROTOCOL=2"));
+    assert.ok(environment.includes("GRIDLENS_FINANCIAL_SECURITY_FLOOR=0"));
     assert.ok(!gateway.args.some(value => /docker\.sock|treasury.sock|read.sock|\/credentials|\/ledger|\/tls|--privileged|SYS_MODULE/.test(value)));
     assert.ok(f.calls.every(call => !call.args.join(" ").includes(f.config.token)), "viewer bearer travels only through the private helper stdin");
     const before = f.calls.filter(call => call.args.includes("--detach")).length;
@@ -96,6 +97,10 @@ test("viewer inspection rejects a financial role or financial socket even with a
     gateway.Config.Env = original.map(value => value === "GRIDLENS_TREASURY_PROTOCOL=0" ? "GRIDLENS_TREASURY_PROTOCOL=2" : value);
     assert.throws(() => readViewerInstallation(f.runner, f.options.instance));
     gateway.Config.Env = [...original, "GRIDLENS_TREASURY_SOCKET=/treasury/treasury.sock"];
+    assert.throws(() => readViewerInstallation(f.runner, f.options.instance));
+    gateway.Config.Env = original.map(value => value === "GRIDLENS_FINANCIAL_SECURITY_FLOOR=0" ? "GRIDLENS_FINANCIAL_SECURITY_FLOOR=2" : value);
+    assert.throws(() => readViewerInstallation(f.runner, f.options.instance));
+    gateway.Config.Env = [...original, "GRIDLENS_FINANCIAL_SECURITY_FLOOR=unknown"];
     assert.throws(() => readViewerInstallation(f.runner, f.options.instance));
   } finally { f.close(); }
 });

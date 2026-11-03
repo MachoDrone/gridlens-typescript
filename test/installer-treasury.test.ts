@@ -15,6 +15,7 @@ import type { CommandResult } from "../src/installer/docker.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
 import { UpdateDockerFixture } from "./fixtures/updater-docker.ts";
 import { FINANCIAL_SECURITY_FLOOR, FINANCIAL_SECURITY_PROTOCOL_LABEL, GUARDIAN_PROTOCOL_LABEL } from "../src/installer/financial-security.ts";
+import { coordinatorV2OwnerArguments } from "./fixtures/coordinator-v2-owner.ts";
 
 const release=(sequence:number):ModernRelease=>({format:"gridlens-modern-release-v1",version:`0.1.0-treasury.${sequence}`,sequence,
   platform:"linux-x64",minimumCoordinator:sequence===4?3:sequence===1?1:2,imageId:`sha256:${String(sequence).repeat(64)}`,
@@ -22,6 +23,7 @@ const release=(sequence:number):ModernRelease=>({format:"gridlens-modern-release
 class TreasuryDockerFixture extends UpdateDockerFixture {
   readonly protocols=new Map<string,string>([[release(2).imageId,"1"],[release(3).imageId,"1"],[release(4).imageId,"2"]]);
   readonly controls:Record<string,unknown>[]=[];
+  imageEnvironment: string[] = [];
   initializationFails=false;changedImage=false;badSetupLink=false;
   readonly certificate:string;readonly fingerprint:string;
   constructor(directory:string){
@@ -50,10 +52,19 @@ class TreasuryDockerFixture extends UpdateDockerFixture {
       }
     }
     const result=super.run(args,input);
+    if (args[0] === "run" && args.includes("--name") && result.status === 0) {
+      const container = this.objects.get(`container:${args[args.indexOf("--name") + 1]}`);
+      if (container) {
+        const config = container.Config as { Env: string[] }, merged = new Map<string, string>();
+        for (const value of [...this.imageEnvironment, ...config.Env]) merged.set(value.split("=", 1)[0]!, value);
+        config.Env = [...merged.values()];
+      }
+    }
     if(args[0]==="image"&&args[1]==="inspect"&&result.status===0){
       const images=JSON.parse(result.stdout),protocol=this.protocols.get(args.at(-1)!);
       images[0].Config.Labels[BROWSER_SECURITY_PROTOCOL_LABEL]="1";
       if(protocol!==undefined)images[0].Config.Labels[TREASURY_PROTOCOL_LABEL]=protocol;
+      images[0].Config.Env = ["PATH=/fixture", ...this.imageEnvironment];
       if ([release(3).imageId, release(4).imageId].includes(args.at(-1)!)) {
         images[0].Config.Labels[FINANCIAL_SECURITY_PROTOCOL_LABEL]="1";
         images[0].Config.Labels[GUARDIAN_PROTOCOL_LABEL]="1";
@@ -183,6 +194,37 @@ test("protected upgrade retains a schema2 floor and floor-aware rollback restore
   assert.ok((restored.Mounts as { Name: string }[]).some(mount => mount.Name === ledger));
   assert.ok((restored.Mounts as { Name: string }[]).some(mount => mount.Name === credentials));
   assert.ok(f.runner.objects.has(`volume:${resourceName(f.instance, "guardian-cache")}`));
+});
+test("old22-created owner inherits the image's explicit zero floor before new23 worker validation", t => {
+  const f = fixture(t), dockerfile = readFileSync(new URL("../Dockerfile.shared", import.meta.url), "utf8");
+  const bakedFloor = /^ENV[^\n]*\bGRIDLENS_FINANCIAL_SECURITY_FLOOR=([^\s]+).*$/m.exec(dockerfile)?.[1];
+  assert.equal(bakedFloor, "0", "an old coordinator cannot supply this new variable");
+  f.runner.imageEnvironment = ["GRIDLENS_TREASURY_PROTOCOL=1", `GRIDLENS_FINANCIAL_SECURITY_FLOOR=${bakedFloor}`];
+  const installed = f.install(3), oldArguments = coordinatorV2OwnerArguments(installed.config);
+  assert.equal(oldArguments.some(value => value.startsWith("GRIDLENS_FINANCIAL_SECURITY_FLOOR=")), false);
+  f.runner.run(["stop", resourceName(f.instance, "owner")]); f.runner.run(["rm", resourceName(f.instance, "owner")]);
+  f.runner.run(oldArguments);
+  assert.doesNotThrow(() => f.coordinator.validateManagedRuntime(installed.config));
+  const owner = f.container("owner").Config as { Env: string[] };
+  owner.Env = owner.Env.filter(value => !value.startsWith("GRIDLENS_FINANCIAL_SECURITY_FLOOR="));
+  assert.throws(() => f.coordinator.validateManagedRuntime(installed.config), /financial protection differs/);
+  owner.Env.push("GRIDLENS_FINANCIAL_SECURITY_FLOOR=2");
+  assert.throws(() => f.coordinator.validateManagedRuntime(installed.config), /financial protection differs/);
+});
+test("updater restore retains the highest financial floor and cannot reenable legacy financial access", t => {
+  const f = fixture(t), previous = f.install(3).config, current = f.install(4, "upgrade").config;
+  const restored = f.coordinator.restore(current, previous);
+  assert.equal(restored.config.schema, 2); assert.deepEqual(restored.config.financialSecurity, FINANCIAL_SECURITY_FLOOR);
+  assert.equal(restored.config.active.imageId, previous.active.imageId); assert.equal(f.coordinator.financialRuntimeProtocol(restored.config), 0);
+  for (const role of ["owner", "gateway"]) assert.equal(mounts(f.container(role)).some(mount => mount.Destination === "/treasury"), false);
+  assert.ok((f.container("owner").Config as { Env: string[] }).Env.includes("GRIDLENS_FINANCIAL_SECURITY_FLOOR=2"));
+});
+test("updater restore rejects an unaware recovery image before stopping any current service", t => {
+  const f = fixture(t), unsafe = f.install(2).config; f.install(3, "upgrade"); const current = f.install(4, "upgrade").config;
+  const before = f.runner.calls.length;
+  assert.throws(() => f.coordinator.restore(current, unsafe), /security floor/);
+  assert.equal(f.runner.calls.slice(before).some(args => args[0] === "stop" || args[0] === "rm"), false);
+  assert.deepEqual(f.runner.config, current);
 });
 test("financial security floor rejects an unaware older recovery image before stopping telemetry", t => {
   const f = fixture(t), old = f.install(2).config.active; f.install(3, "upgrade"); f.install(4, "upgrade");
