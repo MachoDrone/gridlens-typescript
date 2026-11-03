@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { stripVTControlCharacters } from "node:util";
 import { randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -35,12 +36,32 @@ export interface InstallerReceipt {
   stages: { stage: string; tag: string; exitCode: 0 }[];
   evidence: { path: string; sha256: string }[];
 }
-export function addressAnswer(output: string, address: string): string | undefined {
-  const clean = output.replace(/\x1b\[[0-9;]*m/g, "").replaceAll("\r", "");
-  if (!/Choose address number(?: \[[^\]\n]+\])?: $/.test(clean)) return undefined;
+function addressPrompt(output: string): { clean: string; offset: number } | undefined {
+  const clean = stripVTControlCharacters(output).replaceAll("\r", "");
+  const prompt = /Choose address number(?: \[[^\]\n]+\])?: $/.exec(clean);
+  return prompt ? { clean, offset: prompt.index } : undefined;
+}
+function declaredAddressAnswer(clean: string, address: string): string {
   const choices = [...clean.matchAll(/^\s*(\d+)\) ([0-9.]+)(?:\s|$)/gm)].filter(match => match[2] === address);
   if (choices.length !== 1) throw new Error("Declared fixture address is not an unambiguous public installer choice.");
   return choices[0]![1] + "\n";
+}
+export function addressAnswer(output: string, address: string): string | undefined {
+  const prompt = addressPrompt(output);
+  return prompt ? declaredAddressAnswer(prompt.clean, address) : undefined;
+}
+/** SSH output can split the prompt from its trailing cursor-control bytes.
+ * Re-reading the same normalized occurrence must never supply another answer. */
+export function createAddressPromptResponder(address: string): (output: string) => string | undefined {
+  let answeredOffset: number | undefined;
+  return output => {
+    const prompt = addressPrompt(output);
+    if (!prompt || prompt.offset === answeredOffset) return undefined;
+    if (answeredOffset !== undefined) throw new Error("Public installer repeated its address prompt; no second answer was supplied.");
+    const answer = declaredAddressAnswer(prompt.clean, address);
+    answeredOffset = prompt.offset;
+    return answer;
+  };
 }
 export type PublicLauncher = (profile: FixtureProfile, fixture: Fixture, tag: string, action: "setup" | "upgrade", logPath: string) => Promise<void>;
 export const runPublicLauncher: PublicLauncher = (profile, fixture, tag, action, logPath) => new Promise((resolve, reject) => {
@@ -49,7 +70,8 @@ export const runPublicLauncher: PublicLauncher = (profile, fixture, tag, action,
   const command = `set -o pipefail; ${shellWords(["curl", "--proto", "=https", "--proto-redir", "=https", "--tlsv1.2", "--fail", "--location", "--max-time", "300", url])} | ${shellWords(["bash", "-s", "--", ...args])}`;
   const env = ["env", ...["ALL_PROXY", "all_proxy", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "NODE_EXTRA_CA_CERTS", "SSL_CERT_FILE", "CURL_CA_BUNDLE", "NODE_USE_ENV_PROXY"].flatMap(name => ["-u", name]), "NO_COLOR=1", "bash", "-c", command];
   const child = spawn("ssh", ["-tt", "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", profile.sshTarget, shellWords(env)], { stdio: ["pipe", "pipe", "pipe"] });
-  let output = "", answered = false, failure: Error | undefined;
+  let output = "", failure: Error | undefined;
+  const answerPrompt = createAddressPromptResponder(profile.address);
   const stop = (error: Error): void => { failure ??= error; child.kill("SIGTERM"); setTimeout(() => child.kill("SIGKILL"), 2000).unref(); };
   const timeout = setTimeout(() => stop(new Error("Public installer exceeded its bounded fixture deadline.")), 15 * 60_000);
   const append = (chunk: Buffer): void => {
@@ -57,11 +79,8 @@ export const runPublicLauncher: PublicLauncher = (profile, fixture, tag, action,
     if (Buffer.byteLength(output) > 16 * 1024 ** 2) { stop(new Error("Public installer output exceeded its bound.")); return; }
     if (/password:|passphrase|\[sudo\]/i.test(output.slice(-512))) { stop(new Error("Fixture installer requested unexpected credentials; no answer was supplied.")); return; }
     try {
-      const answer = addressAnswer(output, profile.address);
-      if (answer) {
-        if (answered) { stop(new Error("Public installer repeated its address prompt; no second answer was supplied.")); return; }
-        answered = true; child.stdin.write(answer);
-      }
+      const answer = answerPrompt(output);
+      if (answer) child.stdin.write(answer);
     } catch (error) { stop(error instanceof Error ? error : new Error("Unexpected public installer prompt.")); }
   };
   child.stdout.on("data", append); child.stderr.on("data", append); child.stdin.on("error", () => {});
