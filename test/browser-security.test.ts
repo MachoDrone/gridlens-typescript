@@ -191,8 +191,15 @@ test("gateway exposes only fixed public setup resources, enforces origin/method/
     assert.deepEqual(profileCertificate((await call(applePath(replacementHash))).text), new X509Certificate(replacement.ca).raw);
     at = Date.parse(new X509Certificate(replacement.leaf).validTo);
     const expiredApple = await call(applePath(replacementHash)); assert.equal(expiredApple.code, 409); assert.doesNotMatch(expiredApple.text, /<plist|<data>|BEGIN CERTIFICATE/);
-    at = Date.now();
-    const intermediate = intermediatePublication(f); await service.control({ operation: "browser-security-publish", ...intermediate });
+    const intermediate = intermediatePublication(f);
+    // OpenSSL dates certificates when each command runs. Choose a clock inside
+    // the finished chain's validity interval, rather than before its creation.
+    const validity = [f.ca, intermediate.certificatePem, intermediate.serverCertificatePem].map(pem => new X509Certificate(pem));
+    at = Math.max(...validity.map(certificate => Date.parse(certificate.validFrom))) + 1000;
+    assert.ok(at < Math.min(...validity.map(certificate => Date.parse(certificate.validTo))));
+    await service.control({ operation: "browser-security-publish", ...intermediate });
+    const intermediateStatus = parseBrowserSecurityStatus((await service.read({ operation: "browser-security" }) as BrowserSecurityRead).status);
+    assert.ok(intermediateStatus.available); assert.equal(intermediateStatus.status, "ready");
     const intermediateHash = createHash("sha256").update(new X509Certificate(intermediate.certificatePem).raw).digest("hex");
     const unsupportedApple = await call(applePath(intermediateHash)); assert.equal(unsupportedApple.code, 409);
     assert.match(unsupportedApple.text, /not a self-signed root/); assert.doesNotMatch(unsupportedApple.text, /<plist|<data>|BEGIN CERTIFICATE/);

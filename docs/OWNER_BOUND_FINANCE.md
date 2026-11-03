@@ -23,6 +23,9 @@ installs labeled GridLens guardian resources through existing approved SSH
 access. It creates no host users, services, packages, network configuration or
 public ports, changes no Nosana container, and moves no funds. The exact published
 runtime archive is signature/hash verified before Docker loads it.
+The first guardian supports Docker-managed nodes, including nodes inside the
+Docker Podman wrapper. Native host-Podman sources remain monitoring-only;
+protected finance never bypasses a guardian to support an unverified runtime.
 
 Enrollment imports the spent transfer allowance and prior claim attempts. The
 approved batch can finish after Wallet locks; changed configuration, revoked
