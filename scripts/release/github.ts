@@ -21,6 +21,14 @@ export interface GitHub {
 const tagOkay = (tag: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(tag);
 const nameOkay = (name: string): boolean => /^[A-Za-z0-9][A-Za-z0-9._-]{0,159}$/.test(name);
 const idOkay = (value: number): boolean => Number.isSafeInteger(value) && value > 0;
+function releaseMetadata(value: unknown): Omit<RemoteRelease, "assets"> {
+  const row = value as Partial<RemoteRelease> | null;
+  if (!row || !idOkay(row.id!) || typeof row.tag_name !== "string" || !row.tag_name || row.tag_name.length > 1024 || /[\0\r\n]/.test(row.tag_name)
+    || typeof row.target_commitish !== "string" || !row.target_commitish || row.target_commitish.length > 1024 || /[\0\r\n]/.test(row.target_commitish)
+    || typeof row.draft !== "boolean" || typeof row.prerelease !== "boolean" || row.body != null && typeof row.body !== "string") throw new Error("Unexpected GitHub release identity.");
+  return { id: row.id!, tag_name: row.tag_name, target_commitish: row.target_commitish, draft: row.draft, prerelease: row.prerelease,
+    ...(typeof row.body === "string" ? { body: row.body } : {}) };
+}
 export function parseRemoteAsset(value: unknown): RemoteAsset {
   const row = value as Partial<RemoteAsset>;
   if (!row || !idOkay(row.id!) || typeof row.name !== "string" || !nameOkay(row.name) || !Number.isSafeInteger(row.size) || row.size! < 1
@@ -99,16 +107,43 @@ export function createGitHub(directory: string, runner: CommandRunner = runComma
     if (result.exitCode === 1 && /\(HTTP 404\)/.test(result.stderr)) return undefined;
     throw new Error("GitHub identity read failed; no absence was assumed.");
   }
+  async function listedRelease(tag: string): Promise<Omit<RemoteRelease, "assets"> | undefined> {
+    // The tag endpoint returns published releases only. Authenticated release
+    // listings include drafts only for callers with repository push access:
+    // https://docs.github.com/en/rest/releases/releases#list-releases
+    const repository = await api(`repos/${REPOSITORY}`) as { permissions?: { push?: unknown } } | null;
+    if (repository?.permissions?.push !== true) throw new Error("Draft release visibility could not be verified; no absence was assumed.");
+    const seen = new Set<number>();
+    let match: Omit<RemoteRelease, "assets"> | undefined;
+    for (let page = 1; page <= 10; page++) {
+      const rows = await api(`repos/${REPOSITORY}/releases?per_page=100&page=${page}`);
+      if (!Array.isArray(rows) || rows.length > 100) throw new Error("Invalid GitHub release page; no absence was assumed.");
+      for (const row of rows) {
+        const release = releaseMetadata(row);
+        if (seen.has(release.id)) throw new Error("GitHub release listing repeated an identity; retry the read before publication.");
+        seen.add(release.id);
+        if (release.tag_name === tag) {
+          if (match) throw new Error("Multiple GitHub releases use the requested tag; publication is ambiguous.");
+          match = release;
+        }
+      }
+      // Finish the listing even after a match to reject another draft with the
+      // same tag. An incomplete page set is never evidence that a tag is absent.
+      if (rows.length < 100) return match;
+    }
+    throw new Error("GitHub release listing exceeded its bound; no absence was assumed.");
+  }
   return {
     async release(tag) {
       if (!tagOkay(tag)) throw new Error("Invalid release tag.");
-      const value = await optional(`repos/${REPOSITORY}/releases/tags/${tag}`) as Omit<RemoteRelease, "assets"> | undefined;
-      if (!value) return undefined;
-      if (!idOkay(value.id) || value.tag_name !== tag || typeof value.draft !== "boolean" || typeof value.prerelease !== "boolean") throw new Error("Unexpected GitHub release identity.");
+      const published = await optional(`repos/${REPOSITORY}/releases/tags/${tag}`);
+      const value = published === undefined ? await listedRelease(tag) : releaseMetadata(published);
+      if (value === undefined) return undefined;
+      if (value.tag_name !== tag) throw new Error("Unexpected GitHub release identity.");
       const assets: RemoteAsset[] = [];
       for (let page = 1; page <= 10; page++) {
         const rows = await api(`repos/${REPOSITORY}/releases/${value.id}/assets?per_page=100&page=${page}`);
-        if (!Array.isArray(rows)) throw new Error("Invalid release asset page.");
+        if (!Array.isArray(rows) || rows.length > 100) throw new Error("Invalid release asset page.");
         assets.push(...rows.map(parseRemoteAsset));
         if (rows.length < 100) return { ...value, assets };
       }
