@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { captureUpdaterFailure, updaterAcceptanceOptions, updaterAcceptanceSource, verifyUpdaterTreasuryBindings } from "../scripts/test-updater-docker.ts";
+import { assertViewerUpdateDenied, captureUpdaterFailure, updaterAcceptanceOptions, updaterAcceptanceSource, verifyUpdaterTreasuryBindings } from "../scripts/test-updater-docker.ts";
 import type { DockerRunner } from "../src/installer/docker.ts";
+import { createMemorySnapshotStore } from "../src/server/snapshot-store.ts";
+import { createSharedService } from "../src/backend/service.ts";
+import { SharedHttpError } from "../src/backend/ipc.ts";
+import { parseUpdateStatus } from "../src/contracts/updates.ts";
 
 const args = ["--instance", "fixture-123456789abc", "--address", "10.71.0.8", "--https-port", "19790", "--web-port", "19789", "--base-image", "gridlens-source:current"];
 const image = (security = true, treasury?: "0" | "1" | "2") => ({ Id: `sha256:${"a".repeat(64)}`, Config: { Labels: {
@@ -14,6 +18,29 @@ function runner(value: unknown): DockerRunner {
   return { run(command) { assert.deepEqual(command, ["image", "inspect", "gridlens-source:fixture"]);
     return { status: 0, stdout: JSON.stringify(value), stderr: "" }; } };
 }
+test("viewer update rejection is exactly401, retains readable identity and never dispatches an update mutation", async () => {
+  const values = new Map<string, unknown>(), state = { snapshots: createMemorySnapshotStore(),
+    get: <T>(key: string) => values.get(key) as T | undefined, set(key: string, value: unknown) { values.set(key, structuredClone(value)); },
+    batch(entries: readonly (readonly [string, unknown])[]) { for (const [key, value] of entries) values.set(key, structuredClone(value)); } };
+  const build = { version: "0.1.0-generated", sequence: 24, buildId: "24:0.1.0-generated" };
+  const saved = { version: 1, supported: true, canUpdate: true, checking: false, current: build, candidate: null, checkedAtMs: 1000, nextCheckAtMs: null, checkError: null,
+    operation: { id: "generated-operation", revision: 1, target: build, previous: build, phase: "complete", startedAtMs: 1000, updatedAtMs: 1001,
+      downloadedBytes: 1, totalBytes: 1, error: null, result: build } };
+  const updates: string[] = [], service = createSharedService(state, { protectedMode: true, build,
+    updates: async body => { updates.push(String(body.operation)); return structuredClone(saved); } });
+  const token = "v".repeat(43); service.access.setFleet("default", []); service.access.registerGateway("default", token);
+  try {
+    const before = parseUpdateStatus(await service.read({ operation: "updates-status", token }));
+    await assert.rejects(service.read({ operation: "updates-check", token }), error => error instanceof SharedHttpError && error.status === 401);
+    const readable = await service.read({ operation: "status", token }) as { role: string };
+    const after = parseUpdateStatus(await service.read({ operation: "updates-status", token }));
+    assertViewerUpdateDenied(401, readable.role, before, after);
+    assert.deepEqual(updates, ["status", "status"]);
+    for (const status of [200, 403, 500]) assert.throws(() => assertViewerUpdateDenied(status, "viewer", before, after));
+    assert.throws(() => assertViewerUpdateDenied(401, "operator", before, after));
+    assert.throws(() => assertViewerUpdateDenied(401, "viewer", before, { ...after, operation: null }));
+  } finally { await service.setup.close(); }
+});
 test("failed updater capture preserves stopped-worker identity and uses only readonly state volumes", () => {
   const instance = "fixture-123456789abc", imageId = `sha256:${"a".repeat(64)}`, calls: readonly string[][] = [];
   const recorded = calls as string[][];

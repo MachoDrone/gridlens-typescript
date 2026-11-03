@@ -20,6 +20,7 @@ import { localDockerRunner, checked, inspectOwned, resourceName, labels, mount, 
 import type { DockerRunner } from "../src/installer/docker.ts";
 import type { ModernRelease } from "../src/installer/release.ts";
 import { parseUpdateStatus, updateActive } from "../src/contracts/updates.ts";
+import type { UpdateStatus } from "../src/contracts/updates.ts";
 import { CHANNEL_FORMAT } from "../src/updater/release.ts";
 import { ensureUpdater, DOCKER_SOCKET } from "../src/updater/deployment.ts";
 import { channelAssets } from "../src/updater/channel-paths.ts";
@@ -94,6 +95,15 @@ export function verifyUpdaterTreasuryBindings(instance: string, role: string, va
 }
 const hash = (value: string | Uint8Array) => createHash("sha256").update(value).digest("hex");
 const delay = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+export function assertViewerUpdateDenied(status: number, role: unknown, before: UpdateStatus, after: UpdateStatus): void {
+  // Shared service maps AccessError("denied") to401.403 belongs to other
+  // transport/endpoint guards and is not interchangeable with this contract.
+  assert.equal(status, 401, "Viewer update denial did not match the access contract");
+  assert.equal(role, "viewer", "Denied client lost its readable viewer identity");
+  assert.equal(after.canUpdate, false, "Viewer acquired update authority");
+  assert.deepEqual(after.current, before.current, "Denied viewer request changed the running build");
+  assert.deepEqual(after.operation, before.operation, "Denied viewer request changed an update operation");
+}
 /** Read-only, fixed-file diagnostics before fixture cleanup. No credentials,
  * certificate keys or complete environment values leave the owned containers. */
 export function captureUpdaterFailure(runner: DockerRunner, instance: string, imageId: string): Record<string, unknown> {
@@ -482,13 +492,17 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       }
       if (base.treasuryProtocol === 2) {
         assert.equal(targetStatus.role, "viewer", "The private gateway must become a viewer after protection");
+        const beforeDenied = await readStatus();
         const denied = await fetch(new URL("/api/shared/updates/check", web.origin), { method: "POST", headers: { Origin: web.origin, "Content-Type": "application/json" }, body: "{}" });
-        await denied.body?.cancel(); assert.equal(denied.status, 403, "Private HTTP viewer acquired update authority");
+        await denied.body?.cancel();
+        const stillReadable = await call(web.origin, "/api/shared/status");
+        assertViewerUpdateDenied(denied.status, stillReadable.role, beforeDenied, await readStatus());
         const granted = await walletCall("owner-browser", { version: 1 }, walletUnlock);
         const grantedCookie = granted.cookie;
         assert.equal(granted.status, 200); assert.ok(typeof grantedCookie === "string" && grantedCookie.startsWith("__Host-gridlens-owner="));
         ownerBrowserCookie = `${browserCookie}; ${grantedCookie.split(";")[0]}`;
-        evidence.protectedOwnerAuthorization = { privateGatewayRole: "viewer", privateHttpAdministrationDenied: true, walletAuthorizedHttpsOwnerCookie: true, financialRequests: 0 };
+        evidence.protectedOwnerAuthorization = { privateGatewayRole: "viewer", privateHttpAdministrationDenied: true, privateHttpDenialStatus: 401,
+          viewerReadAccessPreserved: true, deniedRequestLeftOperationUnchanged: true, walletAuthorizedHttpsOwnerCookie: true, financialRequests: 0 };
       }
       evidence.walletAfterUpgrade = { sourceCapability: (previous ?? base).treasuryProtocol, targetCapability: base.treasuryProtocol,
         minimumCoordinator: target.release.minimumCoordinator, socketIsolation: "owner and HTTPS gateway only; absent from HTTP gateway and updater",
@@ -557,8 +571,11 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.browserSecurityAfterRollback = "Public CA, saved endpoints, server identity and verified HTTPS preserved";
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
     if (base.treasuryProtocol === 2) {
-      assert.equal((await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} })).status, 403,
-        "Owner browser authorization survived owner replacement");
+      const beforeExpired = await readStatus();
+      const expired = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} });
+      const readable = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: ownerBrowserCookie! });
+      assert.equal(readable.status, 200);
+      assertViewerUpdateDenied(expired.status, readable.value.role, beforeExpired, await readStatus());
       await page.goto(web.origin, { waitUntil: "domcontentloaded" });
       await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected, completed.current!.buildId, { timeout: 60_000 });
     } else {
