@@ -25,7 +25,10 @@ export function createObservationStore(state: PrivateState, serverId: string, no
   // Kept outside the original observation object so an older reader/writer
   // cannot erase driver evidence during an application rollback.
   const driverKey = (context: FleetContext): string => `pc-drivers:${context.scopeId}:${context.rosterRevision}`;
-  const devicesKey = (context: FleetContext): string => `pc-gpu-devices:${context.scopeId}:${context.rosterRevision}`;
+  // v1 readers reject observedBinding. Leave their namespace untouched so a
+  // rollback can read its original evidence; migrate on the next atomic write.
+  const legacyDevicesKey = (context: FleetContext): string => `pc-gpu-devices:${context.scopeId}:${context.rosterRevision}`;
+  const devicesKey = (context: FleetContext): string => `pc-gpu-devices-v2:${context.scopeId}:${context.rosterRevision}`;
   function driverGranted(context: FleetContext, row: Pick<PcDriverUpdate, "pcId" | "sshFingerprint" | "approvalAtMs">, associations: PcAssociation[]): boolean {
     const permission = state.get<PcPermission>(`permission:${context.scopeId}:${row.pcId}`);
     return !!permission && permission.version === 1 && permission.rosterRevision === context.rosterRevision && permission.gpu
@@ -53,7 +56,8 @@ export function createObservationStore(state: PrivateState, serverId: string, no
   function read(context: FleetContext, includeHistory = false): SharedObservations {
     const saved = state.get<SharedObservations>(key(context));
     const drivers = state.get<PcDriverRecord[]>(driverKey(context));
-    const devices = state.get<PcGpuRecord[]>(devicesKey(context));
+    const currentDevices = state.get<PcGpuRecord[]>(devicesKey(context));
+    const devices = currentDevices === undefined ? state.get<PcGpuRecord[]>(legacyDevicesKey(context)) : currentDevices;
     const data = parseSharedObservations(saved ?? { version: 1, serverId, scopeId: context.scopeId, rosterRevision: context.rosterRevision,
       associations: [], observations: [], networks: [] }, serverId, context);
     if (drivers !== undefined) {

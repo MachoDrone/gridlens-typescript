@@ -3,7 +3,7 @@ import { GPU_UUID } from "../fleet/pc-observations.ts";
 import { GPU_BOOT_ID, parsePcGpu } from "../fleet/pc-gpu-devices.ts";
 import type { PcGpuAllocation, PcGpuDevice, PcGpuEvent, PcGpuObservation } from "../fleet/pc-gpu-devices.ts";
 import type { SshRun } from "./ssh.ts";
-import { cleanNodeRuntime, verifyNode } from "./pc-rewards.ts";
+import { createGpuRuntimeBindingReader, gpuAllocationCommand } from "./gpu-runtime-binding.ts";
 
 export const PC_GPU_COMMAND = "/usr/bin/nvidia-smi --query-gpu=index,uuid,pci.bus_id --format=csv,noheader,nounits";
 export const PC_GPU_BOOT_COMMAND = "/bin/cat /proc/sys/kernel/random/boot_id";
@@ -82,6 +82,7 @@ export async function readPcGpuDevices(run: SshRun, allocatedRun: SshRun, associ
   const devices = new Map<string, PcGpuDevice>(), allocations: PcGpuAllocation[] = [];
   let bootId: string | null = null, partial = false, journal: PcGpuObservation["journal"] = { status: "unavailable", events: [] };
   const selected = associations.slice(0, 64);
+  const runtimeBindings = selected.length ? createGpuRuntimeBindingReader(allocated, selected[0]!.binding.pcId) : undefined;
   // The cap bounds both SSH work and per-PC payloads. Remaining associations do
   // not acquire an inferred allocation or borrowed mapping.
   partial = associations.length > selected.length;
@@ -95,8 +96,10 @@ export async function readPcGpuDevices(run: SshRun, allocatedRun: SshRun, associ
     for (const association of selected) {
       const result: PcGpuAllocation = { address: association.address, binding: association.binding, observedAtMs: now(), status: "unavailable", gpuUuids: [] };
       try {
-        if (await verifyNode(allocated, association) === "ok") {
-          const visible = await allocated(`${cleanNodeRuntime(association)} exec ${association.binding.nodeContainerId} /usr/bin/nvidia-smi --query-gpu=uuid --format=csv,noheader`, { maximum: 8192 });
+        const observedBinding = await runtimeBindings!.resolve(association);
+        if (observedBinding) {
+          result.observedBinding = observedBinding;
+          const visible = await allocated(gpuAllocationCommand(observedBinding), { maximum: 8192 });
           const uuids = visible.stdout.trim().split(/\r?\n/).filter(Boolean).map(normalizeUuid).sort();
           if (visible.code === 0 && !visible.stderrPresent && uuids.length > 0 && uuids.length <= 64 && uuids.every(uuid => GPU_UUID.test(uuid)) && new Set(uuids).size === uuids.length) {
             // An initially unavailable allocation can be measured once the exact
@@ -142,7 +145,7 @@ export async function readPcGpuDevices(run: SshRun, allocatedRun: SshRun, associ
   try { const value = await run(PC_GPU_BOOT_COMMAND, { maximum: 128, timeoutMs: 2000 }); if (value.code === 0) endBoot = boot(value.stdout); } catch { /* fence failed */ }
   const fenced = bootId !== null && endBoot === bootId;
   if (!fenced) {
-    devices.clear(); for (const allocation of allocations) { allocation.status = "unavailable"; allocation.gpuUuids = []; }
+    devices.clear(); for (const allocation of allocations) { allocation.status = "unavailable"; allocation.gpuUuids = []; delete allocation.observedBinding; }
     journal = { status: "unavailable", events: [] };
   }
   const readings = [...devices.values()].slice(0, 64), responds = readings.filter(device => device.status === "responds").length;

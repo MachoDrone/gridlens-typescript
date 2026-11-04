@@ -114,6 +114,22 @@ from query responses. UUID preambles establish event attribution; otherwise the
 event remains PC-level. Unavailable or truncated logs do not prove absence of
 faults. This collection never resets GPUs, installs drivers or changes host access.
 
+For a Docker-wrapped Podman node, the GPU query runs in the verified outer
+wrapper; the inner Nosana orchestrator need not contain NVIDIA-SMI. A wrapper
+must have exactly one running Nosana orchestrator before its measured UUIDs can
+be assigned to that host. If a saved runtime is no longer running, a bounded
+read-only scan can reverify a unique replacement on the same approved PC using
+its public HTTP identity. An unreadable node, duplicate identity or conflicting
+saved identity remains unknown. The approved binding is retained as the
+authorization anchor and `observedBinding` records the runtime actually read;
+associations, permissions, financial pins and recorder resources are not changed.
+GPU evidence is written to a v2 namespace with legacy v1 read fallback. Older
+releases retain their original v1 evidence during rollback. Kernel events that
+cannot be assigned to a host remain explicitly PC-level, including known UUIDs.
+The revised reader receives one prompt, durably reserved GPU refresh after upgrade;
+subsequent restarts retain its five-minute cadence. Missing credentials and
+transport failures retain backoff, and other provider budgets are unchanged.
+
 ## Toolchain and commands
 
 Use Node **24.14.1**, npm **11.11.0**, TypeScript **7.0.2**, Node declarations

@@ -122,3 +122,27 @@ test("GPU mappings expire locally and failed reads retain original source dates"
   await expect(cell(page, 2)).toHaveText("—"); await expect(cell(page, 2)).toHaveAttribute("data-gpu-state", "unknown");
   expect(mode.posts).toBe(0); expect(mode.errors).toEqual([]);
 });
+
+test("GPU-only runtime rediscovery maps empty saved UUIDs and retains an unassigned known-UUID fault at PC level", async ({ page }) => {
+  const mode = await fixture(page), record = mode.data.pcGpuDevices![0]!, at = record.gpu.observedAtMs;
+  for (const association of mode.data.associations) association.gpuUuids = [];
+  record.gpu.status = "partial";
+  record.gpu.allocations[0] = { ...record.gpu.allocations[0]!, status: "unavailable", gpuUuids: [] };
+  record.gpu.allocations[1]!.observedBinding = { pcId, runtime: "podman", wrapperId: "c".repeat(64), nodeContainerId: "d".repeat(64) };
+  record.gpu.journal.events = [{ bootId, pciBusId: "0000:01:00", xid: 79, atMs: at - 5000, gpuUuid: uuids[0]! }];
+  const originalAssociations = structuredClone(mode.data.associations);
+  await page.goto("/");
+  await expect(cell(page, 0).locator(".gpu-id-current")).toHaveText("—");
+  await expect(cell(page, 0)).toHaveAttribute("data-gpu-state", "unknown");
+  await expect(cell(page, 1).locator(".gpu-id-current")).toHaveText("2");
+  await expect(cell(page, 1)).toHaveAttribute("data-gpu-state", "current");
+  await expect(cell(page, 1)).toHaveAttribute("aria-label", /GPU runtime identity verified.*differs from the saved source binding; source approval is unchanged/);
+  for (const index of [0, 1]) {
+    await expect(cell(page, index)).toHaveAttribute("aria-label", /PC-level Xid 79.*no verified host allocation.*not assigned to this host/);
+    await expect(cell(page, index)).not.toHaveAttribute("aria-label", /Recorded Xid 79/);
+    expect(await cell(page, index).getAttribute("aria-label")).toContain(uuids[0]);
+    expect(await cell(page, index).getAttribute("aria-label")).toContain(new Date(at - 5000).toISOString());
+  }
+  expect(mode.data.associations).toEqual(originalAssociations);
+  expect(mode.posts).toBe(0); expect(mode.errors).toEqual([]);
+});

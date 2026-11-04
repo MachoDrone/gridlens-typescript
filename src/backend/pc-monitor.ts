@@ -20,7 +20,8 @@ export interface PcPermission {
   version: 1; computer: Computer; associations: PcAssociation[]; rosterRevision: string;
   automaticIp: boolean; rewards: boolean; gpu: boolean; approvedAtMs: number; revokedAtMs: number | null; paused: boolean;
 }
-interface Schedule { ipAt: number; nodeAt: number; rewardsAt: Record<string, number>; gpuAt: Record<string, number>; retryAt: number; driverAt?: number; driverFailures?: number; devicesAt?: number }
+interface Schedule { ipAt: number; nodeAt: number; rewardsAt: Record<string, number>; gpuAt: Record<string, number>; retryAt: number; driverAt?: number; driverFailures?: number; devicesAt?: number; devicesReaderRevision?: number }
+const GPU_DEVICES_READER_REVISION = 2;
 interface Target { context: FleetContext; permission: PcPermission; key: string; schedule: Schedule; associations: PcAssociation[] }
 export interface PcMonitorOptions {
   state: PrivateState; vault: CredentialVault; observations: ReturnType<typeof createObservationStore>;
@@ -43,6 +44,8 @@ export function createPcMonitor({ state, vault, observations, contexts, now = Da
   let stopped = false, timer: ReturnType<typeof setInterval> | undefined;
   const waits = () => state.get<{ ip: number; rewards: number }>("monitor/provider-waits") ?? { ip: 0, rewards: 0 };
   const schedule = (key: string): Schedule => state.get<Schedule>(`monitor:${key}`) ?? { ipAt: 0, nodeAt: 0, rewardsAt: {}, gpuAt: {}, retryAt: 0 };
+  const devicesRevisionDue = (saved: Schedule) => saved.devicesReaderRevision !== GPU_DEVICES_READER_REVISION;
+  const devicesDue = (saved: Schedule) => devicesRevisionDue(saved) || (saved.devicesAt ?? 0) <= now();
   const rewardDenied = (target: Target, association: PcAssociation): boolean => {
     const denial = state.get<{ approvedAtMs: number }>(`monitor:reward-denial:${target.key}:${association.address}`);
     return denial !== undefined && denial.approvedAtMs >= target.permission.approvedAtMs;
@@ -94,7 +97,7 @@ export function createPcMonitor({ state, vault, observations, contexts, now = Da
     saveSchedule(target, kind === "ip" ? { ipAt: now() + 60_000 } : { nodeAt: now() + 30_000 });
     const task = (async () => {
       const credential = vault.read(target.context.scopeId, target.permission.computer.id);
-      if (!credential) return;
+      if (!credential) { saveSchedule(target, { retryAt: now() + 60_000 }); return; }
       try {
         await connect(target.permission.computer, credential, async run => {
           const guarded: SshRun = (command, options) => {
@@ -128,8 +131,10 @@ export function createPcMonitor({ state, vault, observations, contexts, now = Da
           }
           const privileged: SshRun = (command, options) => guarded(credential.sudoPassword === undefined ? command : `/usr/bin/sudo -S -p '' -- ${command}`,
             { ...options, ...(credential.sudoPassword === undefined ? {} : { input: credential.sudoPassword + "\n" }) });
-          if (driverPermission(target) && (schedule(target.key).devicesAt ?? 0) <= now()) {
-            saveSchedule(target, { devicesAt: now() + GPU_REFRESH_MS });
+          if (driverPermission(target) && devicesDue(schedule(target.key))) {
+            // A changed reader gets one prompt refresh after upgrade. Persist
+            // both revision and deadline before work so restart cannot repeat it.
+            saveSchedule(target, { devicesAt: now() + GPU_REFRESH_MS, devicesReaderRevision: GPU_DEVICES_READER_REVISION });
             const deviceRun = (reader: SshRun): SshRun => (command, options) => {
               if (!driverPermission(target)) return Promise.reject(new Error("GPU monitoring permission changed."));
               return reader(command, options);
@@ -187,8 +192,9 @@ export function createPcMonitor({ state, vault, observations, contexts, now = Da
     for (const kind of ["ip", "node"] as const) {
       const slots = (kind === "ip" ? 1 : 3) - [...active.keys()].filter(key => key.startsWith(`${kind}:`)).length;
       const due = current.filter(target => permitted(target, kind) && target.schedule.retryAt <= now()
-        && (kind === "ip" ? Math.max(target.schedule.ipAt, waits().ip) <= now() : target.schedule.nodeAt <= now()
-          && (((target.schedule.driverAt ?? 0) <= now() || (target.schedule.devicesAt ?? 0) <= now()) && driverPermission(target, false) || target.permission.associations.some(association => target.permission.gpu && (target.schedule.gpuAt[association.address] ?? 0) <= now()
+        && (kind === "ip" ? Math.max(target.schedule.ipAt, waits().ip) <= now() : (target.schedule.nodeAt <= now()
+          || devicesRevisionDue(target.schedule) && driverPermission(target, false))
+          && (((target.schedule.driverAt ?? 0) <= now() || devicesDue(target.schedule)) && driverPermission(target, false) || target.permission.associations.some(association => target.permission.gpu && (target.schedule.gpuAt[association.address] ?? 0) <= now()
             || target.permission.rewards && !rewardDenied(target, association) && waits().rewards <= now() && (target.schedule.rewardsAt[association.address] ?? 0) <= now()))));
       due.sort((a, b) => (kind === "ip" ? a.schedule.ipAt - b.schedule.ipAt : a.schedule.nodeAt - b.schedule.nodeAt) || a.key.localeCompare(b.key));
       for (const target of due.slice(0, Math.max(0, slots))) pending.push(collect(target, kind));

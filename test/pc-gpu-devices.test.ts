@@ -200,13 +200,13 @@ test("multi-GPU projection preserves exact current and retained dates, boot orde
   assert.deepEqual(pcGpuView(row, { ...associations[0]!, sshFingerprint: "SHA256:" + "B".repeat(43) }, base).indices, []);
 });
 
-async function fixture() {
+async function fixture(approvedAssociations = associations) {
   const root = await mkdtemp(join(tmpdir(), "gridlens-gpu-devices-")); let at = base;
   const state = openSharedState(join(root, "state"), { now: () => at }), vault = openCredentialVault(join(root, "vault"));
   const observations = createObservationStore(state, "generated-server", () => at);
   const permission: PcPermission = { version: 1, computer: { id: pcId, host: "10.0.0.2", port: 22, name: "Generated PC", fingerprint, hostKey: "generated" },
-    associations, rosterRevision: context.rosterRevision, automaticIp: false, rewards: false, gpu: true, approvedAtMs: base - 1000, revokedAtMs: null, paused: false };
-  observations.associate(context, associations); state.set(`permission:${context.scopeId}:${pcId}`, permission);
+    associations: approvedAssociations, rosterRevision: context.rosterRevision, automaticIp: false, rewards: false, gpu: true, approvedAtMs: base - 1000, revokedAtMs: null, paused: false };
+  observations.associate(context, approvedAssociations); state.set(`permission:${context.scopeId}:${pcId}`, permission);
   vault.save(context.scopeId, pcId, { username: "generated", password: "generated" });
   return { state, vault, observations, permission, now: () => at, time: (value: number) => { at = value; },
     update: (gpu: PcGpuObservation) => observations.gpuDevices(context, { pcId, sshFingerprint: fingerprint, approvalAtMs: permission.approvedAtMs, gpu }),
@@ -290,4 +290,77 @@ test("revocation during the GPU read suppresses publication", async () => {
     devicesReader: async () => { reads++; f.state.set(`permission:${context.scopeId}:${pcId}`, { ...f.permission, revokedAtMs: base }); return good(); } });
   try { await monitor.tick(); assert.equal(reads, 1); assert.deepEqual(f.observations.read(context).pcGpuDevices, undefined); }
   finally { await monitor.stop(); await f.close(); }
+});
+
+test("GPU-only runtime evidence preserves the approved anchor and uses measured UUIDs with no saved UUID association", () => {
+  const approved = { ...associations[0]!, gpuUuids: [] }, gpu = good();
+  const observedBinding = { pcId, runtime: "podman" as const, wrapperId: "c".repeat(64), nodeContainerId: "d".repeat(64) };
+  gpu.allocations[0]!.observedBinding = observedBinding;
+  const parsed = parsePcGpuRecord(record(gpu)), view = pcGpuView(parsed, approved, base);
+  assert.deepEqual(view.indices, [4]); assert.equal(view.current, true);
+  assert.deepEqual(view.observedBinding, observedBinding); assert.equal(view.runtimeChanged, true);
+  assert.deepEqual(parsed.gpu.allocations[0]!.binding, approved.binding);
+  assert.deepEqual(approved.gpuUuids, []);
+  assert.deepEqual(pcGpuView(parsed, { ...approved, binding: observedBinding }, base).indices, [], "GPU evidence does not authorize rebinding the source");
+  assert.deepEqual(pcGpuView(parsed, { ...approved, sshFingerprint: "SHA256:" + "B".repeat(43) }, base).indices, []);
+  assert.deepEqual(pcGpuView(parsed, { ...approved, verifiedAtMs: base + 1 }, base + 1).indices, []);
+  assert.deepEqual(pcGpuView(parsed, approved, base + GPU_FRESH_MS).indices, []);
+  assert.deepEqual(pcGpuView(parsed, approved, base, true).indices, []);
+  assert.deepEqual(pcGpuView(parsed, { ...approved, gpuUuids: [uuids[1]!] }, base).indices, [], "known UUID conflicts remain unconfirmed");
+  const wrongPc = structuredClone(gpu); wrongPc.allocations[0]!.observedBinding!.pcId = "f".repeat(64);
+  assert.throws(() => parsePcGpu(wrongPc), /Invalid GPU allocation/);
+  const shortId = structuredClone(gpu); shortId.allocations[0]!.observedBinding!.nodeContainerId = "d".repeat(12);
+  assert.throws(() => parsePcGpu(shortId));
+  assert.throws(() => parsePcGpuRecord({ ...record(gpu), approvalAtMs: base + 1 }), /source identity/);
+});
+
+test("known kernel GPU UUIDs remain PC-level evidence until a host allocation proves attribution", () => {
+  const gpu = good(), approved = associations.map(row => ({ ...row, gpuUuids: [] }));
+  gpu.status = "partial"; gpu.allocations[0] = { ...gpu.allocations[0]!, status: "unavailable", gpuUuids: [] };
+  gpu.journal = parsePcGpuJournal(journal, bootId, base);
+  const row = record(gpu); delete row.lastGood;
+  for (const association of approved) {
+    const view = pcGpuView(row, association, base);
+    assert.equal(view.events.length, 0);
+    assert.deepEqual(view.pcEvents.map(event => [event.xid, event.gpuUuid, event.atMs]), [[79, uuids[0], base - 9999]]);
+  }
+  assert.deepEqual(pcGpuView(row, approved[1], base).indices, [1], "PC-level evidence does not erase healthy mappings");
+  gpu.allocations[0] = good().allocations[0]!;
+  assert.equal(pcGpuView(row, approved[0], base).events[0]?.xid, 79);
+  assert.equal(pcGpuView(row, approved[1], base).pcEvents.length, 0, "an attributed fault does not become another host's fault");
+});
+
+test("v2 GPU storage migrates v1 evidence without modifying rollback data, permissions or financial source bindings", async () => {
+  const approved = associations.map(row => ({ ...row, gpuUuids: [] })), f = await fixture(approved);
+  const oldKey = `pc-gpu-devices:${context.scopeId}:${context.rosterRevision}`, newKey = `pc-gpu-devices-v2:${context.scopeId}:${context.rosterRevision}`;
+  const permissionKey = `permission:${context.scopeId}:${pcId}`;
+  try {
+    const original = record(); original.gpu.journal = parsePcGpuJournal(journal, bootId, base);
+    f.state.set(oldKey, [original]);
+    const oldBytes = JSON.stringify(f.state.get(oldKey)), permissionBytes = JSON.stringify(f.state.get(permissionKey));
+    assert.equal(f.observations.read(context).pcGpuDevices![0]!.gpu.observedAtMs, base);
+    assert.equal(f.state.get(newKey), undefined, "reading v1 evidence never mutates it");
+    f.time(base + 1000); const updated = good(base + 1000);
+    updated.allocations[0]!.observedBinding = { pcId, runtime: "podman", wrapperId: "c".repeat(64), nodeContainerId: "d".repeat(64) };
+    f.update(updated);
+    assert.equal(JSON.stringify(f.state.get(oldKey)), oldBytes, "an older release still sees exactly its accepted format");
+    assert.equal(JSON.stringify(f.state.get(permissionKey)), permissionBytes);
+    assert.deepEqual(f.observations.read(context).associations, approved);
+    const restarted = createObservationStore(f.state, "generated-server", f.now), saved = restarted.read(context).pcGpuDevices![0]!;
+    assert.deepEqual(saved.gpu.allocations[0]!.observedBinding, updated.allocations[0]!.observedBinding);
+    assert.equal(saved.retainedEvents?.[0]?.atMs, base - 9999);
+    assert.deepEqual(pcGpuView(saved, approved[0], base + 1000).indices, [4]);
+    f.time(base + 2000);
+    f.update({ schema: 1, source: "pc-nvidia-smi", observedAtMs: base + 2000, bootId: null, status: "unavailable",
+      devices: [], allocations: [], journal: { status: "unavailable", events: [] } });
+    const retained = restarted.read(context).pcGpuDevices![0]!;
+    assert.deepEqual(retained.retainedAllocations?.[0]?.observedBinding, updated.allocations[0]!.observedBinding);
+    assert.equal(retained.retainedAllocations?.[0]?.observedAtMs, base + 1000);
+    assert.deepEqual(pcGpuView(retained, approved[0], base + 2000).retainedIndices, [4]);
+    assert.equal(pcGpuView(retained, approved[0], base + 2000).retainedDevices[0]?.observedAtMs, base + 1000);
+    f.state.set(newKey, []);
+    assert.deepEqual(restarted.read(context).pcGpuDevices, [], "explicit v2 emptiness cannot resurrect v1 mappings");
+    f.state.set(newKey, null);
+    assert.throws(() => restarted.read(context), /Invalid saved PC GPU inventory/, "invalid v2 data cannot silently fall back to v1");
+  } finally { await f.close(); }
 });

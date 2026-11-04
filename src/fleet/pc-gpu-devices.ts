@@ -12,6 +12,9 @@ export interface PcGpuDevice {
 }
 export interface PcGpuAllocation {
   address: string; binding: NodeBinding; observedAtMs: number;
+  // binding remains the approved source anchor. A runtime rediscovered for this
+  // read is evidence for GPU monitoring only, never a new source permission.
+  observedBinding?: NodeBinding;
   status: "ok" | "changed" | "unavailable"; gpuUuids: string[];
 }
 export interface PcGpuEvent { bootId: string; pciBusId: string; xid: number; atMs: number; gpuUuid: string | null }
@@ -48,12 +51,14 @@ function parseDevice(value: unknown): PcGpuDevice {
   return { ...row } as unknown as PcGpuDevice;
 }
 function parseAllocation(value: unknown): PcGpuAllocation {
-  const row = object(value, ["address", "binding", "observedAtMs", "status", "gpuUuids"]);
+  const row = object(value, ["address", "binding", "observedAtMs", "status", "gpuUuids"], ["observedBinding"]);
+  const binding = parseBinding(row.binding), observedBinding = row.observedBinding === undefined ? undefined : parseBinding(row.observedBinding);
   const gpuUuids = list(row.gpuUuids, 64, value => { if (!uuid(value)) throw new Error("Invalid allocated GPU UUID."); return value; });
   if (typeof row.address !== "string" || !/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(row.address) || !timestamp(row.observedAtMs)
     || !["ok", "changed", "unavailable"].includes(String(row.status)) || !unique(gpuUuids)
+    || observedBinding !== undefined && observedBinding.pcId !== binding.pcId
     || (row.status === "ok" ? !gpuUuids.length : gpuUuids.length !== 0)) throw new Error("Invalid GPU allocation.");
-  return { address: row.address, binding: parseBinding(row.binding), observedAtMs: row.observedAtMs,
+  return { address: row.address, binding, ...(observedBinding ? { observedBinding } : {}), observedAtMs: row.observedAtMs,
     status: row.status as PcGpuAllocation["status"], gpuUuids };
 }
 export function parsePcGpuEvent(value: unknown): PcGpuEvent {
@@ -151,9 +156,15 @@ export function pcGpuView(record: PcGpuRecord | undefined, association: PcAssoci
   const retainedIndices = retainedDevices.map(device => device.index!);
   const allEvents = matching?.retainedEvents ?? latest?.journal.events ?? [];
   const events = allEvents.filter(event => event.gpuUuid !== null && expected.includes(event.gpuUuid));
-  const pcEvents = allEvents.filter(event => event.gpuUuid === null);
+  const assignedUuids = new Set([...expected, ...[...(latest?.allocations ?? []), ...(matching?.retainedAllocations ?? previous?.allocations ?? [])]
+    .filter(row => row.status === "ok").flatMap(row => row.gpuUuids)]);
+  // A kernel UUID identifies a physical device, not its Nosana host. Keep the
+  // event at PC level when no measured allocation can establish that link.
+  const pcEvents = allEvents.filter(event => event.gpuUuid === null || !assignedUuids.has(event.gpuUuid));
   return { indices, retainedIndices, retainedDevices, gpuUuids: expected, expectedCount: expected.length, current, partial: indices.length > 0 && !current,
     observedAtMs: available.length ? Math.min(...available.map(device => device.observedAtMs)) : retainedDevices.length ? Math.min(...retainedDevices.map(device => device.observedAtMs)) : null,
     attemptedAtMs: latest?.observedAtMs ?? null, devices, events, pcEvents,
+    observedBinding: allocation?.observedBinding, allocationObservedAtMs: allocation?.observedAtMs ?? null,
+    runtimeChanged: !!allocation?.observedBinding && !sameBinding(allocation.binding, allocation.observedBinding),
     journalStatus: latest?.journal.status ?? "unavailable", allocationStatus: allocation?.status ?? "unavailable" };
 }

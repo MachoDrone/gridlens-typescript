@@ -145,6 +145,9 @@ GPUs are listed together; unavailable or stale mappings remain explicit. A compa
 warning separates failed GPU reads from recorded kernel faults. An Xid 79 warning
 requires matching kernel evidence and retains its event time; a successful driver
 version read is not evidence that a GPU recovered.
+For Nosana's Docker/Podman layout, GPU UUIDs are read from the verified outer
+wrapper. If containers were replaced, monitoring can reverify the same approved
+public host on that PC without changing its financial or monitoring approvals.
 
 For approved PCs, CUDA/NVIDIA can use dated `nvidia-smi --version` readings when
 Nosana reports an unavailable value. One PC read serves its associated hosts;
