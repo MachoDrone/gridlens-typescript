@@ -682,11 +682,17 @@ freshness, sort controls and source details; changing layout does not change dat
 All column headers retain sorting, information and display controls. Left-side
 body controls open concise details with full provenance in a closed Source details
 disclosure. Body values right of the divider are plain, nonfocusable text without
-hover or row popups, except the requested Job Address expansion and job links.
+hover or row popups, except the requested Job Address controls and GPU ID details.
 Job Address defaults to five characters and widens for the saved full-address
 mode. Its toggle preserves expanded history and connected controls without
-starting reads. GPU ID lists physical indices numerically and uses accessible
-warning text, with the same dated evidence in the existing PC details.
+starting reads. GPU ID opens a concise, colored explanation with original dates.
+Red means a fresh confirmed access failure; amber means an uncertain, failed or
+stale reading; green means the ID was read, not that the GPU can run jobs; gray
+marks timestamps and retained information. Historical events alone do not add a
+row triangle. Unassigned PC events are grouped once per PC in the column's header
+control, with explicit PC scope and plain-language event names. History and raw
+identifiers remain in closed Source details. PC-name tooltips contain only the
+computer name. These display actions start no collection or provider requests.
 Keep controls connected through refresh, sorting and layout
 changes to preserve keyboard focus and animation timelines. Unchanged status
 messages must not repeatedly announce loading or rebuild stable text.

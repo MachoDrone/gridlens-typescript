@@ -328,10 +328,12 @@ graceful termination releases its single-writer lock.
   read; actual expiry, errors and changed results must still update. Do not rewrite
   equal text or strip/reapply unchanged Status cell classes on every render.
 - Preserve all header hovers, Column info windows, sorting and header display
-  toggles on both sides of the decorative divider. Remove body-cell hover text,
-  tooltips and info popups only to its right: nodeRuntime, dailyUptime, latestJob,
-  ram, disk, dl, ul, ping, rewards, nos, market, gpuID, currentNode, cuda, nvidia,
-  cpu and system. These 17 body columns use plain nonfocusable text/spans, without
+  toggles on both sides of the decorative divider. Job Address controls and the
+  requested GPU ID explanations are exceptions to passive right-side values.
+  GPU IDs open the existing details dialog; only current reading problems add a
+  row triangle. Unassigned historical events are grouped once per PC above the
+  GPU column. PC-name tooltips contain computer information only.
+  Other right-side columns use plain nonfocusable text/spans, without
   titles, click handlers, tooltip controls or Open details labels. Keep their
   values, colors, freshness, exact sorting, complete reading model and saved
   compact/expanded header modes. Do not relocate the removed row details to a new

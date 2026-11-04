@@ -23,7 +23,7 @@ export const COLUMN_HELP = {
   rewards: "Exact NOS available to claim for host uptime; this source is not connected yet.",
   nos: "NOS in the host’s standard token account, excluding other token accounts, staked NOS and rewards.",
   market: "The reported Nosana market for this host, shown as a full label or its first two characters.",
-  gpuID: "Measured physical GPU indices; warnings describe device readings or PC events, separately from job State.",
+  gpuID: "Select a GPU ID for its reading and history. Row warnings mark reading problems; PC warnings above group unassigned events.",
   currentNode: "Reported Nosana package version; pink marks a prerelease, and no comparison with the latest release is available.",
   cuda: "CUDA version supported by the reported driver; not the installed toolkit or proof of GPU health.",
   nvidia: "Reported NVIDIA driver version, shown as its major version or full version.",

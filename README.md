@@ -142,9 +142,11 @@ read-only fleet data and no source credentials. Source administrators remain tru
 
 **GPU ID** joins each host's verified GPU UUIDs to physical PC indices. Multiple
 GPUs are listed together; unavailable or stale mappings remain explicit. A compact
-warning separates failed GPU reads from recorded kernel faults. An Xid 79 warning
-requires matching kernel evidence and retains its event time; a successful driver
-version read is not evidence that a GPU recovered.
+warning marks a current reading problem. Select the GPU ID or warning for a short,
+colored explanation; recorded history and technical identifiers stay under Source
+details. Unassigned events appear once per PC behind the PC warning button above
+GPU ID. An Xid 79 event is described as a recorded GPU bus failure with its date;
+it is not repeated as a failure on every row of that PC.
 For Nosana's Docker/Podman layout, GPU UUIDs are read from the verified outer
 wrapper. If containers were replaced, monitoring can reverify the same approved
 public host on that PC without changing its financial or monitoring approvals.

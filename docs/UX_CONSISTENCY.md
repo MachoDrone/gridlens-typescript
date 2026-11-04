@@ -58,7 +58,12 @@ branding may scroll away while the toggle and menu links remain reachable.
 - Existing left-side tap-open details and header information remain available.
   Do not add mobile hover instructions or new info bubbles. A mobile bubble
   toggle remains future work. The approved removal of body hover text and
-  popups to the right of the divider remains in effect on both device types.
+  popups to the right of the divider remains in effect on both device types,
+  with the requested Job Address controls and GPU ID explanations as exceptions.
+  GPU IDs and their current-reading warnings open the existing dialog by tap,
+  click or keyboard. Its summary uses meaningful text colors, dates are muted,
+  and technical evidence stays closed. Unassigned PC warnings are grouped in
+  the GPU column header rather than repeated as faults on every host row.
   Country is the final plain-text column after System. Its header help, sorting
   and saved compact-code/full-name toggle remain available on phone and laptop;
   the body adds no hover or popup. Both modes preserve reported country meaning,

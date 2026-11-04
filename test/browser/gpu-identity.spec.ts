@@ -55,10 +55,16 @@ for (const width of [1440, 390]) test(`GPU ID renders measured physical mappings
     await expect(cell(page, index)).toHaveAttribute("data-gpu-state", "current");
     await expect(cell(page, index)).toHaveAttribute("data-gpu-warning", "false");
     await expect(cell(page, index)).not.toHaveAttribute("title");
-    await expect(cell(page, index).locator("button, a")).toHaveCount(0);
-    await expect(cell(page, index)).toHaveAttribute("aria-label", /device response does not establish GPU health/);
+    await expect(cell(page, index).locator("button.gpu-id-action")).toHaveCount(1);
+    await expect(cell(page, index)).toHaveAttribute("aria-label", /read successfully/);
   }
   await expect(cell(page, 3)).toHaveAttribute("data-gpu-state", "unknown");
+  await cell(page, 0).getByRole("button").click();
+  await expect(page.locator("#info-body .info-summary .info-tone-positive")).toHaveText("GPU ID 10 read successfully.");
+  await expect(page.locator("#info-body .info-source")).not.toHaveAttribute("open");
+  await expect(page.locator("#info-body .info-source-body")).toBeHidden();
+  await page.locator("#close-info").click();
+  await expect(cell(page, 0).getByRole("button")).toBeFocused();
   await page.getByRole("button", { name: "Sort by GPU ID", exact: true }).click();
   expect(await page.locator('#fleet-rows > tr[data-host]').evaluateAll(rows => rows.map(row => row.getAttribute("data-host"))))
     .toEqual([addresses[2], addresses[1], addresses[0], addresses[3]]);
@@ -80,9 +86,13 @@ test("device query failures retain measured indices and never invent Xid or chan
   await expect(cell(page, 0)).toHaveAttribute("data-gpu-state", "retained");
   await expect(cell(page, 0).locator(".gpu-id-retained")).toHaveText("10");
   await expect(cell(page, 0)).toHaveAttribute("data-gpu-warning", "true");
-  await expect(cell(page, 0)).toHaveAttribute("aria-label", /query failed/);
-  expect(await cell(page, 0).getAttribute("aria-label")).toContain(new Date(measuredAt).toISOString());
-  expect(await cell(page, 0).getAttribute("aria-label")).not.toMatch(/(?:Recorded|PC-level) Xid \d/);
+  await expect(cell(page, 0)).toHaveAttribute("aria-label", /could not be read/);
+  await cell(page, 0).getByRole("button").click();
+  await expect(page.locator("#info-body .info-summary .info-tone-warning")).toBeVisible();
+  await page.locator("#info-body .info-source > summary").click();
+  await expect(page.locator("#info-body .info-source-body")).toContainText(new Date(measuredAt).toISOString());
+  await expect(page.locator("#info-body .info-source-body")).not.toContainText("fell off the bus");
+  await page.locator("#close-info").click();
   expect(await cell(page, 0, "state").getAttribute("data-state")).toBe(originalState);
   await expect(cell(page, 1)).toHaveAttribute("data-gpu-state", "current");
   await expect(cell(page, 1)).toHaveAttribute("data-gpu-warning", "false");
@@ -96,15 +106,23 @@ test("matched historical Xid stays with its UUID while unmatched evidence remain
     { bootId, pciBusId: "0000:01:00", xid: 79, atMs: at, gpuUuid: uuids[0]! },
     { bootId, pciBusId: "0000:ff:00", xid: 31, atMs: at - 1000, gpuUuid: null },
   ];
-  await page.goto("/"); await expect(cell(page, 0)).toHaveAttribute("data-gpu-warning", "true");
+  await page.goto("/"); await expect(cell(page, 0)).toHaveAttribute("data-gpu-warning", "false");
   await expect(cell(page, 0)).toHaveAttribute("data-gpu-state", "current");
-  await expect(cell(page, 0)).toHaveAttribute("aria-label", new RegExp(`Recorded Xid 79 for ${uuids[0]}`));
-  await expect(cell(page, 1)).not.toHaveAttribute("aria-label", /Recorded Xid 79/);
-  for (const index of [0, 1]) {
-    await expect(cell(page, index)).toHaveAttribute("aria-label", /PC-level Xid 31.*not assigned to this host/);
-    expect(await cell(page, index).getAttribute("aria-label")).toContain(new Date(at - 1000).toISOString());
-  }
-  await expect(cell(page, 0, "pc")).toHaveAttribute("title", /PC-level Xid 31/);
+  await expect(cell(page, 1)).toHaveAttribute("data-gpu-warning", "false");
+  await expect(page.locator("#gpu-pc-warnings")).toHaveText("PC ⚠ 1");
+  await cell(page, 0).getByRole("button").click();
+  await expect(page.locator("#info-body .info-summary")).toHaveText("GPU ID 10 read successfully.");
+  await expect(page.locator("#info-body .info-source-body")).toBeHidden();
+  await page.locator("#info-body .info-source > summary").click();
+  await expect(page.locator("#info-body .info-source-body")).toContainText("GPU fell off the bus on Generated GPU PC");
+  await expect(page.locator("#info-body .info-source-body")).toContainText(new Date(at).toISOString());
+  await page.locator("#close-info").click();
+  await page.locator("#gpu-pc-warnings").click();
+  await expect(page.locator("#info-body .info-summary")).toContainText("not assigned to a host row");
+  await expect(page.locator("#info-body .info-facts")).toContainText("Driver event (Xid 31)");
+  await page.locator("#close-info").click();
+  await expect(page.locator("#gpu-pc-warnings")).toBeFocused();
+  await expect(cell(page, 0, "pc")).toHaveAttribute("title", "Computer: Generated GPU PC");
   expect(mode.posts).toBe(0); expect(mode.errors).toEqual([]);
 });
 
@@ -114,10 +132,14 @@ test("GPU mappings expire locally and failed reads retain original source dates"
   await page.clock.fastForward(GPU_FRESH_MS + 2000);
   await expect(cell(page, 2)).toHaveAttribute("data-gpu-state", "retained");
   await expect(cell(page, 2).locator(".gpu-id-retained")).toHaveText("0, 11");
-  expect(await cell(page, 2).getAttribute("aria-label")).toContain(new Date(at).toISOString());
+  await expect(cell(page, 2)).toHaveAttribute("aria-label", /out of date/);
   mode.failed = true; await page.clock.fastForward(31_000);
   await expect(cell(page, 2)).toHaveAttribute("data-gpu-state", "retained");
-  expect(await cell(page, 2).getAttribute("aria-label")).toContain(new Date(at).toISOString());
+  await expect(cell(page, 2)).toHaveAttribute("aria-label", /data is unavailable/);
+  await cell(page, 2).getByRole("button").click();
+  await page.locator("#info-body .info-source > summary").click();
+  await expect(page.locator("#info-body .info-source-body")).toContainText(new Date(at).toISOString());
+  await page.locator("#close-info").click();
   mode.failed = false; mode.data.pcGpuDevices = []; await page.clock.fastForward(31_000);
   await expect(cell(page, 2)).toHaveText("—"); await expect(cell(page, 2)).toHaveAttribute("data-gpu-state", "unknown");
   expect(mode.posts).toBe(0); expect(mode.errors).toEqual([]);
@@ -136,13 +158,62 @@ test("GPU-only runtime rediscovery maps empty saved UUIDs and retains an unassig
   await expect(cell(page, 0)).toHaveAttribute("data-gpu-state", "unknown");
   await expect(cell(page, 1).locator(".gpu-id-current")).toHaveText("2");
   await expect(cell(page, 1)).toHaveAttribute("data-gpu-state", "current");
-  await expect(cell(page, 1)).toHaveAttribute("aria-label", /GPU runtime identity verified.*differs from the saved source binding; source approval is unchanged/);
-  for (const index of [0, 1]) {
-    await expect(cell(page, index)).toHaveAttribute("aria-label", /PC-level Xid 79.*no verified host allocation.*not assigned to this host/);
-    await expect(cell(page, index)).not.toHaveAttribute("aria-label", /Recorded Xid 79/);
-    expect(await cell(page, index).getAttribute("aria-label")).toContain(uuids[0]);
-    expect(await cell(page, index).getAttribute("aria-label")).toContain(new Date(at - 5000).toISOString());
-  }
+  await expect(cell(page, 1)).toHaveAttribute("data-gpu-warning", "false");
+  await expect(cell(page, 0)).toHaveAttribute("data-gpu-warning", "true");
+  await expect(page.locator("#gpu-pc-warnings")).toHaveText("PC ⚠ 1");
+  await page.locator("#gpu-pc-warnings").click();
+  await expect(page.locator("#info-body .info-facts")).toContainText("A GPU on Generated GPU PC fell off the bus");
+  await expect(page.locator("#info-body .info-summary")).toContainText("not assigned to a host row");
+  await page.locator("#close-info").click();
+  await cell(page, 1).getByRole("button").click();
+  await expect(page.locator("#info-body .info-summary")).toHaveText("GPU ID 2 read successfully.");
+  await page.locator("#info-body .info-source > summary").click();
+  await expect(page.locator("#info-body .info-source-body")).toContainText("source approval is unchanged");
+  await page.locator("#close-info").click();
   expect(mode.data.associations).toEqual(originalAssociations);
   expect(mode.posts).toBe(0); expect(mode.errors).toEqual([]);
+});
+
+test.describe("readable GPU warnings on a phone", () => {
+  test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  test("two readable IDs stay clear while one unavailable ID and one PC warning have separate explanations", async ({ page }, testInfo) => {
+    const mode = await fixture(page), record = mode.data.pcGpuDevices![0]!;
+    mode.data.associations = mode.data.associations.slice(0, 3);
+    for (const association of mode.data.associations) association.gpuUuids = [];
+    record.gpu.status = "partial";
+    record.gpu.devices = record.gpu.devices.slice(0, 2).map((device, index) => ({ ...device, index }));
+    record.gpu.allocations[2] = { ...record.gpu.allocations[2]!, status: "unavailable", gpuUuids: [] };
+    const at = record.gpu.observedAtMs - 86_400_000;
+    record.gpu.journal.events = [
+      { bootId, pciBusId: "0000:01:00", xid: 154, atMs: at, gpuUuid: uuids[0]! },
+      { bootId, pciBusId: "0000:02:00", xid: 154, atMs: at, gpuUuid: uuids[1]! },
+      { bootId, pciBusId: "0000:06:00", xid: 79, atMs: at, gpuUuid: uuids[2]! },
+    ];
+    await page.goto("/");
+    await expect(cell(page, 0)).toHaveText("0"); await expect(cell(page, 1)).toHaveText("1");
+    for (const index of [0, 1]) await expect(cell(page, index)).toHaveAttribute("data-gpu-warning", "false");
+    await expect(page.locator(".gpu-id-warning:visible")).toHaveCount(1);
+    await expect(page.locator("#gpu-pc-warnings")).toHaveText("PC ⚠ 1");
+    await cell(page, 2).getByRole("button").tap();
+    await expect(page.locator("#info-body .info-summary .info-tone-warning")).toHaveText("GPU ID unavailable.");
+    await page.locator("#close-info").tap();
+    await page.locator("#gpu-pc-warnings").tap();
+    await expect(page.locator("#info-body .info-facts .info-tone-warning")).toContainText("A GPU on Generated GPU PC fell off the bus");
+    await expect(page.locator("#info-body .info-facts .info-tone-muted")).toContainText("recorded");
+    await expect(page.locator("#info-body .info-source-body")).toBeHidden();
+    expect(await page.locator("#info-body .info-summary, #info-body .info-facts").allTextContents()).not.toEqual(expect.arrayContaining([expect.stringMatching(/GPU-[a-f0-9]|boot [a-f0-9]{32}/)]));
+    await page.screenshot({ path: testInfo.outputPath("readable-pc-gpu-warning.png") });
+    await page.locator("#close-info").tap();
+    await expect(page.locator("#gpu-pc-warnings")).toBeFocused();
+    const controls = await page.locator('#column-headings th[data-col="gpuID"] button').evaluateAll(buttons => buttons.map(button => {
+      const r = button.getBoundingClientRect(); return { x: r.x, y: r.y, right: r.right, bottom: r.bottom, width: r.width, height: r.height };
+    }));
+    expect(controls.every(r => r.width >= 24 && r.height >= 24)).toBe(true);
+    expect(Math.min(controls[0]!.bottom, controls[1]!.bottom) - Math.max(controls[0]!.y, controls[1]!.y)).toBeLessThanOrEqual(0);
+    const focused = await page.locator("#gpu-pc-warnings").elementHandle();
+    await page.clock.fastForward(31_000);
+    expect(await focused!.evaluate(node => node.isConnected)).toBe(true);
+    await expect(page.locator("#gpu-pc-warnings")).toBeFocused();
+    expect(mode.posts).toBe(0); expect(mode.errors).toEqual([]);
+  });
 });

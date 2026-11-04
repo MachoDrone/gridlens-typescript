@@ -51,7 +51,7 @@ for (const width of [1440, 390]) test(`verified PC versions fill three missing h
     await expect(cell(page, index, "nvidia")).toHaveAttribute("data-metadata-source", "pc-nvidia-smi-version");
     await expect(cell(page, index, "nvidia")).toHaveAttribute("data-metadata-state", "reported");
     await expect(cell(page, index, "nvidia").locator(".metadata-value")).toHaveAttribute("aria-label", /580\.72\.13.*Generated PC.*NVIDIA-SMI.*does not establish GPU health/);
-    await expect(cell(page, index, "pc")).toHaveAttribute("title", /PC NVIDIA driver 580\.72\.13; driver-supported CUDA 12\.8.*NVIDIA-SMI/);
+    await expect(cell(page, index, "pc")).toHaveAttribute("title", "Computer: Generated PC");
     await expect(cell(page, index, "nvidia").locator("button")).toHaveCount(0);
   }
   await expect(cell(page, 3, "cuda")).toHaveText("12.6"); await expect(cell(page, 3, "nvidia")).toHaveText("570");
@@ -71,7 +71,7 @@ test("driver failure and expired evidence retain exact source time without becom
   await page.clock.fastForward(31_000);
   await expect.poll(() => mode.reads).toBeGreaterThan(1);
   await expect(cell(page, 0, "nvidia")).toHaveText("580"); await expect(cell(page, 0, "nvidia")).toHaveAttribute("data-metadata-state", "retained");
-  await expect(cell(page, 0, "pc")).toHaveAttribute("title", new RegExp(sourceTime.replaceAll(".", "\\.")));
+  await expect(cell(page, 0, "nvidia").locator(".metadata-value")).toHaveAttribute("aria-label", new RegExp(sourceTime.replaceAll(".", "\\.")));
   expect(mode.posts).toBe(0);
 });
 test("revoked driver visibility removes fallback, while malformed identity cannot replace valid retained values", async ({ page }) => {
@@ -89,6 +89,6 @@ test("a PC fallback expires locally even when repeated shared responses contain 
   await page.clock.fastForward(6 * 60_000 + 2000);
   await expect(cell(page, 0, "nvidia")).toHaveAttribute("data-metadata-state", "retained");
   await expect(cell(page, 0, "nvidia")).toHaveText("580");
-  await expect(cell(page, 0, "pc")).toHaveAttribute("title", new RegExp(new Date(at).toISOString().replaceAll(".", "\\.")));
+  await expect(cell(page, 0, "nvidia").locator(".metadata-value")).toHaveAttribute("aria-label", new RegExp(new Date(at).toISOString().replaceAll(".", "\\.")));
   expect(mode.data.drivers![0]!.driver.observedAtMs).toBe(at); expect(mode.posts).toBe(0);
 });

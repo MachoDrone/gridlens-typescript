@@ -64,7 +64,7 @@ bindFleetTableScroll(document.querySelector<HTMLElement>(".fleet-table-wrap")!);
 bindFleetViewport(document.querySelector<HTMLElement>(".fleet-title-row")!);
 // Service reachability is independent of source freshness and host API status.
 const fleetConfig = readFleetConfig(document);
-const sharedTelemetry = createSharedTelemetry(() => { if (supplied) renderSupplied(); }, () => liveNow());
+const sharedTelemetry = createSharedTelemetry(() => { if (supplied) renderSupplied(); }, () => liveNow(), showInfo);
 const requestedScenario = fleetConfig.sourceMode === "snapshot" ? null : new URLSearchParams(location.search).get("scenario");
 const evidenceClock = createEvidenceClock();
 const liveNow = () => evidenceClock.now();
@@ -113,7 +113,7 @@ const COLUMNS = [
   ["rewards", "Rewards to claim", "The exact claimable host-uptime amount. No rewards source or wallet is connected; no estimate or other balance is substituted."],
   ["nos", "NOS", "Confirmed NOS in each host’s standard associated token account, checked best effort every two minutes while visible. Display rounds to whole NOS; exact six-decimal amounts drive sorting. Additional wallet token accounts, staking and claimable rewards are excluded. A freshly verified absent standard account means zero there; failures remain unknown or retain gray values. Readings expire after three minutes."],
   ["market", "Market", "Toggle between the full reported market label and its first two characters. Sorting uses the full label. Supplied hosts resolve their market address through Nosana’s market lookup, preferring its slug. Missing labels stay unknown. This association does not identify the physical GPU or establish current activity; recommendations are separate."],
-  ["gpuID", "GPU ID", "Physical GPU indices resolved from the host's measured UUID allocation and the PC's NVIDIA-SMI identity readings. Multiple allocations show each index. Retained indices stay dimmed with their original times. Warnings describe failed device readings or recorded kernel events; unmatched events remain PC-level evidence. Device responses do not establish GPU health, and job State and driver versions are separate."],
+  ["gpuID", "GPU ID", "Select a GPU ID or warning for a plain-language explanation. A row triangle marks a current reading problem; recorded events are in its details. PC warnings above this column group unassigned events once per computer. Green means the ID was read, not that the GPU is healthy. Red means a confirmed access failure; amber means attention is needed; gray marks dates and retained information."],
   ["currentNode", "Current Node", "The reported Nosana package version. This does not prove which process is currently running. Prerelease versions are pink; no comparison with the latest release is connected."],
   ["cuda", "CUDA", "Driver-supported CUDA version reported by Nosana. If unavailable, installed backends may use a verified PC NVIDIA-SMI reading; its source and time are in the PC details. This is not the installed toolkit version or proof of GPU health."],
   ["nvidia", "NVIDIA", "Toggle between the major NVIDIA driver version and the full reported version. Sorting uses the full version. If Nosana metadata is unavailable, installed backends may use a verified PC NVIDIA-SMI reading; its source and time are in the PC details. Retained readings stay dimmed. Version information does not establish GPU health; sample scenarios remain synthetic."],
@@ -124,7 +124,7 @@ const COLUMNS = [
 
 // The decorative divider follows Duration in either layout. Header help and
 // sorting stay available everywhere. Jobs has the requested expansion/link controls;
-// other right-side body cells stay passive.
+// GPU ID also opens its requested status explanation; other right-side body cells stay passive.
 const RIGHT_BODY_COLUMNS = new Set<string>(COLUMNS.slice(COLUMNS.findIndex(([key]) => key === "duration") + 1)
   .map(([key]) => key));
 function hasRowInformation(cell: HTMLTableCellElement): boolean {
@@ -2636,6 +2636,7 @@ function renderSupplied(): void {
     }
   }
   element<HTMLButtonElement>("jobs-show-all").disabled = displayedAddresses.length === 0;
+  sharedTelemetry.renderGpuHeading(rows.map(row => row.dataset.host).filter((address): address is string => !!address));
   element<HTMLButtonElement>("jobs-hide-all").disabled = jobHistory.expandedCount === 0;
   if (rows.length === 0) {
     const row = document.createElement("tr");
@@ -2693,6 +2694,7 @@ function renderSupplied(): void {
 }
 
 function render(): void {
+  if (!supplied) sharedTelemetry.renderGpuHeading([]);
   renderDisplaySettings();
   setText(element("data-label"), fleetConfig.sourceMode === "snapshot" ? fleetConfig.sourceLabel
     : supplied ? onlineScenario ? "Online GPU Hosts" : liveScenario === "real200" ? "Real200" : "Supplied addresses" : "Sample data");

@@ -19,7 +19,7 @@ import { emptyStaking } from "./fixtures/staking.ts";
 import { blankStakingRecord, STAKING_REFRESH_INTERVAL_MS } from "../src/fleet/staking.ts";
 
 const fixtureFiles = [
-  "contracts/treasury.js", "contracts/treasury-claims.js", "preview/wallet.js", "wallet.css",
+  "contracts/treasury.js", "contracts/treasury-claims.js", "preview/wallet.js", "wallet.css", "preview/gpu-information.js",
   "contracts/browser-security.js", "preview/secure-setup.js", "preview/secure-guides.js",
   "manifest.webmanifest", "icons/gridlens-192.png", "icons/gridlens-512.png", "icons/gridlens-maskable-512.png", "preview/webapp.js",
   "contracts/fleet.js", "contracts/shared.js", "contracts/updates.js", "contracts/online-hosts.js", "fleet/pc-observations.js", "fleet/pc-drivers.js", "fleet/pc-gpu-devices.js", "preview/shared-telemetry.js", "preview/updates.js", "preview/fleet-config.js", "preview/fleet-transport.js", "preview/job-history.js", "preview/online-roster.js",

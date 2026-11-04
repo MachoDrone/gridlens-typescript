@@ -8,9 +8,11 @@ import { formatIPDisplay } from "../fleet/ip-display.ts";
 import type { IPDisplayMode } from "../fleet/ip-display.ts";
 import { DRIVER_FRESH_MS, pcDriverView } from "../fleet/pc-drivers.ts";
 import { GPU_FRESH_MS, pcGpuView } from "../fleet/pc-gpu-devices.ts";
+import { gpuInformation, pcGpuInformation } from "./gpu-information.ts";
+import type { InfoContent } from "./info-content.ts";
 
 /** Optional installed-backend data adapter. Never enabled by the development preview. */
-export function createSharedTelemetry(changed: () => void, now = Date.now) {
+export function createSharedTelemetry(changed: () => void, now = Date.now, showInfo?: (title: string, content: InfoContent) => void) {
   const enabled = document.querySelector('meta[name="gridlens-shared-backend"]')?.getAttribute("content") === "1";
   const viewerOnly = document.querySelector('meta[name="gridlens-viewer-only"]')?.getAttribute("content") === "1";
   let data: SharedObservations | undefined, controller: AbortController | undefined, failed = false, timer: ReturnType<typeof setTimeout> | undefined;
@@ -52,33 +54,64 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
     const warning = view.partial || view.devices.some(device => device.status !== "responds") || view.events.length > 0 || view.pcEvents.length > 0
       || view.allocationStatus !== "ok" || view.journalStatus !== "ok" || record.gpu.status !== "ok" && (record.gpu.status !== "partial" || !view.current);
     const description = `${identity}${retained} Identity observed ${utc(view.observedAtMs)}; latest query ${utc(view.attemptedAtMs)} (${record.gpu.status}). Allocation: ${view.allocationStatus}.${runtime} ${devices} ${retainedEvidence} ${events} ${pcEvents} Kernel event coverage: ${view.journalStatus}. A device response does not establish GPU health; recorded Xid events do not establish a current fault. Job State and driver versions are separate.`;
-    return { ...view, warning, description };
+    return { ...view, warning, description, transportFailed: failed, pcName: association.name };
   }
 
   function renderGpu(cell: HTMLTableCellElement, address: string, at: number): void {
     const view = gpu(address, at);
+    const information = gpuInformation(view, view?.pcName ?? "this PC", at, view?.description ?? "");
     const currentIndices = view?.indices ?? [], retainedIndices = view?.retainedIndices ?? [];
-    let current = cell.querySelector<HTMLElement>(".gpu-id-current");
-    if (!current) {
-      current = document.createElement("span"); current.className = "gpu-id-current";
+    let action = cell.querySelector<HTMLButtonElement>(".gpu-id-action");
+    if (!action) {
+      action = document.createElement("button"); action.type = "button"; action.className = "gpu-id-action";
+      const current = document.createElement("span"); current.className = "gpu-id-current";
       const retained = document.createElement("span"); retained.className = "gpu-id-retained";
       const warning = document.createElement("span"); warning.className = "gpu-id-warning"; warning.setAttribute("aria-hidden", "true");
-      cell.replaceChildren(current, retained, warning);
+      action.append(current, retained, warning); cell.replaceChildren(action);
+      action.addEventListener("click", () => {
+        const latest = gpu(address, now());
+        showInfo?.(`GPU details · ${latest?.pcName ?? "Unknown PC"}`, gpuInformation(latest, latest?.pcName ?? "this PC", now(), latest?.description ?? "").content);
+      });
     }
+    const current = cell.querySelector<HTMLElement>(".gpu-id-current")!;
     const currentText = currentIndices.join(", ") || (retainedIndices.length ? "" : "—");
     if (current.textContent !== currentText) current.textContent = currentText;
     const retained = cell.querySelector<HTMLElement>(".gpu-id-retained")!;
     const retainedText = `${currentIndices.length && retainedIndices.length ? ", " : ""}${retainedIndices.join(", ")}`;
     if (retained.textContent !== retainedText) retained.textContent = retainedText;
     const warning = cell.querySelector<HTMLElement>(".gpu-id-warning")!;
-    const warningText = view?.warning ? " ⚠" : "";
+    const warningText = information.warning ? " ⚠" : "";
     if (warning.textContent !== warningText) warning.textContent = warningText;
-    warning.hidden = !view?.warning;
+    warning.hidden = !information.warning;
+    action.dataset.tone = information.tone;
+    action.title = `${information.label} Select for details.`;
+    action.setAttribute("aria-label", `${information.label} Open GPU details.`);
     cell.className = currentIndices.length || retainedIndices.length ? "gpu-id-cell" : "gpu-id-cell unknown";
     cell.dataset.gpuState = view?.current ? "current" : currentIndices.length ? "partial" : retainedIndices.length ? "retained" : "unknown";
-    cell.dataset.gpuWarning = String(!!view?.warning);
-    cell.setAttribute("aria-label", view?.description ?? "GPU ID: unknown; no measured PC GPU mapping is available.");
+    cell.dataset.gpuWarning = String(information.warning);
+    cell.setAttribute("aria-label", information.label);
     cell.removeAttribute("title");
+  }
+  function renderGpuHeading(addresses: readonly string[]): void {
+    const heading = document.querySelector<HTMLTableCellElement>('#column-headings th[data-col="gpuID"]');
+    if (!heading) return;
+    let button = heading.querySelector<HTMLButtonElement>(".gpu-pc-warning-control");
+    if (!button) {
+      button = document.createElement("button"); button.type = "button"; button.className = "gpu-pc-warning-control";
+      button.id = "gpu-pc-warnings"; button.hidden = true; heading.append(button);
+    }
+    const groups = new Map<string, { pcName: string; events: ReturnType<typeof pcGpuView>["pcEvents"] }>();
+    for (const address of addresses) {
+      const association = data?.associations.find(row => row.address === address), view = gpu(address, now());
+      if (!association || !view?.pcEvents.length || groups.has(association.binding.pcId)) continue;
+      groups.set(association.binding.pcId, { pcName: association.name, events: view.pcEvents });
+    }
+    button.hidden = !enabled || groups.size === 0;
+    heading.classList.toggle("has-gpu-pc-warning", !button.hidden);
+    button.textContent = `PC ⚠ ${groups.size}`;
+    button.title = `${groups.size} PC${groups.size === 1 ? "" : "s"} with recorded GPU warnings. Select for details.`;
+    button.setAttribute("aria-label", `Open PC-level GPU warnings (${groups.size} ${groups.size === 1 ? "PC" : "PCs"})`);
+    button.onclick = () => showInfo?.("PC-level GPU warnings", pcGpuInformation([...groups.values()]));
   }
   const gpuHistory = new Map<string, { gpu: NodeGpuObservation; receivedAtMs: number }>();
   const historyQueue = new Set<string>(); let historyActive = 0;
@@ -137,6 +170,7 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
   return {
     enabled,
     driver,
+    renderGpuHeading,
     requestHistory(address: string): void {
       if (!enabled || historyControllers.has(address) || !data?.associations.some(row => row.address === address) || Date.now() - (gpuHistory.get(address)?.receivedAtMs ?? 0) < 300_000) return;
       historyQueue.add(address); pumpHistory();
@@ -171,10 +205,7 @@ export function createSharedTelemetry(changed: () => void, now = Date.now) {
       if (key === "rewards" && reward.amount) { cell.style.color = "#0f5c2b"; cell.style.fontWeight = "400"; }
       else cell.style.removeProperty("color");
       if (key === "pc" || key === "ip") {
-        const version = driver(address, now);
-        const versionDescription = version?.driverVersion ? ` ${version.current ? "PC" : "Retained PC"} NVIDIA driver ${version.driverVersion}; driver-supported CUDA ${version.cudaDriverVersion}, read via NVIDIA-SMI at ${new Date(version.observedAtMs!).toISOString()}. Version information does not establish GPU health.` : "";
-        const gpuDescription = key === "pc" ? gpu(address, now)?.description : undefined;
-        const description = key === "pc" ? `${value}; verified computer association at ${association ? new Date(association.verifiedAtMs).toISOString() : "unknown"}.${versionDescription}${gpuDescription ? ` ${gpuDescription}` : ""}`
+        const description = key === "pc" ? `Computer: ${value}`
           : `${formatIPDisplay({ internal: network.privateIp, global: network.publicIp }, ipMode).description} Public checked ${network.publicObservedAtMs ? new Date(network.publicObservedAtMs).toISOString() : "unknown"}; private checked ${network.privateObservedAtMs ? new Date(network.privateObservedAtMs).toISOString() : "unknown"}.`;
         cell.setAttribute("aria-label", description); cell.title = description;
       }
