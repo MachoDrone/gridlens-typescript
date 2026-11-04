@@ -41,6 +41,13 @@ private one-use HTTPS owner-administration link in the trusted terminal; it
 permits Hosts setup without requiring a receiving-wallet configuration first.
 Only these explicitly issued owner-device grants follow the fleet as it changes.
 
+Software updates have a separate permission. The installation's approved private
+dashboard and its derived HTTPS browser can check and install signed updates
+without setting up or unlocking Wallet. These sessions retain their viewer role
+for host administration and financial actions. Explicitly paired viewers and
+standalone monitoring installations remain unable to start updates. Revoking the
+private dashboard grant also revokes its derived browser update permission.
+
 **Share monitoring** downloads a five-minute, one-use invitation. On a staff PC,
 the normal installer's `--viewer-join FILE` action creates a separate read-only
 viewer. The revocable grant covers the fleet, including newly enrolled hosts.

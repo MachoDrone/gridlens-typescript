@@ -148,6 +148,7 @@ test("failed release check retains the verified notification and viewers cannot 
   mode.status.canUpdate = false; await poll(page);
   await expect(page.getByRole("button", { name: "Update now", exact: true })).toBeHidden();
   await expect(page.getByRole("button", { name: "Check for updates", exact: true })).toBeHidden();
+  await expect(page.locator("#update-description")).toContainText("This monitoring connection can view update status");
   expect(mode.starts).toHaveLength(0); expect(mode.checks).toBe(1);
 });
 

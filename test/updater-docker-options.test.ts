@@ -18,7 +18,7 @@ function runner(value: unknown): DockerRunner {
   return { run(command) { assert.deepEqual(command, ["image", "inspect", "gridlens-source:fixture"]);
     return { status: 0, stdout: JSON.stringify(value), stderr: "" }; } };
 }
-test("viewer update rejection is exactly401, retains readable identity and never dispatches an update mutation", async () => {
+test("paired viewer update rejection is exactly401, retains readable identity and never dispatches an update mutation", async () => {
   const values = new Map<string, unknown>(), state = { snapshots: createMemorySnapshotStore(),
     get: <T>(key: string) => values.get(key) as T | undefined, set(key: string, value: unknown) { values.set(key, structuredClone(value)); },
     batch(entries: readonly (readonly [string, unknown])[]) { for (const [key, value] of entries) values.set(key, structuredClone(value)); } };
@@ -28,7 +28,8 @@ test("viewer update rejection is exactly401, retains readable identity and never
       downloadedBytes: 1, totalBytes: 1, error: null, result: build } };
   const updates: string[] = [], service = createSharedService(state, { protectedMode: true, build,
     updates: async body => { updates.push(String(body.operation)); return structuredClone(saved); } });
-  const token = "v".repeat(43); service.access.setFleet("default", []); service.access.registerGateway("default", token);
+  service.access.setFleet("default", []);
+  const { token } = service.access.pair(service.access.createCode("default", "viewer").code, "Read-only viewer");
   try {
     const before = parseUpdateStatus(await service.read({ operation: "updates-status", token }));
     await assert.rejects(service.read({ operation: "updates-check", token }), error => error instanceof SharedHttpError && error.status === 401);

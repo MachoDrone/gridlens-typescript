@@ -150,6 +150,21 @@ export function createAccess(state: PrivateState, now = Date.now, options: { pro
     if (!access || role === "operator" && access.role !== role) throw new AccessError("denied");
     return access;
   }
+  function canUpdate(token: unknown): boolean {
+    const principal = resolve(token);
+    if (!principal || typeof token !== "string") return false;
+    if (principal.role === "operator") return true;
+    // Installation updates are independent of Wallet/administrative ownership.
+    // Only the live private gateway and its derived browsers gain this narrower
+    // permission; an independently paired viewer keeps read-only access.
+    const tokenHash = hash(token), scopeId = principal.context.scopeId;
+    if (gateways.grants.some(grant => grant.hash === tokenHash && grant.id === principal.deviceId
+      && grant.scopeId === scopeId && grant.revokedAtMs === null)) return true;
+    const browser = secureBrowser.sessions.find(session => session.hash === tokenHash && session.id === principal.deviceId
+      && session.scopeId === scopeId && session.revokedAtMs === null);
+    return !!browser && gateways.grants.some(parent => parent.id === browser.parentGatewayId
+      && parent.scopeId === scopeId && parent.revokedAtMs === null);
+  }
   function isDerivedSecureBrowser(token: unknown): boolean {
     const principal = resolve(token);
     return principal !== null && secureBrowser.sessions.some(session => session.id === principal.deviceId);
@@ -190,7 +205,7 @@ export function createAccess(state: PrivateState, now = Date.now, options: { pro
       return session?.parentToken === token && resolve(ownerToken)?.role === "operator";
     },
     clearOwnerBrowsers(): void { ownerSessions.clear(); },
-    contexts: (): FleetContext[] => structuredClone(ledger.fleets), fleet, resolve, requireAccess, isDerivedSecureBrowser, requireDeviceAdministration, createCode,
+    contexts: (): FleetContext[] => structuredClone(ledger.fleets), fleet, resolve, requireAccess, canUpdate, isDerivedSecureBrowser, requireDeviceAdministration, createCode,
     createSecureBrowserCode(token: unknown, bindingHash: string) {
       if (typeof token !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(token) || !validHash(bindingHash)) throw new AccessError("denied");
       const parent = gateways.grants.find(value => value.hash === hash(token) && value.revokedAtMs === null);

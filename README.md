@@ -103,6 +103,11 @@ installations need a maintainer-handled enabling migration first. This source
 feature is not evidence of publication or live enablement. See
 [browser updates](docs/MODERN_INSTALL.md#browser-controlled-updates).
 
+Normal dashboard updates require no Wallet setup or password. The installation's
+approved private dashboard and its HTTPS browser connection can install signed
+updates while Wallet actions remain separately protected. Monitoring-only viewer
+installations can inspect update status but cannot start an update.
+
 **Country** appears after System at the right edge of Fleet. It reuses the country
 reported in existing Nosana metrics, with a saved header toggle between compact
 codes and full English names. Missing values remain unknown; this is reported

@@ -27,6 +27,8 @@ import { TREASURY_LEDGER_KEY } from "../src/backend/treasury.ts";
 import { initializeClaimsMarker } from "../src/backend/treasury-claims-marker.ts";
 import { parseClaimsPlan, parseClaimsOperation, parseClaimsStatus } from "../src/contracts/treasury-claims.ts";
 import type { PcPermission } from "../src/backend/pc-monitor.ts";
+import { parseUpdateStatus } from "../src/contracts/updates.ts";
+import type { UpdateBuild, UpdateStatus } from "../src/contracts/updates.ts";
 
 const address = (last: string) => "1".repeat(31) + last;
 const SOURCE = address("2"), DESTINATION = address("3"), PASSWORD = "isolated owner Wallet password";
@@ -35,7 +37,8 @@ interface Reply { code: number; text: string; headers: IncomingHttpHeaders }
 
 /** Actual CA-validated loopback TLS and Unix sockets, with a transaction driver
  * that only returns synthetic values and never contacts a provider or wallet. */
-async function fixture(t: TestContext, claimsEnabled = false, markerBroken = false, protectedMode = false) {
+async function fixture(t: TestContext, claimsEnabled = false, markerBroken = false, protectedMode = false,
+  updateOptions?: { build: UpdateBuild; updates: (body: Record<string, unknown>) => Promise<unknown> }) {
   const directory = mkdtempSync(join(tmpdir(), "gridlens-wallet-gateway-"));
   const run = (args: string[]) => execFileSync("openssl", args, { cwd: directory, stdio: "ignore" });
   run(["req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes", "-keyout", "ca.key", "-out", "ca.crt", "-days", "3",
@@ -89,7 +92,7 @@ async function fixture(t: TestContext, claimsEnabled = false, markerBroken = fal
         payoutOwner: quote.sourceAddress, payoutTokenAddress: quote.sourceTokenAddress, mintAddress: NOS_MINT };
     },
   };
-  const service = createSharedService(state, { protectedMode, treasury: { vault, driver: () => driver, ...(claimsEnabled ? { claims: {
+  const service = createSharedService(state, { protectedMode, ...updateOptions, treasury: { vault, driver: () => driver, ...(claimsEnabled ? { claims: {
     driver: () => claimDriver, initialize(serverId: string) {
       if (markerBroken) throw new Error("Synthetic missing initialization witness");
       return initializeClaimsMarker(directory, serverId, vault.keyId, false);
@@ -121,9 +124,11 @@ async function fixture(t: TestContext, claimsEnabled = false, markerBroken = fal
   const readSocket = join(directory, "read.sock"), treasurySocket = join(directory, "treasury.sock"), controlSocket = join(directory, "control.sock");
   servers.push(await startOwnerSocket(readSocket, service.read), await startOwnerSocket(treasurySocket, service.treasury), await startOwnerSocket(controlSocket, service.control));
   const http = await startSharedGateway({ socketPath: readSocket, directory: resolve("dist"), host: "127.0.0.1", port: 0,
-    transport: "vpn-http", publicOrigin: publication.httpOrigin!, privateNetworkToken: grant }); servers.push(http.server);
+    transport: "vpn-http", publicOrigin: publication.httpOrigin!, privateNetworkToken: grant,
+    ...(updateOptions ? { build: updateOptions.build, updatesEnabled: true } : {}) }); servers.push(http.server);
   const https = await startSharedGateway({ socketPath: readSocket, treasurySocketPath: treasurySocket, directory: resolve("dist"), host: "127.0.0.1", port: 0,
-    publicOrigin: publication.httpsOrigin, certPath: join(directory, "server.crt"), keyPath: join(directory, "server.key") }); servers.push(https.server);
+    publicOrigin: publication.httpsOrigin, certPath: join(directory, "server.crt"), keyPath: join(directory, "server.key"),
+    ...(updateOptions ? { build: updateOptions.build, updatesEnabled: true } : {}) }); servers.push(https.server);
   const call = (secure: boolean, path: string, body?: unknown, extra: Record<string, string> = {}, omitOrigin = false, trusted = true): Promise<Reply> =>
     new Promise((done, reject) => {
       const origin = secure ? publication.httpsOrigin : publication.httpOrigin!, data = body === undefined ? undefined : JSON.stringify(body);
@@ -149,6 +154,58 @@ async function fixture(t: TestContext, claimsEnabled = false, markerBroken = fal
     loseClaimResponse() { uncertainClaim = true; },
     failPreparation(error: unknown) { prepareFailure = error; }, failAdmission(error: unknown) { admissionFailure = error; } };
 }
+
+test("private HTTP and derived HTTPS can update before Wallet setup and while locked without gaining owner authority", async t => {
+  const build: UpdateBuild = { version: "0.1.0-fixture", sequence: 1, buildId: "1:0.1.0-fixture" };
+  const candidate = { version: "0.1.1-fixture", sequence: 2, buildId: "2:0.1.1-fixture", id: "a".repeat(64), sizeBytes: 200 };
+  const status: UpdateStatus = { version: 1, supported: true, canUpdate: true, checking: false, current: build, candidate,
+    checkedAtMs: 1_800_000_000_000, nextCheckAtMs: 1_800_000_060_000, checkError: null, operation: null };
+  const calls: Record<string, unknown>[] = [];
+  const f = await fixture(t, false, false, true, { build, updates: async body => { calls.push(body); return status; } });
+  const start = { candidateId: candidate.id, idempotencyKey: "generated-update" };
+  for (const walletState of ["setup-required", "locked"]) {
+    assert.equal(parseTreasuryStatus(JSON.parse((await f.treasury("status")).text)).state, walletState);
+    const before = f.state.get(TREASURY_LEDGER_KEY);
+    for (const secure of [false, true]) {
+      const headers = secure ? f.browser : {};
+      const connection = JSON.parse((await f.call(secure, "/api/shared/status", undefined, headers)).text);
+      assert.equal(connection.role, "viewer"); assert.ok(connection.capabilities.includes("private-dashboard-updates-v1"));
+      const visible = await f.call(secure, "/api/shared/updates", undefined, headers);
+      assert.equal(visible.code, 200); assert.equal(parseUpdateStatus(JSON.parse(visible.text)).canUpdate, true);
+      assert.equal((await f.call(secure, "/api/shared/updates/check", {}, headers)).code, 200);
+      assert.deepEqual(calls.at(-1), { operation: "check" });
+      assert.equal((await f.call(secure, "/api/shared/updates/start", start, headers)).code, 200);
+      assert.deepEqual(calls.at(-1), { operation: "start", ...start });
+      assert.equal((await f.call(secure, "/api/shared/setup", undefined, headers)).code, 401);
+      assert.equal((await f.call(secure, "/api/shared/setup-configure", {}, headers)).code, 401);
+    }
+    assert.equal((await f.treasury("configuration")).code, 401);
+    assert.equal((await f.treasury("owner-browser", { version: 1 })).code, 401);
+    assert.equal((await f.treasury("prepare", { version: 1, sourceAddress: SOURCE })).code, 401);
+    assert.deepEqual(f.state.get(TREASURY_LEDGER_KEY), before);
+    if (walletState === "setup-required") {
+      const unlock = await f.setup(); assert.equal(unlock.configuration.guardian?.state, "not-enrolled");
+      assert.equal((await f.treasury("lock", { version: 1 }, unlock.unlockToken)).code, 200);
+    }
+  }
+  const viewer = f.service.access.pair(f.service.access.createCode("default", "viewer", { followRoster: true }).code, "Generated staff viewer");
+  const viewerHeaders = { Authorization: `Bearer ${viewer.token}` };
+  assert.equal(parseUpdateStatus(JSON.parse((await f.call(true, "/api/shared/updates", undefined, viewerHeaders)).text)).canUpdate, false);
+  const before = calls.length;
+  for (const [path, body] of [["check", {}], ["start", start]] as const)
+    assert.equal((await f.call(true, `/api/shared/updates/${path}`, body, viewerHeaders)).code, 401);
+  assert.equal(calls.length, before);
+  assert.equal((await f.call(true, "/api/shared/updates/check", {}, { Authorization: `Bearer ${f.operator.token}` })).code, 200);
+  f.service.access.revokeGateway("default");
+  const after = calls.length;
+  for (const secure of [false, true]) {
+    const headers = secure ? f.browser : {};
+    assert.equal((await f.call(secure, "/api/shared/updates", undefined, headers)).code, 401);
+    assert.equal((await f.call(secure, "/api/shared/updates/check", {}, headers)).code, 401);
+    assert.equal((await f.call(secure, "/api/shared/updates/start", start, headers)).code, 401);
+  }
+  assert.equal(calls.length, after); assert.deepEqual(f.calls, { prepare: 0, sign: 0, submit: 0, reconcile: 0 });
+});
 
 test("protected viewer browsers need owner proof for administration and still need a separate Wallet unlock", async t => {
   const f = await fixture(t, false, false, true);

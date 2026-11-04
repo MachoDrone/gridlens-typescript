@@ -79,7 +79,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
         } });
     } catch { /* Retained state recovery does not disable Fleet or the Wallet owner. */ }
   }
-  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1"] : []),
+  const capabilities = [...SHARED_CAPABILITIES, "browser-security-v1", ...(updates && build ? ["browser-updates-v1", "private-dashboard-updates-v1"] : []),
     ...(wallet ? ["treasury-v1", "treasury-recovery-questions-v1"] : []), ...(claims ? ["treasury-claims-pilot-v1"] : [])];
   function browserSecurityBinding() {
     const { status } = browserSecurity.read();
@@ -98,11 +98,11 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
     }
     return { version: 1, status: "ready", build, serverId: access.serverId };
   }
-  async function updateRequest(body: Record<string, unknown>, role: "operator" | "viewer"): Promise<UpdateStatus> {
+  async function updateRequest(body: Record<string, unknown>): Promise<UpdateStatus> {
     const operation = body.operation === "updates-status" ? "status" : body.operation === "updates-check" ? "check" : "start";
     const allowed = operation === "start" ? ["operation", "token", "candidateId", "idempotencyKey"] : ["operation", "token"];
     if (Object.keys(body).some(field => !allowed.includes(field))) throw new SharedHttpError(400);
-    if (operation !== "status") access.requireAccess(body.token, "operator");
+    if (operation !== "status" && !access.canUpdate(body.token)) throw new AccessError("denied");
     if (!updates || !build) {
       if (operation !== "status") throw new SharedHttpError(503);
       return { version: 1, supported: false, canUpdate: false, checking: false, current: build ?? null, candidate: null,
@@ -114,7 +114,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       ? { candidateId: body.candidateId, idempotencyKey: body.idempotencyKey } : {}) }));
     // The owner knows the code actually serving this fleet. A worker journal is
     // not permitted to substitute a hoped-for version during replacement.
-    return { ...value, current: build, canUpdate: value.supported && role === "operator" };
+    return { ...value, current: build, canUpdate: value.supported && access.canUpdate(body.token) };
   }
   async function read(body: Record<string, unknown>): Promise<unknown> {
     try {
@@ -162,7 +162,7 @@ export function createSharedService(state: PrivateState & { snapshots: FleetSnap
       }
       const device = access.requireAccess(body.token);
       const context = device.context;
-      if (["updates-status", "updates-check", "updates-start"].includes(String(body.operation))) return await updateRequest(body, device.role);
+      if (["updates-status", "updates-check", "updates-start"].includes(String(body.operation))) return await updateRequest(body);
       if (body.operation === "resolve") return context;
       if (body.operation === "status") return { version: 1, serverId: access.serverId, context,
         capabilities, providerWaits: providerWaits(), serverTimeMs: now(), mode: "shared-cache", role: device.role, ...(build ? { build } : {}),

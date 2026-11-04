@@ -107,7 +107,7 @@ function startUpdates(): void {
     start.disabled = request !== null || busy || disconnected;
     retry.hidden = !pendingReturn || running || !localError;
     if (status?.canUpdate === false && status.supported && !running && !pendingReturn) {
-      text(node("update-description"), "An operator can update this GridLens dashboard and its backend.");
+      text(node("update-description"), "This monitoring connection can view update status. Open the installation’s dashboard to install updates.");
     } else text(node("update-description"), "Update this GridLens dashboard and its backend.");
     elapsed();
   }

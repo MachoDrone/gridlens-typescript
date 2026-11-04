@@ -232,6 +232,12 @@ stay in the owner's encrypted credential volume.
 
 ## Browser-controlled updates
 
+The normal installation dashboard can check and install signed software updates
+without setting or entering a Wallet password. This works through its approved
+private HTTP address and derived HTTPS browser connection. Wallet and host
+administration retain their own authorization; paired staff viewers and separate
+monitoring installations can view update status only.
+
 The update-enabled installation offers **Update** below Hosts in the existing
 narrow sidebar. The collapsed rail keeps the same icon. A slow green pulse means
 a verified newer development release is available; reduced motion uses steady

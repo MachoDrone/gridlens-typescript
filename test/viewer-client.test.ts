@@ -97,7 +97,8 @@ test("viewer gateway serves scoped snapshots and hard-denies owner routes withou
       const response = await fetch(origin + path); assert.equal(response.status, 200); assert.equal((await response.text()).includes(f.token), false);
     }
     const before = f.mode.calls.length;
-    for (const path of ["/wallet", "/api/shared/treasury/confirm", "/setup", "/admin", "/api/shared/setup-configure", "/api/shared/revoke", "/api/shared/viewer/read"])
+    for (const path of ["/wallet", "/api/shared/treasury/confirm", "/setup", "/admin", "/api/shared/setup-configure", "/api/shared/revoke", "/api/shared/viewer/read",
+      "/api/shared/updates/check", "/api/shared/updates/start"])
       assert.equal((await fetch(origin + path, { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: "{}" })).status, 403);
     assert.equal(f.mode.calls.length, before, "blocked routes cannot contact owner");
     const history = await fetch(origin + "/api/shared/gpu-history", { method: "POST", headers: { Origin: origin, "Content-Type": "application/json" }, body: JSON.stringify({ address: f.context.addresses[0], fromAtMs: 0, toAtMs: 1000 }) });

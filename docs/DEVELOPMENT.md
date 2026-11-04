@@ -91,6 +91,13 @@ identity, signed policy, spent history and replay protection. See
 required source/hub administrator trust boundary. Installing GridLens does not
 revoke existing source-host privileges.
 
+Signed software updates are independently allowed for the installation's valid
+private dashboard grant and derived HTTPS browser sessions. Wallet setup,
+passwords and unlocks are not update prerequisites. These sessions remain viewers
+for host administration and finance; explicitly paired staff viewers and separate
+viewer installations cannot start updates. The same capability governs the
+displayed update controls and backend check/start admission, including revocation.
+
 For missing CUDA/NVIDIA fields, the approved PC monitor reads the fixed,
 unprivileged NVIDIA-SMI version command at most once per PC every five minutes.
 Readings retain SSH identity, approval epoch and observation time; one PC record

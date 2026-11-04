@@ -23,9 +23,12 @@ test("protection migration retains browsers as viewers and retires the former op
     assert.equal(access.serverId, serverId);
     assert.equal(access.resolve(token)?.role, "viewer"); assert.equal(access.resolve(browser.token)?.role, "viewer");
     assert.equal(access.resolve(oldOperator.token)?.role, "viewer");
+    assert.equal(access.canUpdate(token), true); assert.equal(access.canUpdate(browser.token), true);
+    assert.equal(access.canUpdate(oldOperator.token), false);
     assert.equal(access.pair(oldCode.code, "Old pending code").role, "viewer");
     const ownerDevice = access.pair(access.createCode("fleet", "operator").code, "Terminal authorized owner");
     access.setFleet("fleet", []); assert.equal(access.resolve(ownerDevice.token)?.role, "operator");
+    assert.equal(access.canUpdate(ownerDevice.token), true);
     assert.throws(() => access.requireDeviceAdministration(token));
     assert.throws(() => access.requireAccess(browser.token, "operator"));
     assert.ok(state.get<{ grants: { revokedAtMs: number }[] }>("gateway-access.v1")!.grants.every(row => row.revokedAtMs === at));
@@ -35,6 +38,7 @@ test("protection migration retains browsers as viewers and retires the former op
     access = createAccess(state, () => at); // A compatibility runtime cannot undo the persisted boundary.
     assert.equal(access.protectedMode, true); assert.equal(access.resolve(browser.token)?.role, "viewer");
     access.revokeGateway("fleet"); assert.equal(access.resolve(browser.token), null); assert.equal(access.resolve(second.token), null);
+    assert.equal(access.canUpdate(token), false); assert.equal(access.canUpdate(browser.token), false); assert.equal(access.canUpdate(second.token), false);
   } finally { await state.close(); await rm(directory, { recursive: true }); }
 });
 test("owner browser access is parent-bound, expires without polling extension, and is never persisted", async () => {
@@ -47,6 +51,7 @@ test("owner browser access is parent-bound, expires without polling extension, a
     const b = access.redeemSecureBrowserCode(access.createSecureBrowserCode(token, binding).code, binding);
     const owner = access.issueOwnerBrowser(a.token);
     assert.equal(access.resolve(owner.ownerToken)?.role, "operator");
+    assert.equal(access.canUpdate(owner.ownerToken), true);
     assert.equal(access.resolve(a.token)?.role, "viewer"); assert.equal(access.resolve(b.token)?.role, "viewer");
     assert.equal(access.ownerBrowserMatches(a.token, owner.ownerToken), true);
     assert.equal(access.ownerBrowserMatches(b.token, owner.ownerToken), false);
@@ -54,9 +59,33 @@ test("owner browser access is parent-bound, expires without polling extension, a
     access.setFleet("fleet", []); assert.deepEqual(access.resolve(owner.ownerToken)?.context.addresses, []);
     at += 299_999; assert.equal(access.ownerBrowserMatches(a.token, owner.ownerToken), true);
     at++; assert.equal(access.resolve(owner.ownerToken), null);
+    assert.equal(access.canUpdate(owner.ownerToken), false); assert.equal(access.canUpdate(a.token), true);
+    assert.throws(() => access.requireAccess(a.token, "operator"));
     const next = access.issueOwnerBrowser(a.token);
     assert.equal(createAccess(state, () => at).resolve(next.ownerToken), null);
     access.revokeGateway("fleet"); assert.equal(access.resolve(next.ownerToken), null);
+  } finally { await state.close(); await rm(directory, { recursive: true }); }
+});
+test("update permission requires the exact live credential, parent and current fleet", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "gridlens-protected-update-access-")), state = openSharedState(directory);
+  try {
+    let access = createAccess(state, Date.now, { protectedMode: true }); access.setFleet("fleet", []);
+    const token = randomBytes(32).toString("base64url"), gateway = access.registerGateway("fleet", token);
+    const browser = access.redeemSecureBrowserCode(access.createSecureBrowserCode(token, binding).code, binding);
+    const owner = access.pair(access.createCode("fleet", "operator").code, "Terminal owner");
+    const viewer = access.pair(access.createCode("fleet", "viewer", { followRoster: true }).code, "Paired viewer");
+    for (const value of [undefined, null, {}, "", "x".repeat(43), viewer.token]) assert.equal(access.canUpdate(value), false);
+    assert.equal(access.canUpdate(browser.token), true);
+    access.revoke(owner.token, browser.deviceId); assert.equal(access.canUpdate(browser.token), false);
+    const next = access.redeemSecureBrowserCode(access.createSecureBrowserCode(token, binding).code, binding);
+    const saved = state.get<{ fleets: unknown[]; devices: { id: string }[] }>("access.v1")!;
+    // IDs or display names alone cannot turn a paired viewer into this gateway.
+    saved.devices.find(device => device.id === viewer.deviceId)!.id = gateway.gatewayId;
+    state.set("access.v1", saved); access = createAccess(state);
+    assert.equal(access.resolve(viewer.token)?.deviceId, gateway.gatewayId); assert.equal(access.canUpdate(viewer.token), false);
+    assert.equal(access.canUpdate(next.token), true);
+    saved.fleets = []; state.set("access.v1", saved); access = createAccess(state);
+    for (const value of [token, next.token, owner.token, viewer.token]) assert.equal(access.canUpdate(value), false);
   } finally { await state.close(); await rm(directory, { recursive: true }); }
 });
 test("missing protected state fails closed instead of restoring old private-network administration", async () => {

@@ -263,6 +263,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     evidence.origins = { https: installed.config.origin, browser: web.origin };
     const initialStatus = await call(web.origin, "/api/shared/status");
     let protectedNow = (previous ?? base).treasuryProtocol === 2;
+    const initialPrivateUpdates = Array.isArray(initialStatus.capabilities) && initialStatus.capabilities.includes("private-dashboard-updates-v1");
+    const initialNeedsOwner = protectedNow && !initialPrivateUpdates;
     assert.equal(initialStatus.role, protectedNow ? "viewer" : "operator");
     assert.deepEqual((initialStatus.context as { addresses: unknown[] }).addresses, []);
     evidence.initialServerId = initialStatus.serverId;
@@ -390,8 +392,8 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const initial = snapshot(); evidence.initial = initial;
     checkTreasuryIsolation((previous ?? base).treasury);
     evidence.initialTreasuryBindings = (previous ?? base).treasury ? "Financial socket mounted only by owner and HTTPS gateway" : "Financial socket absent from all runtime roles";
-    // Protected private HTTP remains a viewer. Its owner browser receives the
-    // same one-use terminal grant as normal installation, without Wallet setup.
+    // Older protected sources require the normal one-use terminal owner grant.
+    // Newer sources expose only update authority to the private HTTP viewer.
     // Trust only this generated fixture leaf in the isolated Chromium process;
     // Node HTTPS independently verifies its CA, hostname and saved origin above.
     const browserArgs: string[] = [];
@@ -407,7 +409,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     const pageErrors: string[] = []; page.on("pageerror", error => pageErrors.push(error.message));
     let initialOwnerCookie: string | undefined;
-    if (protectedNow) {
+    if (initialNeedsOwner) {
       assert.equal(available.canUpdate, false, "The initial private HTTP viewer unexpectedly has update authority");
       const denied = await fetch(new URL("/api/shared/updates/start", web.origin), { method: "POST", headers: { Origin: web.origin, "Content-Type": "application/json" },
         body: JSON.stringify({ candidateId: available.candidate!.id, idempotencyKey: `fixture_viewer_${randomBytes(8).toString("hex")}` }), signal: AbortSignal.timeout(8000) });
@@ -431,14 +433,19 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       await page.goto(installed.config.origin, { waitUntil: "domcontentloaded" });
       evidence.initialProtectedAuthorization = { privateHttpRole: "viewer", privateHttpStartDenied: true, ownerGrant: "Coordinator.operatorCode terminal link redeemed through HTTPS browser login",
         httpsBrowserRole: "operator", updateAuthorityVerified: true, walletSetupRequired: false };
-    } else await page.goto(web.origin, { waitUntil: "domcontentloaded" });
+    } else {
+      assert.equal(available.canUpdate, true, "The private dashboard cannot start its supported update");
+      await page.goto(web.origin, { waitUntil: "domcontentloaded" });
+      evidence.initialProtectedAuthorization = { privateHttpRole: initialStatus.role, privateHttpCanUpdate: true,
+        ownerBrowserGrantRequired: false, walletSetupRequired: false };
+    }
     await page.getByRole("button", { name: "Update available", exact: true }).click();
     progress("starting a real update from the browser");
     await page.getByRole("button", { name: "Update now", exact: true }).click();
     const active = await until(readStatus, value => updateActive(value.operation));
     const duplicateBody = { candidateId: available.candidate!.id, idempotencyKey: `fixture_duplicate_${randomBytes(8).toString("hex")}` };
     let duplicate: UpdateStatus;
-    if (protectedNow) {
+    if (initialNeedsOwner) {
       assert.ok(initialOwnerCookie);
       const response = await secureCall(installed.config.origin, "/api/shared/updates/start", installed.certificate, { cookie: initialOwnerCookie, body: duplicateBody });
       assert.equal(response.status, 200); duplicate = parseUpdateStatus(response.value);
@@ -478,6 +485,7 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     let walletPassword: string | undefined, walletUnlock: string | undefined, ownerBrowserCookie: string | undefined;
     const walletDestination = "1".repeat(31) + "9";
     const targetStatus = await call(web.origin, "/api/shared/status");
+    const targetPrivateUpdates = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("private-dashboard-updates-v1");
     const claimsSupported = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("treasury-claims-pilot-v1");
     const recoverySupported = Array.isArray(targetStatus.capabilities) && targetStatus.capabilities.includes("treasury-recovery-questions-v1");
     const recoveryAnswers = Array.from({ length: 6 }, (_, index) => ({ question: `Generated private memory ${index + 1}?`, answer: `Fixture memory ${index + 1} ${randomBytes(8).toString("hex")}` }));
@@ -508,6 +516,49 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       return secureCall(installed.config.origin, `/api/shared/treasury/${path}`, installed.certificate,
         { cookie: browserCookie, ...(body === undefined ? {} : { body }), ...(unlockToken ? { unlockToken } : {}) });
     };
+    if (targetPrivateUpdates) {
+      progress("verifying private update access before Wallet setup and denying a paired viewer");
+      assert.equal(targetStatus.role, protectedNow ? "viewer" : "operator");
+      assert.equal((await readStatus()).canUpdate, true);
+      assert.equal(parseUpdateStatus(await call(web.origin, "/api/shared/updates/check", {})).canUpdate, true);
+      assert.ok(browserCookie);
+      for (const path of ["updates", "updates/check"]) {
+        const result = await secureCall(installed.config.origin, `/api/shared/${path}`, installed.certificate,
+          { cookie: browserCookie, ...(path.endsWith("check") ? { body: {} } : {}) });
+        assert.equal(result.status, 200); assert.equal(parseUpdateStatus(result.value).canUpdate, true);
+      }
+      if (base.treasury) {
+        const status = await walletCall("status"); assert.equal(status.status, 200);
+        const parsed = parseTreasuryStatus(status.value);
+        assert.ok(parsed.supported && parsed.state === "setup-required" && !parsed.pilotConsumed);
+      }
+      if (protectedNow) {
+        const devices = await secureCall(installed.config.origin, "/api/shared/devices", installed.certificate, { cookie: browserCookie });
+        assert.equal(devices.status, 401, "Private update access unexpectedly granted device administration");
+      }
+      const invitation = JSON.parse(checked(runner, ["exec", resourceName(instance, "owner"), "node", "scripts/shared-control.ts", "pair-code", "default", "viewer"])) as { code?: unknown };
+      assert.equal(typeof invitation.code, "string");
+      const login = await secureCall(installed.config.origin, "/api/shared/login", installed.certificate,
+        { body: { version: 1, code: invitation.code, deviceName: "Isolated read-only update viewer" } });
+      delete invitation.code;
+      assert.equal(login.status, 200); assert.ok(login.cookie && login.cookie.startsWith("__Host-gridlens="));
+      const viewerCookie = login.cookie.split(";", 1)[0]!;
+      const viewerStatus = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: viewerCookie });
+      assert.equal(viewerStatus.status, 200); assert.equal(viewerStatus.value.role, "viewer");
+      const readViewerUpdates = async () => {
+        const result = await secureCall(installed.config.origin, "/api/shared/updates", installed.certificate, { cookie: viewerCookie });
+        assert.equal(result.status, 200); return parseUpdateStatus(result.value);
+      };
+      for (const action of ["check", "start"]) {
+        const before = await readViewerUpdates(); assert.equal(before.canUpdate, false);
+        const denied = await secureCall(installed.config.origin, `/api/shared/updates/${action}`, installed.certificate,
+          { cookie: viewerCookie, body: action === "check" ? {} : { candidateId: available.candidate!.id, idempotencyKey: `fixture_paired_viewer_${randomBytes(8).toString("hex")}` } });
+        assertViewerUpdateDenied(denied.status, viewerStatus.value.role, before, await readViewerUpdates());
+      }
+      evidence.passwordFreeUpdateAuthorization = { privateHttpCanUpdate: true, derivedHttpsCanUpdate: true,
+        privateRole: targetStatus.role, walletSetupRequired: false, walletState: base.treasury ? "setup-required" : "unsupported",
+        deviceAdministrationDenied: protectedNow, pairedViewerCanUpdate: false, pairedViewerCheckAndStartDenied: true };
+    }
     const checkWalletHttpDenied = async (): Promise<void> => {
       for (const path of ["status", "setup", "unlock", "prepare", "confirm", "operations", "claims/status", "claims/operations", "claims/prepare", "claims/confirm",
         "recovery/status", "recovery/enroll", "recovery/challenge", "recovery/verify", "recovery/reset"]) {
@@ -546,16 +597,18 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       if (base.treasuryProtocol === 2) {
         assert.equal(targetStatus.role, "viewer", "The private gateway must become a viewer after protection");
         const beforeDenied = await readStatus();
-        const denied = await fetch(new URL("/api/shared/updates/check", web.origin), { method: "POST", headers: { Origin: web.origin, "Content-Type": "application/json" }, body: "{}" });
-        await denied.body?.cancel();
+        const checked = await fetch(new URL("/api/shared/updates/check", web.origin), { method: "POST", headers: { Origin: web.origin, "Content-Type": "application/json" }, body: "{}" });
+        await checked.body?.cancel();
         const stillReadable = await call(web.origin, "/api/shared/status");
-        assertViewerUpdateDenied(denied.status, stillReadable.role, beforeDenied, await readStatus());
+        assert.equal(stillReadable.role, "viewer");
+        if (targetPrivateUpdates) { assert.equal(checked.status, 200); assert.equal((await readStatus()).canUpdate, true); }
+        else assertViewerUpdateDenied(checked.status, stillReadable.role, beforeDenied, await readStatus());
         const granted = await walletCall("owner-browser", { version: 1 }, walletUnlock);
         const grantedCookie = granted.cookie;
         assert.equal(granted.status, 200); assert.ok(typeof grantedCookie === "string" && grantedCookie.startsWith("__Host-gridlens-owner="));
         ownerBrowserCookie = `${browserCookie}; ${grantedCookie.split(";")[0]}`;
-        evidence.protectedOwnerAuthorization = { privateGatewayRole: "viewer", privateHttpAdministrationDenied: true, privateHttpDenialStatus: 401,
-          viewerReadAccessPreserved: true, deniedRequestLeftOperationUnchanged: true, walletAuthorizedHttpsOwnerCookie: true, financialRequests: 0 };
+        evidence.protectedOwnerAuthorization = { privateGatewayRole: "viewer", privateHttpCanUpdate: targetPrivateUpdates,
+          viewerReadAccessPreserved: true, walletAuthorizedHttpsOwnerCookie: true, financialRequests: 0 };
       }
       if (recoverySupported) {
         progress("verifying local recovery through the actual HTTPS gateway");
@@ -575,9 +628,11 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
         assert.equal((await walletCall("configuration", undefined, walletUnlock)).status, 401);
         if (ownerBrowserCookie) {
           const before = await readStatus();
-          const denied = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie, body: {} });
+          const checked = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie, body: {} });
           const readable = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: ownerBrowserCookie });
-          assertViewerUpdateDenied(denied.status, readable.value.role, before, await readStatus());
+          assert.equal(readable.status, 200); assert.equal(readable.value.role, "viewer");
+          if (targetPrivateUpdates) { assert.equal(checked.status, 200); assert.equal(parseUpdateStatus(checked.value).canUpdate, true); }
+          else assertViewerUpdateDenied(checked.status, readable.value.role, before, await readStatus());
         }
         walletPassword = recoveredPassword;
         const reopened = await walletCall("unlock", { version: 1, password: walletPassword }); assert.equal(reopened.status, 200);
@@ -607,17 +662,21 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     // it can follow the new lane, while primary retains the compatible source.
     publishFixture(broken, "coordinator3");
     const next = await until(async () => {
-      if (base.treasuryProtocol === 2) {
+      if (base.treasuryProtocol === 2 && !targetPrivateUpdates) {
         const checked = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} });
         assert.equal(checked.status, 200);
       } else await call(web.origin, "/api/shared/updates/check", {});
       return readStatus();
     }, value => value.candidate?.sequence === 3, 90_000);
-    if (base.treasuryProtocol === 2) {
+    if (base.treasuryProtocol === 2 && !targetPrivateUpdates) {
       const started = await secureCall(installed.config.origin, "/api/shared/updates/start", installed.certificate, { cookie: ownerBrowserCookie!,
         body: { candidateId: next.candidate!.id, idempotencyKey: `fixture_protected_${randomBytes(8).toString("hex")}` } });
       assert.equal(started.status, 200);
     } else {
+      await page.context().clearCookies();
+      assert.equal((await page.context().cookies()).length, 0, "The private HTTP update browser retained administrative cookies");
+      await page.goto(web.origin, { waitUntil: "domcontentloaded" });
+      await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected, completed.current!.buildId, { timeout: 60_000 });
       await page.locator("#sidebar-update").click();
       await page.getByRole("button", { name: "Check for updates", exact: true }).click();
       await page.getByRole("button", { name: "Update now", exact: true }).waitFor({ state: "visible", timeout: 30_000 });
@@ -671,10 +730,13 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     assert.equal((await call(web.origin, "/api/shared/status")).serverId, initialStatus.serverId);
     if (base.treasuryProtocol === 2) {
       const beforeExpired = await readStatus();
-      const expired = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} });
+      const checked = await secureCall(installed.config.origin, "/api/shared/updates/check", installed.certificate, { cookie: ownerBrowserCookie!, body: {} });
       const readable = await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: ownerBrowserCookie! });
-      assert.equal(readable.status, 200);
-      assertViewerUpdateDenied(expired.status, readable.value.role, beforeExpired, await readStatus());
+      assert.equal(readable.status, 200); assert.equal(readable.value.role, "viewer");
+      if (targetPrivateUpdates) { assert.equal(checked.status, 200); assert.equal(parseUpdateStatus(checked.value).canUpdate, true); }
+      else assertViewerUpdateDenied(checked.status, readable.value.role, beforeExpired, await readStatus());
+    }
+    if (base.treasuryProtocol === 2 && !targetPrivateUpdates) {
       await page.goto(web.origin, { waitUntil: "domcontentloaded" });
       await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected, completed.current!.buildId, { timeout: 60_000 });
     } else {
@@ -683,14 +745,14 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
     }
     assert.equal(await page.locator("html").getAttribute("data-gridlens-fleet-ready"), completed.current!.buildId);
     evidence.rollback = { operation: restored.operation, usableBrowser: true, ...rolledBack };
-    // The protected source used its independent terminal-owner browser. Check
-    // the ordinary HTTP viewer explicitly too, without treating it as an owner.
-    if ((previous ?? base).treasuryProtocol === 2) {
+    // Private update authority never changes the protected monitoring role.
+    if (base.treasuryProtocol === 2) {
       await page.goto(web.origin, { waitUntil: "domcontentloaded" });
       await page.waitForFunction(expected => document.documentElement.dataset.gridlensFleetReady === expected, completed.current!.buildId, { timeout: 60_000 });
       const publicStatus = await call(web.origin, "/api/shared/status");
-      assert.equal(publicStatus.role, "viewer"); assert.equal((await readStatus()).canUpdate, false);
-      evidence.protectedBrowserReturn = { ownerHttpsUpdateAndRollbackUsable: true, finalPrivateHttpViewerUsable: true };
+      assert.equal(publicStatus.role, "viewer"); assert.equal((await readStatus()).canUpdate, targetPrivateUpdates);
+      evidence.protectedBrowserReturn = { initialOwnerHttpsRequired: initialNeedsOwner, finalPrivateHttpViewerUsable: true,
+        privateHttpCanUpdate: targetPrivateUpdates, rollbackStartedInPrivateBrowser: targetPrivateUpdates };
     }
     evidence.browserPageErrors = pageErrors;
     assert.deepEqual(pageErrors, []);
@@ -699,6 +761,9 @@ export async function runUpdaterDockerAcceptance(options: UpdaterAcceptanceOptio
       JSON.stringify({ operation: "revoke-vpn-web", scopeId: "default" }));
     assert.ok(browserCookie);
     assert.equal((await secureCall(installed.config.origin, "/api/shared/status", installed.certificate, { cookie: browserCookie })).status, 401);
+    for (const action of ["check", "start"])
+      assert.equal((await secureCall(installed.config.origin, `/api/shared/updates/${action}`, installed.certificate,
+        { cookie: browserCookie, body: action === "check" ? {} : { candidateId: next.candidate!.id, idempotencyKey: `fixture_revoked_${randomBytes(8).toString("hex")}` } })).status, 401);
     evidence.secureBrowserParentRevocation = "Derived browser access revoked with its private-network gateway grant";
     const channelReads = JSON.parse(helper(first.imageId, 'import{readFileSync}from"node:fs";const text=readFileSync("/update-state/fixture/fetches.jsonl","utf8");if(text.length>1048576)throw Error("Fixture trace bound");process.stdout.write(JSON.stringify(text.trim().split("\\n").filter(Boolean).map(line=>JSON.parse(line))));')) as { path: string; status: number }[];
     const prefix = "/MachoDrone/gridlens-typescript/releases/download/modern-development/";
